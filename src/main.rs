@@ -1,4 +1,9 @@
 use clap::{Parser, Subcommand};
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
+
+mod commands;
+mod nix;
 
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
@@ -12,22 +17,32 @@ struct Args {
 enum Commands {
     /// Run the update process
     Run {
-        /// File or directory to process
+        /// Nix file to evaluate
         #[arg(short, long)]
-        file: Option<String>,
+        file: String,
     },
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy(),
+        )
+        .with_ansi(true)
+        .with_level(true)
+        .with_target(true)
+        .with_timer(tracing_subscriber::fmt::time())
+        .init();
+
+
     let args = Args::parse();
 
     match args.command {
-        Commands::Run { file } => {
-            if let Some(file) = file {
-                println!("Running update with file: {}", file);
-            } else {
-                println!("Running update with no file specified");
-            }
-        }
+        Commands::Run { file } => commands::run::run(file).await?,
     }
+
+    Ok(())
 }
