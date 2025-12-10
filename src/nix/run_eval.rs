@@ -1,6 +1,6 @@
+use futures::stream::Stream;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use futures::stream::Stream;
 
 use tracing::warn;
 
@@ -51,4 +51,3 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
         }
     }
 }
-

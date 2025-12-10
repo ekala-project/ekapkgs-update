@@ -28,15 +28,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
-            .from_env_lossy(),
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
         )
         .with_ansi(true)
         .with_level(true)
         .with_target(true)
         .with_timer(tracing_subscriber::fmt::time())
         .init();
-
 
     let args = Args::parse();
 

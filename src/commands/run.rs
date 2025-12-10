@@ -1,4 +1,4 @@
-use futures::{pin_mut, StreamExt};
+use futures::{StreamExt, pin_mut};
 use tracing::{debug, info};
 
 use crate::nix;
