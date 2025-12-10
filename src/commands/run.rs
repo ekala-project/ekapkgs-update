@@ -19,14 +19,14 @@ pub async fn run(file: String) -> anyhow::Result<()> {
             Ok(NixEvalItem::Drv(drv)) => {
                 // TODO: Actually attempt to update the package
                 drvs.push(drv);
-            }
+            },
             Ok(NixEvalItem::Error(e)) => {
                 debug!("Evaluation error: {:?}", e);
                 error_count += 1;
-            }
+            },
             Err(e) => {
                 return Err(e);
-            }
+            },
         }
     }
 

@@ -1,7 +1,6 @@
 use futures::stream::Stream;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-
 use tracing::warn;
 
 use super::nix_eval_jobs::NixEvalItem;

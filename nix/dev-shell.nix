@@ -1,14 +1,18 @@
 {
   stdenv,
-  cargo,
-  rustfmt,
+  fenix,
 }:
 
 stdenv.mkDerivation {
   name = "dev";
 
   nativeBuildInputs = [
-    rustfmt
-    cargo
+    (fenix.default.withComponents [
+      "cargo"
+      "clippy"
+      "rust-std"
+      "rustc"
+      "rustfmt-preview"
+    ])
   ];
 }
