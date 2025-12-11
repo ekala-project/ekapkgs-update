@@ -3,7 +3,9 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod github;
 mod nix;
+mod rewrite;
 
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
@@ -20,6 +22,14 @@ enum Commands {
         /// Nix file to evaluate
         #[arg(short, long)]
         file: String,
+    },
+    /// Update a package in a Nix file
+    Update {
+        /// Nix file to update
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Attribute path of the package to update
+        attr_path: String,
     },
 }
 
@@ -41,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Commands::Run { file } => commands::run::run(file).await?,
+        Commands::Update { file, attr_path } => commands::update::update(file, attr_path).await?,
     }
 
     Ok(())

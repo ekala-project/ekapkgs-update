@@ -1,6 +1,8 @@
 {
   stdenv,
   fenix,
+  pkg-config,
+  openssl,
 }:
 
 stdenv.mkDerivation {
@@ -14,5 +16,10 @@ stdenv.mkDerivation {
       "rustc"
       "rustfmt-preview"
     ])
+    pkg-config
+  ];
+
+  buildInputs = [
+    openssl
   ];
 }
