@@ -42,10 +42,7 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "nix-instantiate evaluation failed: {}",
-            stderr.trim()
-        ));
+        anyhow::bail!("nix-instantiate evaluation failed: {}", stderr.trim());
     }
 
     let result = String::from_utf8_lossy(&output.stdout)
