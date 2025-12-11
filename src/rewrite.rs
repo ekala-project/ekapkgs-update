@@ -148,6 +148,49 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     Ok(result.into_owned())
 }
 
+/// Replace meta.maintainers with an empty array
+///
+/// # Arguments
+/// * `content` - The Nix file content as a string
+///
+/// # Returns
+/// A tuple of (updated_content, changed) where changed indicates if any replacement was made
+///
+/// # Errors
+/// Returns an error if:
+/// - The file has invalid Nix syntax before replacement
+/// - The replacement would create invalid syntax
+pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, bool)> {
+    // First, validate that the file parses correctly
+    let parse = rnix::Root::parse(content);
+    if !parse.errors().is_empty() {
+        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
+    }
+
+    // Pattern to match maintainers attribute with any value
+    // Handles: maintainers = [ ... ]; or maintainers = with lib; [ ... ];
+    // This matches the attribute name, =, and everything until the closing ];
+    let pattern = r"(?m)(\s*maintainers\s*=\s*)(?:with\s+[^;]*;\s*)?\[[^\]]*\]\s*;";
+    let regex = Regex::new(pattern)?;
+
+    if !regex.is_match(content) {
+        // No maintainers found, return unchanged
+        return Ok((content.to_string(), false));
+    }
+
+    // Replace with empty array, preserving the leading whitespace and attribute name
+    let result = regex.replace_all(content, "${1}[ ];");
+
+    // Validate the result parses correctly
+    let result_parse = rnix::Root::parse(&result);
+    if !result_parse.errors().is_empty() {
+        anyhow::bail!("Replacement would create invalid Nix syntax");
+    }
+
+    Ok((result.into_owned(), true))
+}
+
 /// Remove a patch from the patches array in a Nix file
 ///
 /// # Arguments
@@ -730,5 +773,108 @@ mod tests {
 
         // Verify the buildInputs line maintains its indentation
         assert!(updated.contains("  buildInputs = "));
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_simple() {
+        let content = r#"{
+  pname = "mypackage";
+  meta = {
+    description = "A package";
+    maintainers = [ maintainers.alice maintainers.bob ];
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(changed);
+        assert!(updated.contains("maintainers = [ ];"));
+        assert!(!updated.contains("alice"));
+        assert!(!updated.contains("bob"));
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_with_lib() {
+        let content = r#"{
+  meta = {
+    maintainers = with lib.maintainers; [ alice bob charlie ];
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(changed);
+        assert!(updated.contains("maintainers = [ ];"));
+        assert!(!updated.contains("with lib.maintainers"));
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_no_maintainers() {
+        let content = r#"{
+  pname = "mypackage";
+  meta = {
+    description = "A package";
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(!changed);
+        assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_already_empty() {
+        let content = r#"{
+  meta = {
+    maintainers = [ ];
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(changed); // Still counts as changed because pattern matches
+        assert!(updated.contains("maintainers = [ ];"));
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_multiple_attributes() {
+        let content = r#"{
+  meta = {
+    description = "A package";
+    homepage = "https://example.com";
+    maintainers = [ maintainers.alice ];
+    license = licenses.mit;
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(changed);
+        assert!(updated.contains("maintainers = [ ];"));
+        assert!(updated.contains("description"));
+        assert!(updated.contains("homepage"));
+        assert!(updated.contains("license"));
+    }
+
+    #[test]
+    fn test_replace_maintainers_with_empty_preserves_indentation() {
+        let content = r#"{
+  meta = {
+    maintainers = with maintainers; [ alice ];
+  };
+}"#;
+
+        let result = replace_maintainers_with_empty(content);
+        assert!(result.is_ok());
+        let (updated, changed) = result.unwrap();
+        assert!(changed);
+        // Check that indentation is preserved
+        assert!(updated.contains("    maintainers = [ ];"));
     }
 }
