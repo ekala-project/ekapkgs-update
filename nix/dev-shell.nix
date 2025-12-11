@@ -16,10 +16,5 @@ stdenv.mkDerivation {
       "rustc"
       "rustfmt-preview"
     ])
-    pkg-config
-  ];
-
-  buildInputs = [
-    openssl
   ];
 }

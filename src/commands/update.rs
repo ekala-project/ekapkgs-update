@@ -1,5 +1,6 @@
 use std::env;
 
+use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -8,7 +9,9 @@ use crate::github::{
     extract_version_from_tag, fetch_latest_github_release, is_version_newer, parse_github_url,
 };
 use crate::nix::eval_nix_expr;
-use crate::rewrite::find_and_update_attr;
+use crate::rewrite::{
+    find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
+};
 
 pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
     info!("Checking for update script for {}", attr_path);
@@ -112,7 +115,7 @@ async fn extract_package_metadata(
 
     let version = eval_nix_expr(&version_expr)
         .await
-        .map_err(|_| anyhow::anyhow!("Could not determine package version"))?;
+        .context("Could not determine package version")?;
 
     // Try to get source URL
     let url_expr = format!(
@@ -152,11 +155,8 @@ async fn update_nix_file(
     new_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     debug!("Updating Nix file at {} using AST manipulation", file_path);
-
-    // Read the file
     let content = tokio::fs::read_to_string(file_path).await?;
 
-    // Update version attribute
     let updated_content =
         find_and_update_attr(&content, "version", new_version, Some(old_version))?;
     debug!(
@@ -205,6 +205,36 @@ fn extract_hash_from_error(stderr: &str) -> Option<String> {
     Some(caps.get(1)?.as_str().to_string())
 }
 
+/// Detect reversed patch errors and extract the patch filename
+///
+/// Looks for "Reversed (or previously applied) patch detected!" in the last 20 lines
+/// and extracts the patch name from the preceding "applying patch" line.
+///
+/// Returns the patch filename to be removed from the patches array.
+fn detect_reversed_patch(stderr: &str) -> Option<String> {
+    // Get last 20 lines of stderr
+    let lines: Vec<&str> = stderr.lines().collect();
+    let start = lines.len().saturating_sub(20);
+    let last_lines = &lines[start..];
+
+    // Look for the reversed patch error message
+    for (i, line) in last_lines.iter().enumerate() {
+        if line.contains("Reversed (or previously applied) patch detected!") {
+            // Look backward for the "applying patch" line
+            for j in (0..i).rev() {
+                let prev_line = last_lines[j];
+                // Pattern: "applying patch /nix/store/${hash}-${name}"
+                let patch_regex = Regex::new(r"applying patch /nix/store/[^-]+-(.+)").ok()?;
+                if let Some(caps) = patch_regex.captures(prev_line) {
+                    return Some(caps.get(1)?.as_str().to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Build Nix expression and return stdout/stderr
 async fn build_nix_expr(
     eval_entry_point: &str,
@@ -250,10 +280,10 @@ async fn update_from_file_path(
     // Step 2: Parse source URL for GitHub
     let src_url = metadata
         .src_url
-        .ok_or_else(|| anyhow::anyhow!("No source URL found for package"))?;
+        .context("No source URL found for package")?;
 
-    let github_repo = parse_github_url(&src_url)
-        .ok_or_else(|| anyhow::anyhow!("Source is not from GitHub, skipping generic update"))?;
+    let github_repo =
+        parse_github_url(&src_url).context("Source is not from GitHub, skipping generic update")?;
 
     info!("GitHub repo: {}/{}", github_repo.owner, github_repo.repo);
 
@@ -354,14 +384,62 @@ async fn update_from_file_path(
 
     info!("Source build successful");
 
-    // Step 10: Build full package to verify
-    let (success, _stdout, stderr) = build_nix_expr(&eval_entry_point, &attr_path, None).await?;
+    // Step 10: Build full package to verify with reversed patch recovery
+    loop {
+        let (success, _stdout, stderr) =
+            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
 
-    if !success {
-        warn!("Full package build failed:\n{}", stderr);
-        return Err(anyhow::anyhow!(
-            "Package build failed after update. You may need to manually fix build issues."
-        ));
+        if success {
+            // Build succeeded - check if patches array is now empty
+            let content = tokio::fs::read_to_string(&file_location).await?;
+            if is_patches_array_empty(&content) {
+                match remove_patches_attribute(&content) {
+                    Ok(updated_content) => {
+                        tokio::fs::write(&file_location, updated_content).await?;
+                        debug!("Removed empty patches attribute");
+                    },
+                    Err(e) => {
+                        debug!("Could not remove empty patches attribute: {}", e);
+                        // Not a critical error, continue
+                    },
+                }
+            }
+            break;
+        }
+
+        // Build failed - check for reversed patch errors
+        if let Some(patch_name) = detect_reversed_patch(&stderr) {
+            debug!("Detected reversed patch: {}", patch_name);
+
+            // Read the file
+            let content = tokio::fs::read_to_string(&file_location).await?;
+
+            // Remove the patch
+            match remove_patch_from_array(&content, &patch_name) {
+                Ok(updated_content) => {
+                    // Write the updated content back
+                    tokio::fs::write(&file_location, updated_content).await?;
+                    debug!("Removed obsolete patch: {}", patch_name);
+                    // Continue loop to retry the build
+                },
+                Err(e) => {
+                    warn!("Failed to remove patch {}: {}", patch_name, e);
+                    // Can't remove the patch, return the original error
+                    return Err(anyhow::anyhow!(
+                        "Package build failed after update. Detected reversed patch but couldn't \
+                         remove it: {}\n{}",
+                        e,
+                        stderr
+                    ));
+                },
+            }
+        } else {
+            // No reversed patch detected - this is a real build failure
+            warn!("Full package build failed:\n{}", stderr);
+            return Err(anyhow::anyhow!(
+                "Package build failed after update. You may need to manually fix build issues."
+            ));
+        }
     }
 
     info!(
@@ -396,6 +474,47 @@ error: hash mismatch in fixed-output derivation
         let stderr = "Some other error message";
         let result = extract_hash_from_error(stderr);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_reversed_patch() {
+        let stderr = r#"
+unpacking sources
+unpacking source archive /nix/store/abc123-source.tar.gz
+source root is source
+patching sources
+applying patch /nix/store/xyz789-fix-build.patch
+patching file src/main.c
+Reversed (or previously applied) patch detected!  Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file src/main.c.rej
+"#;
+        let result = detect_reversed_patch(stderr);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "fix-build.patch");
+    }
+
+    #[test]
+    fn test_detect_reversed_patch_no_match() {
+        let stderr = "Some other build error message";
+        let result = detect_reversed_patch(stderr);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_reversed_patch_in_last_20_lines() {
+        // Create a stderr with more than 20 lines, with the reversed patch error near the end
+        let mut lines = Vec::new();
+        for i in 0..30 {
+            lines.push(format!("build output line {}", i));
+        }
+        lines.push("applying patch /nix/store/hash123-obsolete.patch".to_string());
+        lines.push("patching file test.c".to_string());
+        lines.push("Reversed (or previously applied) patch detected!".to_string());
+        let stderr = lines.join("\n");
+
+        let result = detect_reversed_patch(&stderr);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "obsolete.patch");
     }
 
     #[test]
