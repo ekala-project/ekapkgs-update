@@ -31,6 +31,11 @@ enum Commands {
         /// Attribute path of the package to update
         attr_path: String,
     },
+    /// Prune maintainers from all .nix files in a directory
+    PruneMaintainers {
+        /// Directory to process
+        directory: String,
+    },
 }
 
 #[tokio::main]
@@ -52,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
     match args.command {
         Commands::Run { file } => commands::run::run(file).await?,
         Commands::Update { file, attr_path } => commands::update::update(file, attr_path).await?,
+        Commands::PruneMaintainers { directory } => {
+            commands::prune_maintainers::prune_maintainers(directory).await?
+        },
     }
 
     Ok(())
