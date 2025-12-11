@@ -37,9 +37,7 @@ pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
 
         let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
             if position.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "Empty position returned from meta.position"
-                ));
+                anyhow::bail!("Empty position returned from meta.position");
             }
             // Parse position string (format: "file:line")
             let (file_path, _line_str) = position
@@ -57,9 +55,7 @@ pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
     let script_path = script_path_result?;
 
     if script_path.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Empty script path returned from nix-instantiate"
-        ));
+        anyhow::bail!("Empty script path returned from nix-instantiate");
     }
 
     info!("Found update script: {}", script_path);
@@ -74,10 +70,10 @@ pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
         .await?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "Update script failed with exit code: {}",
             status.code().unwrap_or(-1)
-        ));
+        );
     }
 
     info!("Update script completed successfully for {}", &attr_path);
@@ -345,9 +341,7 @@ async fn update_from_file_path(
 
     if success {
         warn!("Build succeeded with invalid hash - this shouldn't happen");
-        return Err(anyhow::anyhow!(
-            "Expected hash mismatch error but build succeeded"
-        ));
+        anyhow::bail!("Expected hash mismatch error but build succeeded");
     }
 
     let correct_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
@@ -376,10 +370,7 @@ async fn update_from_file_path(
         build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
 
     if !success {
-        return Err(anyhow::anyhow!(
-            "Source build failed after hash update:\n{}",
-            stderr
-        ));
+        anyhow::bail!("Source build failed after hash update:\n{}", stderr);
     }
 
     info!("Source build successful");
@@ -425,20 +416,20 @@ async fn update_from_file_path(
                 Err(e) => {
                     warn!("Failed to remove patch {}: {}", patch_name, e);
                     // Can't remove the patch, return the original error
-                    return Err(anyhow::anyhow!(
+                    anyhow::bail!(
                         "Package build failed after update. Detected reversed patch but couldn't \
                          remove it: {}\n{}",
                         e,
                         stderr
-                    ));
+                    );
                 },
             }
         } else {
             // No reversed patch detected - this is a real build failure
             warn!("Full package build failed:\n{}", stderr);
-            return Err(anyhow::anyhow!(
+            anyhow::bail!(
                 "Package build failed after update. You may need to manually fix build issues."
-            ));
+            );
         }
     }
 

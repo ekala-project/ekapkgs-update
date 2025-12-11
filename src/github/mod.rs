@@ -93,10 +93,10 @@ async fn fetch_github_tags(
     let response = request.send().await?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "GitHub tags API request failed with status: {}",
             response.status()
-        ));
+        );
     }
 
     let tags: Vec<GithubTag> = response.json().await?;
@@ -188,19 +188,15 @@ pub async fn fetch_latest_github_release(
                 prerelease: false,
             });
         } else {
-            return Err(anyhow::anyhow!(
-                "No releases or tags found for {}/{}",
-                owner,
-                repo
-            ));
+            anyhow::bail!("No releases or tags found for {}/{}", owner, repo);
         }
     }
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
+        anyhow::bail!(
             "GitHub API request failed with status: {}",
             response.status()
-        ));
+        );
     }
 
     let release: GithubRelease = response.json().await?;

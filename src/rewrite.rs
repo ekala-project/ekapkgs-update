@@ -62,10 +62,7 @@ pub fn find_and_update_attr(
 
     // Check if the attribute exists
     if !re.is_match(content) {
-        return Err(anyhow::anyhow!(
-            "Attribute '{}' not found in Nix file",
-            attr_name
-        ));
+        anyhow::bail!("Attribute '{}' not found in Nix file", attr_name);
     }
 
     // Replace the attribute value
@@ -76,9 +73,7 @@ pub fn find_and_update_attr(
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        return Err(anyhow::anyhow!(
-            "Replacement would create invalid Nix syntax"
-        ));
+        anyhow::bail!("Replacement would create invalid Nix syntax");
     }
 
     Ok(result.into_owned())
@@ -124,10 +119,7 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
         let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
-        return Err(anyhow::anyhow!(
-            "Failed to parse Nix file: {}",
-            errors.join(", ")
-        ));
+        anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
     }
 
     // Pattern to match the entire patches attribute (including comments)
@@ -137,9 +129,7 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     let regex = Regex::new(pattern)?;
 
     if !regex.is_match(content) {
-        return Err(anyhow::anyhow!(
-            "Empty patches attribute not found in Nix file"
-        ));
+        anyhow::bail!("Empty patches attribute not found in Nix file");
     }
 
     let result = regex.replace(content, "");
@@ -147,7 +137,7 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        return Err(anyhow::anyhow!("Removal would create invalid Nix syntax"));
+        anyhow::bail!("Removal would create invalid Nix syntax");
     }
 
     Ok(result.into_owned())
@@ -197,7 +187,7 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
         // Validate the result parses correctly
         let result_parse = rnix::Root::parse(&result);
         if !result_parse.errors().is_empty() {
-            return Err(anyhow::anyhow!("Removal would create invalid Nix syntax"));
+            anyhow::bail!("Removal would create invalid Nix syntax");
         }
 
         return Ok(result.into_owned());
@@ -219,17 +209,14 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
         // Validate the result parses correctly
         let result_parse = rnix::Root::parse(&result);
         if !result_parse.errors().is_empty() {
-            return Err(anyhow::anyhow!("Removal would create invalid Nix syntax"));
+            anyhow::bail!("Removal would create invalid Nix syntax");
         }
 
         return Ok(result.into_owned());
     }
 
     // If we didn't find the patch, return an error
-    Err(anyhow::anyhow!(
-        "Patch '{}' not found in patches array",
-        patch_name
-    ))
+    anyhow::bail!("Patch '{}' not found in patches array", patch_name)
 }
 
 #[cfg(test)]
