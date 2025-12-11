@@ -89,13 +89,17 @@ pub fn find_and_update_attr(
 /// otherwise
 pub fn is_patches_array_empty(content: &str) -> bool {
     // Use regex to detect empty patches array, ignoring comments
-    // Matches: patches = [ ]; or patches = [ # comment ]; or patches = [\n  # comment\n];
+    // Matches: patches = [ ]; or patches = [ # comment ]; or patches = [ /* comment */ ];
     // Pattern explanation:
-    // - (?m)^ - start of line (multiline mode)
+    // - (?ms)^ - start of line (multiline and dotall modes)
     // - \s*patches\s*=\s*\[ - matches "patches = ["
-    // - (?:\s*(?:#[^\n]*)?)* - matches any number of lines with only whitespace/comments
-    // - \s*\]\s*; - matches "];"
-    let empty_pattern = Regex::new(r"(?ms)^\s*patches\s*=\s*\[\s*(?:#[^\n]*\n?\s*)*\]\s*;").ok();
+    // - (?:\s|#[^\n]*|/\*.*?\*/)* - matches any number of:
+    //   - whitespace
+    //   - single-line comments (# ...)
+    //   - multiline comments (/* ... */)
+    // - \]\s*; - matches "];"
+    let empty_pattern =
+        Regex::new(r"(?ms)^\s*patches\s*=\s*\[(?:\s|#[^\n]*|/\*.*?\*/)*\]\s*;").ok();
 
     if let Some(regex) = empty_pattern {
         regex.is_match(content)
@@ -123,9 +127,10 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     }
 
     // Pattern to match the entire patches attribute (including comments)
-    // Matches: patches = [ ]; or patches = [ # comment ]; or multiline with only comments
+    // Matches: patches = [ ]; or patches = [ # comment ]; or patches = [ /* comment */ ];
     // Only removes the line itself and its immediate newline, preserving following whitespace
-    let pattern = r"\n?(?m)^\s*patches\s*=\s*\[\s*(?:#[^\n]*\n?\s*)*\]\s*;";
+    // Handles both # single-line and /* */ multiline comments
+    let pattern = r"\n?(?ms)^\s*patches\s*=\s*\[(?:\s|#[^\n]*|/\*.*?\*/)*\]\s*;";
     let regex = Regex::new(pattern)?;
 
     if !regex.is_match(content) {
@@ -500,6 +505,46 @@ mod tests {
     }
 
     #[test]
+    fn test_is_patches_array_empty_with_multiline_comment_inline() {
+        let content = r#"{
+  pname = "mypackage";
+
+  patches = [ /* all patches removed */ ];
+}"#;
+
+        assert!(is_patches_array_empty(content));
+    }
+
+    #[test]
+    fn test_is_patches_array_empty_with_multiline_comment_spanning_lines() {
+        let content = r#"{
+  pname = "mypackage";
+  version = "1.0.0";
+
+  patches = [
+    /* This patch was removed
+       because it's no longer needed
+       after the upstream fix */
+  ];
+}"#;
+
+        assert!(is_patches_array_empty(content));
+    }
+
+    #[test]
+    fn test_is_patches_array_empty_with_mixed_comment_styles() {
+        let content = r#"{
+  patches = [
+    # Single line comment
+    /* Multiline comment */
+    # Another single line
+  ];
+}"#;
+
+        assert!(is_patches_array_empty(content));
+    }
+
+    #[test]
     fn test_remove_patches_attribute() {
         let content = r#"{
   pname = "mypackage";
@@ -583,6 +628,66 @@ mod tests {
         let updated = result.unwrap();
         assert!(!updated.contains("patches"));
         assert!(!updated.contains("obsolete"));
+    }
+
+    #[test]
+    fn test_remove_patches_attribute_with_multiline_comment() {
+        let content = r#"{
+  pname = "mypackage";
+  version = "1.0.0";
+
+  patches = [ /* Patches no longer needed */ ];
+
+  src = fetchurl {
+    url = "https://example.com/file.tar.gz";
+  };
+}"#;
+
+        let result = remove_patches_attribute(content);
+        assert!(result.is_ok());
+        let updated = result.unwrap();
+        assert!(!updated.contains("patches"));
+        assert!(!updated.contains("Patches no longer needed"));
+        assert!(updated.contains("pname"));
+        assert!(updated.contains("src"));
+    }
+
+    #[test]
+    fn test_remove_patches_attribute_with_multiline_comment_spanning() {
+        let content = r#"{
+  pname = "mypackage";
+
+  patches = [
+    /* These patches were removed
+       after upstream merged the fixes */
+  ];
+
+  buildInputs = [ pkg1 ];
+}"#;
+
+        let result = remove_patches_attribute(content);
+        assert!(result.is_ok());
+        let updated = result.unwrap();
+        assert!(!updated.contains("patches"));
+        assert!(!updated.contains("upstream merged"));
+        assert!(updated.contains("buildInputs"));
+    }
+
+    #[test]
+    fn test_remove_patches_attribute_with_mixed_comments() {
+        let content = r#"{
+  patches = [
+    # Hash comment
+    /* Block comment */
+  ];
+}"#;
+
+        let result = remove_patches_attribute(content);
+        assert!(result.is_ok());
+        let updated = result.unwrap();
+        assert!(!updated.contains("patches"));
+        assert!(!updated.contains("Hash comment"));
+        assert!(!updated.contains("Block comment"));
     }
 
     #[test]
