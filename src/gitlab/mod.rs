@@ -20,17 +20,10 @@ pub struct GitlabProject {
     pub project: String,
 }
 
-impl GitlabProject {
-    /// Get URL-encoded project path for API calls
-    pub fn encoded_path(&self) -> String {
-        format!("{}%2F{}", self.owner, self.project)
-    }
-}
-
 /// GitLab tag information from the API
 #[derive(Debug, Deserialize)]
-struct GitlabTag {
-    name: String,
+pub struct GitlabTag {
+    pub name: String,
 }
 
 /// Parse GitLab URL to extract owner/group and project
@@ -68,7 +61,7 @@ pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
 
 /// Fetch tags from GitLab API
 ///
-/// Internal helper function to retrieve all tags from a repository.
+/// Retrieves all tags from a repository.
 /// Tags are returned in reverse chronological order (newest first).
 ///
 /// # Arguments
@@ -78,7 +71,7 @@ pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
 ///
 /// # Returns
 /// A vector of tags, or an empty vector if no tags exist
-async fn fetch_gitlab_tags(
+pub async fn fetch_gitlab_tags(
     owner: &str,
     project: &str,
     token: Option<&str>,
@@ -112,10 +105,10 @@ async fn fetch_gitlab_tags(
     Ok(tags)
 }
 
-/// Fetch latest release from GitLab API
+/// Fetch all releases from GitLab API
 ///
-/// Makes an API call to GitLab to retrieve the latest release for a given project.
-/// Optionally authenticates with a GitLab token for higher rate limits.
+/// Retrieves all releases from a project.
+/// Releases are returned in reverse chronological order (newest first).
 ///
 /// # Arguments
 /// * `owner` - Project owner/group
@@ -123,46 +116,19 @@ async fn fetch_gitlab_tags(
 /// * `token` - Optional GitLab personal access token for authentication
 ///
 /// # Returns
-/// The latest release information from GitLab
-///
-/// # Rate Limits
-/// - **Without token**: ~300 requests per hour (varies by instance)
-/// - **With token**: Higher limits (varies by instance settings)
-///
-/// # Errors
-/// Returns an error if:
-/// - The API request fails
-/// - The response cannot be deserialized
-/// - The HTTP status is not successful
-/// - Rate limit is exceeded
-///
-/// # Example
-/// ```no_run
-/// use ekapkgs_update::gitlab::fetch_latest_gitlab_release;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// // With authentication
-/// let token = std::env::var("GITLAB_TOKEN").ok();
-/// let release = fetch_latest_gitlab_release("owner", "project", token.as_deref()).await?;
-/// println!("Latest version: {}", release.tag_name);
-///
-/// // Without authentication (lower rate limits)
-/// let release = fetch_latest_gitlab_release("owner", "project", None).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn fetch_latest_gitlab_release(
+/// A vector of releases
+pub async fn fetch_gitlab_releases(
     owner: &str,
     project: &str,
     token: Option<&str>,
-) -> anyhow::Result<GitlabRelease> {
+) -> anyhow::Result<Vec<GitlabRelease>> {
     let encoded_path = format!("{}%2F{}", owner, project);
     let url = format!(
         "https://gitlab.com/api/v4/projects/{}/releases",
         encoded_path
     );
 
-    debug!("Fetching latest release from {}", url);
+    debug!("Fetching all releases from {}", url);
 
     let client = reqwest::Client::new();
     let mut request = client.get(&url).header("User-Agent", "ekapkgs-update");
@@ -174,48 +140,15 @@ pub async fn fetch_latest_gitlab_release(
 
     let response = request.send().await?;
 
-    // If releases endpoint returns 404, fallback to tags
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        debug!(
-            "No releases found for {}/{}, falling back to tags",
-            owner, project
-        );
-        let tags = fetch_gitlab_tags(owner, project, token).await?;
-
-        if let Some(first_tag) = tags.first() {
-            let version = crate::vcs_sources::extract_version_from_tag(&first_tag.name);
-            debug!(
-                "Using latest tag: {} (extracted version: {})",
-                first_tag.name, version
-            );
-            return Ok(GitlabRelease {
-                tag_name: version.to_string(),
-                _name: None,
-                upcoming_release: false,
-            });
-        } else {
-            anyhow::bail!("No releases or tags found for {}/{}", owner, project);
-        }
-    }
-
     if !response.status().is_success() {
         anyhow::bail!(
-            "GitLab API request failed with status: {}",
+            "GitLab releases API request failed with status: {}",
             response.status()
         );
     }
 
     let releases: Vec<GitlabRelease> = response.json().await?;
-
-    // Find the first non-prerelease (upcoming_release: false)
-    let release = releases
-        .into_iter()
-        .find(|r| !r.upcoming_release)
-        .ok_or_else(|| {
-            anyhow::anyhow!("No non-prerelease releases found for {}/{}", owner, project)
-        })?;
-
-    Ok(release)
+    Ok(releases)
 }
 
 #[cfg(test)]
@@ -257,23 +190,5 @@ mod tests {
         let url = "https://github.com/owner/repo";
         let result = parse_gitlab_url(url);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_encoded_path() {
-        let project = GitlabProject {
-            owner: "owner".to_string(),
-            project: "project".to_string(),
-        };
-        assert_eq!(project.encoded_path(), "owner%2Fproject");
-    }
-
-    #[test]
-    fn test_encoded_path_with_special_chars() {
-        let project = GitlabProject {
-            owner: "my-group".to_string(),
-            project: "my-project".to_string(),
-        };
-        assert_eq!(project.encoded_path(), "my-group%2Fmy-project");
     }
 }

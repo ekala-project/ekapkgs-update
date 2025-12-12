@@ -33,6 +33,9 @@ enum Commands {
         file: String,
         /// Attribute path of the package to update
         attr_path: String,
+        /// Version selection strategy: latest, major, minor, or patch
+        #[arg(long, default_value = "latest")]
+        semver: String,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -59,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Commands::Run { file } => commands::run::run(file).await?,
-        Commands::Update { file, attr_path } => commands::update::update(file, attr_path).await?,
+        Commands::Update {
+            file,
+            attr_path,
+            semver,
+        } => commands::update::update(file, attr_path, semver).await?,
         Commands::PruneMaintainers { directory } => {
             commands::prune_maintainers::prune_maintainers(directory).await?
         },
