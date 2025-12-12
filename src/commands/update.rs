@@ -9,6 +9,7 @@ use crate::github::{
     extract_version_from_tag, fetch_latest_github_release, is_version_newer, parse_github_url,
 };
 use crate::nix::eval_nix_expr;
+use crate::package::PackageMetadata;
 use crate::rewrite::{
     find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
 };
@@ -79,80 +80,6 @@ pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
     info!("Update script completed successfully for {}", &attr_path);
 
     Ok(())
-}
-
-// Data structure for package metadata
-#[derive(Debug)]
-struct PackageMetadata {
-    version: String,
-    src_url: Option<String>,
-    output_hash: Option<String>,
-    cargo_hash: Option<String>,
-}
-
-/// Extract package metadata from Nix evaluation
-async fn extract_package_metadata(
-    eval_entry_point: &str,
-    attr_path: &str,
-) -> anyhow::Result<PackageMetadata> {
-    debug!("Extracting metadata for {}", attr_path);
-
-    // Normalize the entry point to a valid Nix filepath
-    let eval_path = if eval_entry_point.starts_with('/') || eval_entry_point.starts_with('.') {
-        eval_entry_point.to_string()
-    } else {
-        format!("./{}", eval_entry_point)
-    };
-
-    // Try to get version directly
-    let version_expr = format!(
-        "with import {} {{ }}; {}.version or (builtins.parseDrvName {}.name).version",
-        eval_path, attr_path, attr_path
-    );
-
-    let version = eval_nix_expr(&version_expr)
-        .await
-        .context("Could not determine package version")?;
-
-    // Try to get source URL
-    let url_expr = format!(
-        "with import {} {{ }}; builtins.toString ({}.src.url or {}.src.urls or \"\")",
-        eval_path, attr_path, attr_path
-    );
-
-    let src_url = eval_nix_expr(&url_expr)
-        .await
-        .ok()
-        .and_then(|url| if url.is_empty() { None } else { Some(url) });
-
-    // Try to get output hash
-    let hash_expr = format!(
-        "with import {} {{ }}; {}.src.outputHash or \"\"",
-        eval_path, attr_path
-    );
-
-    let output_hash = eval_nix_expr(&hash_expr)
-        .await
-        .ok()
-        .and_then(|hash| if hash.is_empty() { None } else { Some(hash) });
-
-    // Try to get cargo hash (for Rust packages)
-    let cargo_hash_expr = format!(
-        "with import {} {{ }}; {}.cargoHash or \"\"",
-        eval_path, attr_path
-    );
-
-    let cargo_hash = eval_nix_expr(&cargo_hash_expr)
-        .await
-        .ok()
-        .and_then(|hash| if hash.is_empty() { None } else { Some(hash) });
-
-    Ok(PackageMetadata {
-        version,
-        src_url,
-        output_hash,
-        cargo_hash,
-    })
 }
 
 /// Update version and hash attributes in Nix file using AST manipulation
@@ -295,7 +222,7 @@ async fn update_from_file_path(
     );
 
     // Step 1: Extract package metadata
-    let metadata = extract_package_metadata(&eval_entry_point, &attr_path).await?;
+    let metadata = PackageMetadata::from_attr_path(&eval_entry_point, &attr_path).await?;
     info!("Current version: {}", metadata.version);
 
     // Step 2: Parse source URL for GitHub

@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod commands;
 mod github;
 mod nix;
+mod package;
 mod rewrite;
 
 #[derive(Parser)]
