@@ -87,6 +87,7 @@ struct PackageMetadata {
     version: String,
     src_url: Option<String>,
     output_hash: Option<String>,
+    cargo_hash: Option<String>,
 }
 
 /// Extract package metadata from Nix evaluation
@@ -135,10 +136,22 @@ async fn extract_package_metadata(
         .ok()
         .and_then(|hash| if hash.is_empty() { None } else { Some(hash) });
 
+    // Try to get cargo hash (for Rust packages)
+    let cargo_hash_expr = format!(
+        "with import {} {{ }}; {}.cargoHash or \"\"",
+        eval_path, attr_path
+    );
+
+    let cargo_hash = eval_nix_expr(&cargo_hash_expr)
+        .await
+        .ok()
+        .and_then(|hash| if hash.is_empty() { None } else { Some(hash) });
+
     Ok(PackageMetadata {
         version,
         src_url,
         output_hash,
+        cargo_hash,
     })
 }
 
@@ -190,6 +203,18 @@ async fn update_nix_file(
 
     // Write back to file
     tokio::fs::write(file_path, final_content).await?;
+    Ok(())
+}
+
+/// Update cargoHash attribute in Nix file
+async fn update_cargo_hash(file_path: &str, old_hash: &str, new_hash: &str) -> anyhow::Result<()> {
+    debug!("Updating cargoHash in {} using AST manipulation", file_path);
+    let content = tokio::fs::read_to_string(file_path).await?;
+
+    let updated_content = find_and_update_attr(&content, "cargoHash", new_hash, Some(old_hash))?;
+    debug!("Updated cargoHash attribute: {} -> {}", old_hash, new_hash);
+
+    tokio::fs::write(file_path, updated_content).await?;
     Ok(())
 }
 
@@ -374,6 +399,40 @@ async fn update_from_file_path(
     }
 
     info!("Source build successful");
+
+    // Step 9.5: For Rust packages, update cargoHash
+    if let Some(old_cargo_hash) = &metadata.cargo_hash {
+        info!("Detected Rust package, updating cargoHash");
+
+        // Set invalid cargo hash
+        let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        update_cargo_hash(&file_location, old_cargo_hash, invalid_cargo_hash).await?;
+
+        info!("Set invalid cargoHash in {}", file_location);
+
+        // Build full package to get correct cargo hash
+        let (success, _stdout, stderr) =
+            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
+
+        if success {
+            warn!("Build succeeded with invalid cargoHash - this shouldn't happen");
+            anyhow::bail!("Expected cargoHash mismatch error but build succeeded");
+        }
+
+        let correct_cargo_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not extract correct cargoHash from build error:\n{}",
+                stderr
+            )
+        })?;
+
+        info!("Extracted correct cargoHash: {}", correct_cargo_hash);
+
+        // Update cargoHash with correct value
+        update_cargo_hash(&file_location, invalid_cargo_hash, &correct_cargo_hash).await?;
+
+        info!("Updated cargoHash in {}", file_location);
+    }
 
     // Step 10: Build full package to verify with reversed patch recovery
     loop {
