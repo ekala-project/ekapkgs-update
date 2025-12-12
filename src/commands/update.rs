@@ -1,18 +1,14 @@
-use std::env;
-
 use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::github::{
-    extract_version_from_tag, fetch_latest_github_release, is_version_newer, parse_github_url,
-};
 use crate::nix::eval_nix_expr;
 use crate::package::PackageMetadata;
 use crate::rewrite::{
     find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
 };
+use crate::vcs_sources::UpstreamSource;
 
 pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
     info!("Checking for update script for {}", attr_path);
@@ -240,43 +236,29 @@ async fn update_from_file_path(
     let metadata = PackageMetadata::from_attr_path(&eval_entry_point, &attr_path).await?;
     info!("Current version: {}", metadata.version);
 
-    // Step 2: Parse source URL for GitHub
+    // Step 2: Parse source URL and create upstream source
     let src_url = metadata
         .src_url
         .context("No source URL found for package")?;
 
-    let github_repo =
-        parse_github_url(&src_url).context("Source is not from GitHub, skipping generic update")?;
+    let upstream_source = UpstreamSource::from_url(&src_url)
+        .context("Source is not from a supported VCS platform (GitHub, GitLab)")?;
 
-    info!("GitHub repo: {}/{}", github_repo.owner, github_repo.repo);
+    info!("{}", upstream_source.description());
 
-    // Step 3: Get GitHub token from environment (optional)
-    let github_token = env::var("GITHUB_TOKEN").ok();
+    // Step 3: Fetch latest release
+    let latest_release = upstream_source.get_latest_release().await?;
 
-    if github_token.is_none() {
-        warn!(
-            "GITHUB_TOKEN not set - using unauthenticated GitHub API (60 requests/hour rate limit)"
-        );
-    }
-
-    // Step 4: Fetch latest release
-    let latest_release = fetch_latest_github_release(
-        &github_repo.owner,
-        &github_repo.repo,
-        github_token.as_deref(),
-    )
-    .await?;
-
-    if latest_release.prerelease {
+    if latest_release.is_prerelease {
         info!("Latest release is a prerelease, skipping");
         return Ok(());
     }
 
-    let new_version = extract_version_from_tag(&latest_release.tag_name).to_string();
+    let new_version = UpstreamSource::get_version(&latest_release);
     info!("Latest release: {}", new_version);
 
-    // Step 5: Compare versions
-    if !is_version_newer(&metadata.version, &new_version)? {
+    // Step 4: Compare versions
+    if !UpstreamSource::is_version_newer(&metadata.version, &new_version)? {
         info!(
             "Package is already at latest version (current: {}, latest: {})",
             metadata.version, new_version
@@ -289,7 +271,7 @@ async fn update_from_file_path(
         metadata.version, new_version
     );
 
-    // Step 6: Update version in file with invalid hash
+    // Step 5: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     update_nix_file(
         &file_location,
@@ -302,7 +284,7 @@ async fn update_from_file_path(
 
     info!("Updated version and set invalid hash in {}", file_location);
 
-    // Step 7: Build source to get correct hash
+    // Step 6: Build source to get correct hash
     let (success, _stdout, stderr) =
         build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
 
@@ -320,7 +302,7 @@ async fn update_from_file_path(
 
     info!("Extracted correct hash: {}", correct_hash);
 
-    // Step 8: Update hash with correct value
+    // Step 7: Update hash with correct value
     update_nix_file(
         &file_location,
         &new_version, // version stays the same
@@ -332,7 +314,7 @@ async fn update_from_file_path(
 
     info!("Updated hash in {}", file_location);
 
-    // Step 9: Build source again to verify
+    // Step 8: Build source again to verify
     let (success, _stdout, stderr) =
         build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
 
@@ -410,7 +392,7 @@ async fn update_from_file_path(
         info!("Updated vendorHash in {}", file_location);
     }
 
-    // Step 10: Build full package to verify with reversed patch recovery
+    // Step 9: Build full package to verify with reversed patch recovery
     loop {
         let (success, _stdout, stderr) =
             build_nix_expr(&eval_entry_point, &attr_path, None).await?;

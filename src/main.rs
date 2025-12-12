@@ -4,9 +4,11 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod github;
+mod gitlab;
 mod nix;
 mod package;
 mod rewrite;
+mod vcs_sources;
 
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
