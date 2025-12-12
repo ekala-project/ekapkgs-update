@@ -145,6 +145,21 @@ async fn update_cargo_hash(file_path: &str, old_hash: &str, new_hash: &str) -> a
     Ok(())
 }
 
+/// Update vendorHash attribute in Nix file
+async fn update_vendor_hash(file_path: &str, old_hash: &str, new_hash: &str) -> anyhow::Result<()> {
+    debug!(
+        "Updating vendorHash in {} using AST manipulation",
+        file_path
+    );
+    let content = tokio::fs::read_to_string(file_path).await?;
+
+    let updated_content = find_and_update_attr(&content, "vendorHash", new_hash, Some(old_hash))?;
+    debug!("Updated vendorHash attribute: {} -> {}", old_hash, new_hash);
+
+    tokio::fs::write(file_path, updated_content).await?;
+    Ok(())
+}
+
 /// Extract hash from Nix build error output
 fn extract_hash_from_error(stderr: &str) -> Option<String> {
     // Nix error format: "got: sha256-<hash>"
@@ -327,7 +342,7 @@ async fn update_from_file_path(
 
     info!("Source build successful");
 
-    // Step 9.5: For Rust packages, update cargoHash
+    // For Rust packages, update cargoHash
     if let Some(old_cargo_hash) = &metadata.cargo_hash {
         info!("Detected Rust package, updating cargoHash");
 
@@ -359,6 +374,40 @@ async fn update_from_file_path(
         update_cargo_hash(&file_location, invalid_cargo_hash, &correct_cargo_hash).await?;
 
         info!("Updated cargoHash in {}", file_location);
+    }
+
+    // For Go packages, update vendorHash
+    if let Some(old_vendor_hash) = &metadata.vendor_hash {
+        info!("Detected Go package, updating vendorHash");
+
+        // Set invalid vendor hash
+        let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        update_vendor_hash(&file_location, old_vendor_hash, invalid_vendor_hash).await?;
+
+        info!("Set invalid vendorHash in {}", file_location);
+
+        // Build full package to get correct vendor hash
+        let (success, _stdout, stderr) =
+            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
+
+        if success {
+            warn!("Build succeeded with invalid vendorHash - this shouldn't happen");
+            anyhow::bail!("Expected vendorHash mismatch error but build succeeded");
+        }
+
+        let correct_vendor_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not extract correct vendorHash from build error:\n{}",
+                stderr
+            )
+        })?;
+
+        info!("Extracted correct vendorHash: {}", correct_vendor_hash);
+
+        // Update vendorHash with correct value
+        update_vendor_hash(&file_location, invalid_vendor_hash, &correct_vendor_hash).await?;
+
+        info!("Updated vendorHash in {}", file_location);
     }
 
     // Step 10: Build full package to verify with reversed patch recovery

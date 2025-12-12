@@ -10,6 +10,7 @@ pub struct PackageMetadata {
     pub src_url: Option<String>,
     pub output_hash: Option<String>,
     pub cargo_hash: Option<String>,
+    pub vendor_hash: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -73,12 +74,14 @@ impl PackageMetadata {
         let src_url = package.get_src_url().await;
         let output_hash = package.get_attr("src.outputHash").await;
         let cargo_hash = package.get_attr("cargoHash").await;
+        let vendor_hash = package.get_attr("vendorHash").await;
 
         Ok(PackageMetadata {
             version,
             src_url,
             output_hash,
             cargo_hash,
+            vendor_hash,
         })
     }
 }
