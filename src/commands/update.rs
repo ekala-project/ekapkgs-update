@@ -8,9 +8,17 @@ use crate::package::PackageMetadata;
 use crate::rewrite::{
     find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
 };
-use crate::vcs_sources::UpstreamSource;
+use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
-pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
+pub async fn update(
+    file: String,
+    attr_path: String,
+    semver_strategy: String,
+) -> anyhow::Result<()> {
+    // Parse semver strategy
+    let strategy = SemverStrategy::from_str(&semver_strategy)?;
+    info!("Using semver strategy: {:?}", strategy);
+
     info!("Checking for update script for {}", attr_path);
 
     // Check if an update script is defined for this package
@@ -43,7 +51,7 @@ pub async fn update(file: String, attr_path: String) -> anyhow::Result<()> {
             Ok(file_path.to_string())
         })?;
 
-        update_from_file_path(file, attr_path, expr_file_path).await?;
+        update_from_file_path(file, attr_path, expr_file_path, strategy).await?;
 
         return Ok(());
     }
@@ -226,6 +234,7 @@ async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
     file_location: String,
+    strategy: SemverStrategy,
 ) -> anyhow::Result<()> {
     info!(
         "Starting generic update for {} at {}",
@@ -246,29 +255,15 @@ async fn update_from_file_path(
 
     info!("{}", upstream_source.description());
 
-    // Step 3: Fetch latest release
-    let latest_release = upstream_source.get_latest_release().await?;
+    // Step 3: Fetch best compatible release based on strategy
+    let best_release = upstream_source
+        .get_compatible_release(&metadata.version, strategy)
+        .await?;
 
-    if latest_release.is_prerelease {
-        info!("Latest release is a prerelease, skipping");
-        return Ok(());
-    }
-
-    let new_version = UpstreamSource::get_version(&latest_release);
-    info!("Latest release: {}", new_version);
-
-    // Step 4: Compare versions
-    if !UpstreamSource::is_version_newer(&metadata.version, &new_version)? {
-        info!(
-            "Package is already at latest version (current: {}, latest: {})",
-            metadata.version, new_version
-        );
-        return Ok(());
-    }
-
+    let new_version = UpstreamSource::get_version(&best_release);
     info!(
-        "Found newer version: {} -> {}",
-        metadata.version, new_version
+        "Found compatible version ({:?}): {} -> {}",
+        strategy, metadata.version, new_version
     );
 
     // Step 5: Update version in file with invalid hash

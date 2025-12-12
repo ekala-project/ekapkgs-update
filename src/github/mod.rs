@@ -21,8 +21,8 @@ pub struct GithubRepo {
 
 /// GitHub tag information from the API
 #[derive(Debug, Deserialize)]
-struct GithubTag {
-    name: String,
+pub struct GithubTag {
+    pub name: String,
 }
 
 /// Parse GitHub URL to extract owner and repo
@@ -58,7 +58,7 @@ pub fn parse_github_url(url: &str) -> Option<GithubRepo> {
 
 /// Fetch tags from GitHub API
 ///
-/// Internal helper function to retrieve all tags from a repository.
+/// Retrieves all tags from a repository.
 /// Tags are returned in reverse chronological order (newest first).
 ///
 /// # Arguments
@@ -68,7 +68,7 @@ pub fn parse_github_url(url: &str) -> Option<GithubRepo> {
 ///
 /// # Returns
 /// A vector of tags, or an empty vector if no tags exist
-async fn fetch_github_tags(
+pub async fn fetch_github_tags(
     owner: &str,
     repo: &str,
     token: Option<&str>,
@@ -102,10 +102,10 @@ async fn fetch_github_tags(
     Ok(tags)
 }
 
-/// Fetch latest release from GitHub API
+/// Fetch all releases from GitHub API
 ///
-/// Makes an API call to GitHub to retrieve the latest release for a given repository.
-/// Optionally authenticates with a GitHub token for higher rate limits.
+/// Retrieves all releases from a repository.
+/// Releases are returned in reverse chronological order (newest first).
 ///
 /// # Arguments
 /// * `owner` - Repository owner/organization
@@ -113,45 +113,15 @@ async fn fetch_github_tags(
 /// * `token` - Optional GitHub personal access token for authentication
 ///
 /// # Returns
-/// The latest release information from GitHub
-///
-/// # Rate Limits
-/// - **Without token**: 60 requests per hour
-/// - **With token**: 5,000 requests per hour
-///
-/// # Errors
-/// Returns an error if:
-/// - The API request fails
-/// - The response cannot be deserialized
-/// - The HTTP status is not successful
-/// - Rate limit is exceeded
-///
-/// # Example
-/// ```no_run
-/// use ekapkgs_update::github::fetch_latest_github_release;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// // With authentication
-/// let token = std::env::var("GITHUB_TOKEN").ok();
-/// let release = fetch_latest_github_release("owner", "repo", token.as_deref()).await?;
-/// println!("Latest version: {}", release.tag_name);
-///
-/// // Without authentication (lower rate limits)
-/// let release = fetch_latest_github_release("owner", "repo", None).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn fetch_latest_github_release(
+/// A vector of releases
+pub async fn fetch_github_releases(
     owner: &str,
     repo: &str,
     token: Option<&str>,
-) -> anyhow::Result<GithubRelease> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
-        owner, repo
-    );
+) -> anyhow::Result<Vec<GithubRelease>> {
+    let url = format!("https://api.github.com/repos/{}/{}/releases", owner, repo);
 
-    debug!("Fetching latest release from {}", url);
+    debug!("Fetching all releases from {}", url);
 
     let client = reqwest::Client::new();
     let mut request = client
@@ -167,45 +137,21 @@ pub async fn fetch_latest_github_release(
 
     let response = request.send().await?;
 
-    // If releases endpoint returns 404, fallback to tags
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        debug!(
-            "No releases found for {}/{}, falling back to tags",
-            owner, repo
-        );
-        let tags = fetch_github_tags(owner, repo, token).await?;
-
-        if let Some(first_tag) = tags.first() {
-            let version = crate::vcs_sources::extract_version_from_tag(&first_tag.name);
-            debug!(
-                "Using latest tag: {} (extracted version: {})",
-                first_tag.name, version
-            );
-            return Ok(GithubRelease {
-                tag_name: version.to_string(),
-                _name: None,
-                prerelease: false,
-            });
-        } else {
-            anyhow::bail!("No releases or tags found for {}/{}", owner, repo);
-        }
-    }
-
     if !response.status().is_success() {
         anyhow::bail!(
-            "GitHub API request failed with status: {}",
+            "GitHub releases API request failed with status: {}",
             response.status()
         );
     }
 
-    let release: GithubRelease = response.json().await?;
-    Ok(release)
+    let releases: Vec<GithubRelease> = response.json().await?;
+    Ok(releases)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub use crate::vcs_sources::{extract_version_from_tag, is_version_newer};
+    pub use crate::vcs_sources::extract_version_from_tag;
 
     #[test]
     fn test_parse_github_url_https() {
@@ -242,21 +188,6 @@ mod tests {
         let url = "https://gitlab.com/owner/repo";
         let result = parse_github_url(url);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_is_version_newer_semver() {
-        assert!(is_version_newer("1.0.0", "1.0.1").unwrap());
-        assert!(is_version_newer("1.0.0", "2.0.0").unwrap());
-        assert!(!is_version_newer("2.0.0", "1.0.0").unwrap());
-        assert!(!is_version_newer("1.0.0", "1.0.0").unwrap());
-    }
-
-    #[test]
-    fn test_is_version_newer_with_v_prefix() {
-        assert!(is_version_newer("v1.0.0", "v1.0.1").unwrap());
-        assert!(is_version_newer("1.0.0", "v1.0.1").unwrap());
-        assert!(is_version_newer("v1.0.0", "1.0.1").unwrap());
     }
 
     #[test]
