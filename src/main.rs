@@ -7,6 +7,7 @@ mod github;
 mod gitlab;
 mod nix;
 mod package;
+mod pypi;
 mod rewrite;
 mod vcs_sources;
 
