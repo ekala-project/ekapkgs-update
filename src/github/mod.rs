@@ -1,7 +1,6 @@
 //! GitHub API integration and utilities
 
 use regex::Regex;
-use semver::Version;
 use serde::Deserialize;
 use tracing::debug;
 
@@ -177,7 +176,7 @@ pub async fn fetch_latest_github_release(
         let tags = fetch_github_tags(owner, repo, token).await?;
 
         if let Some(first_tag) = tags.first() {
-            let version = extract_version_from_tag(&first_tag.name);
+            let version = crate::vcs_sources::extract_version_from_tag(&first_tag.name);
             debug!(
                 "Using latest tag: {} (extracted version: {})",
                 first_tag.name, version
@@ -203,59 +202,10 @@ pub async fn fetch_latest_github_release(
     Ok(release)
 }
 
-/// Extract version from tag name by pruning leading non-numerical characters
-///
-/// Removes all leading non-numerical characters from tag names to extract the version.
-/// This handles various tag naming conventions like "v1.0.0", "release-1.0.0", "version-2.3.4",
-/// etc.
-///
-/// # Arguments
-/// * `tag` - The tag name to extract version from
-///
-/// # Returns
-/// The version string with leading non-numerical characters removed
-///
-/// # Example
-/// ```
-/// use ekapkgs_update::github::extract_version_from_tag;
-///
-/// assert_eq!(extract_version_from_tag("v1.0.0"), "1.0.0");
-/// assert_eq!(extract_version_from_tag("release-2.3.4"), "2.3.4");
-/// assert_eq!(extract_version_from_tag("version-1.2.3"), "1.2.3");
-/// assert_eq!(extract_version_from_tag("1.0.0"), "1.0.0");
-/// ```
-pub fn extract_version_from_tag(tag: &str) -> &str {
-    // Find the first digit in the tag
-    if let Some(pos) = tag.find(|c: char| c.is_ascii_digit()) {
-        &tag[pos..]
-    } else {
-        // If no digit found, return the original tag
-        tag
-    }
-}
-
-/// Compare versions and return true if new_version is greater than current_version
-pub fn is_version_newer(current: &str, new: &str) -> anyhow::Result<bool> {
-    // Strip common prefixes like 'v' or 'version-'
-    let clean_current = current
-        .trim_start_matches('v')
-        .trim_start_matches("version-");
-    let clean_new = new.trim_start_matches('v').trim_start_matches("version-");
-
-    // Try semantic versioning first
-    if let (Ok(curr_ver), Ok(new_ver)) = (Version::parse(clean_current), Version::parse(clean_new))
-    {
-        return Ok(new_ver > curr_ver);
-    }
-
-    // Fallback to string comparison
-    debug!("Could not parse versions as semver, falling back to string comparison");
-    Ok(clean_new > clean_current)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub use crate::vcs_sources::{extract_version_from_tag, is_version_newer};
 
     #[test]
     fn test_parse_github_url_https() {
