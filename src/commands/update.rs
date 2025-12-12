@@ -10,15 +10,11 @@ use crate::rewrite::{
 };
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
-pub async fn update(
-    file: String,
-    attr_path: String,
-    semver_strategy: String,
-) -> anyhow::Result<()> {
-    // Parse semver strategy
-    let strategy = SemverStrategy::from_str(&semver_strategy)?;
-    info!("Using semver strategy: {:?}", strategy);
-
+/// Check for and run update script if it exists
+///
+/// Returns Ok(true) if update script was found and executed successfully,
+/// Ok(false) if no update script exists, or Err if execution failed.
+async fn run_update_script(file: &str, attr_path: &str) -> anyhow::Result<bool> {
     info!("Checking for update script for {}", attr_path);
 
     // Check if an update script is defined for this package
@@ -29,59 +25,79 @@ pub async fn update(
 
     let script_path_result = eval_nix_expr(&nix_expr).await;
 
-    // If the command failed, there's no update script
-    if script_path_result.is_err() {
-        debug!("No update script found for {}", attr_path);
-        if let Err(e) = &script_path_result {
-            debug!("nix-instantiate stderr: {}", e);
-        }
+    // If update script exists, use it
+    match script_path_result {
+        Ok(script_path) if !script_path.is_empty() => {
+            info!("Found update script: {}", script_path);
 
-        // Try to find the package file location via meta.position
-        debug!("Attempting to locate package definition...");
-        let position_expr = format!("with import ./{} {{ }}; {}.meta.position", file, attr_path);
+            // Execute the update script
+            debug!("Executing update script...");
+            let status = Command::new(&script_path)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .await?;
 
-        let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
-            if position.is_empty() {
-                anyhow::bail!("Empty position returned from meta.position");
+            if !status.success() {
+                anyhow::bail!(
+                    "Update script failed with exit code: {}",
+                    status.code().unwrap_or(-1)
+                );
             }
-            // Parse position string (format: "file:line")
-            let (file_path, _line_str) = position
-                .rsplit_once(':')
-                .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
-            Ok(file_path.to_string())
-        })?;
 
-        update_from_file_path(file, attr_path, expr_file_path, strategy).await?;
+            info!("Update script completed successfully for {}", attr_path);
+            Ok(true)
+        },
+        Ok(_) => {
+            debug!("Update script path is empty");
+            Ok(false)
+        },
+        Err(e) => {
+            debug!("No update script found for {}", attr_path);
+            debug!("nix-instantiate stderr: {}", e);
+            Ok(false)
+        },
+    }
+}
 
-        return Ok(());
+pub async fn update(
+    file: String,
+    attr_path: String,
+    semver_strategy: String,
+    ignore_update_script: bool,
+) -> anyhow::Result<()> {
+    // Parse semver strategy
+    let strategy = SemverStrategy::from_str(&semver_strategy)?;
+    info!("Using semver strategy: {:?}", strategy);
+
+    // Try to run update script if not ignored
+    if !ignore_update_script {
+        let script_executed = run_update_script(&file, &attr_path).await?;
+        if script_executed {
+            return Ok(());
+        }
+    } else {
+        info!("Ignoring update script for {}", attr_path);
     }
 
-    // Parse the script path from the output
-    let script_path = script_path_result?;
+    // No update script or ignoring it - use generic update method
+    // Try to find the package file location via meta.position
+    debug!("Attempting to locate package definition...");
+    let position_expr = format!("with import ./{} {{ }}; {}.meta.position", file, attr_path);
 
-    if script_path.is_empty() {
-        anyhow::bail!("Empty script path returned from nix-instantiate");
-    }
+    let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
+        if position.is_empty() {
+            anyhow::bail!("Empty position returned from meta.position");
+        }
+        // Parse position string (format: "file:line")
+        let (file_path, _line_str) = position
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+        Ok(file_path.to_string())
+    })?;
 
-    info!("Found update script: {}", script_path);
-
-    // Execute the update script
-    debug!("Executing update script...");
-    let status = Command::new(&script_path)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
-        anyhow::bail!(
-            "Update script failed with exit code: {}",
-            status.code().unwrap_or(-1)
-        );
-    }
-
-    info!("Update script completed successfully for {}", &attr_path);
+    update_from_file_path(file, attr_path, expr_file_path, strategy).await?;
 
     Ok(())
 }
