@@ -11,6 +11,7 @@ pub struct PackageMetadata {
     pub output_hash: Option<String>,
     pub cargo_hash: Option<String>,
     pub vendor_hash: Option<String>,
+    pub pname: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -75,6 +76,7 @@ impl PackageMetadata {
         let output_hash = package.get_attr("src.outputHash").await;
         let cargo_hash = package.get_attr("cargoHash").await;
         let vendor_hash = package.get_attr("vendorHash").await;
+        let pname = package.get_attr("pname").await;
 
         Ok(PackageMetadata {
             version,
@@ -82,6 +84,7 @@ impl PackageMetadata {
             output_hash,
             cargo_hash,
             vendor_hash,
+            pname,
         })
     }
 }

@@ -261,13 +261,21 @@ async fn update_from_file_path(
     let metadata = PackageMetadata::from_attr_path(&eval_entry_point, &attr_path).await?;
     info!("Current version: {}", metadata.version);
 
-    // Step 2: Parse source URL and create upstream source
-    let src_url = metadata
-        .src_url
-        .context("No source URL found for package")?;
-
-    let upstream_source = UpstreamSource::from_url(&src_url)
-        .context("Source is not from a supported VCS platform (GitHub, GitLab)")?;
+    // Step 2: Determine upstream source
+    let upstream_source = if let Some(ref src_url) = metadata.src_url {
+        // Try to parse URL as GitHub/GitLab/PyPI
+        UpstreamSource::from_url(src_url)
+            .context("Source is not from a supported VCS platform (GitHub, GitLab, PyPI)")?
+    } else if let Some(ref pname) = metadata.pname {
+        // If no src_url but pname exists, create PyPI source directly
+        UpstreamSource::PyPI {
+            pname: pname.clone(),
+        }
+    } else {
+        anyhow::bail!(
+            "No source URL or pname found for package - cannot determine upstream source"
+        );
+    };
 
     info!("{}", upstream_source.description());
 

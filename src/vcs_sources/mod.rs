@@ -2,11 +2,13 @@
 
 use std::env;
 
+use regex::Regex;
 use semver::Version;
 use tracing::{debug, warn};
 
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
+use crate::pypi::fetch_pypi_releases;
 
 /// Release information from a VCS source
 #[derive(Debug)]
@@ -44,17 +46,74 @@ impl SemverStrategy {
     }
 }
 
-/// Upstream VCS source (GitHub, GitLab, etc.)
+/// Upstream VCS source (GitHub, GitLab, PyPI, etc.)
 #[derive(Debug)]
 pub enum UpstreamSource {
     GitHub { owner: String, repo: String },
     GitLab { owner: String, project: String },
+    PyPI { pname: String },
+}
+
+/// Parse PyPI URL to extract package name
+///
+/// Matches URLs like:
+/// - `https://files.pythonhosted.org/packages/.../package-1.0.0.tar.gz`
+/// - `https://pypi.org/project/package/`
+/// - `https://pypi.python.org/packages/.../package-1.0.0.tar.gz`
+/// - `mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip`
+///
+/// Returns the package name if found
+fn parse_pypi_url(url: &str) -> Option<String> {
+    // Match mirror://pypi/{first-letter}/{package-name}/{filename}
+    // Format: mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip
+    if url.starts_with("mirror://pypi/") {
+        let parts: Vec<&str> = url.split('/').collect();
+        // Expected format: ["mirror:", "", "pypi", "{letter}", "{package-name}", "{filename}"]
+        if parts.len() >= 5 {
+            // Extract package name from the path (4th element, 0-indexed)
+            return Some(parts[4].to_string());
+        }
+    }
+
+    // Match pypi.org/project/{pname}
+    if let Ok(pypi_project_regex) = Regex::new(r"pypi\.(?:python\.)?org/project/([^/]+)") {
+        if let Some(caps) = pypi_project_regex.captures(url) {
+            return caps.get(1).map(|m| m.as_str().to_string());
+        }
+    }
+
+    // Match files.pythonhosted.org or pypi.python.org packages
+    // URL format: https://files.pythonhosted.org/packages/hash/hash/package-version.tar.gz
+    if url.contains("pythonhosted.org") || url.contains("pypi.python.org") {
+        // Extract filename from URL
+        if let Some(filename) = url.split('/').last() {
+            // Remove file extension and version suffix to get package name
+            // This is a heuristic and may not work for all cases
+            if let Some(name_with_version) = filename.split('.').next() {
+                // Try to extract package name by removing version suffix
+                // Common pattern: package-name-1.0.0
+                if let Some(idx) = name_with_version.rfind('-') {
+                    let potential_name = &name_with_version[..idx];
+                    // Check if what follows looks like a version (starts with digit)
+                    if name_with_version[idx + 1..]
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_digit())
+                    {
+                        return Some(potential_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 impl UpstreamSource {
     /// Parse a URL and return the appropriate UpstreamSource
     ///
-    /// Tries to parse the URL as GitHub first, then GitLab.
+    /// Tries to parse the URL as GitHub first, then GitLab, then PyPI.
     ///
     /// # Arguments
     /// * `url` - Source URL to parse
@@ -72,6 +131,9 @@ impl UpstreamSource {
                 owner: gitlab_project.owner,
                 project: gitlab_project.project,
             })
+        } else if let Some(pypi_pname) = parse_pypi_url(url) {
+            // URL is from PyPI
+            Some(UpstreamSource::PyPI { pname: pypi_pname })
         } else {
             None
         }
@@ -180,6 +242,28 @@ impl UpstreamSource {
                 // Filter and find best match
                 find_best_release(&releases, current_version, strategy)
             },
+            UpstreamSource::PyPI { pname } => {
+                // PyPI doesn't require authentication tokens
+                let pypi_response = fetch_pypi_releases(pname).await?;
+
+                // Convert PyPI releases to our Release struct
+                // PyPI returns a HashMap where keys are version strings
+                let mut releases: Vec<Release> = Vec::new();
+
+                for (version, artifacts) in pypi_response.releases {
+                    // Check if this version has been yanked (any artifact yanked means version is
+                    // yanked)
+                    let is_yanked = artifacts.iter().any(|a| a.yanked);
+
+                    releases.push(Release {
+                        tag_name: version,
+                        is_prerelease: is_yanked, // Treat yanked releases as prereleases
+                    });
+                }
+
+                // Filter and find best match
+                find_best_release(&releases, current_version, strategy)
+            },
         }
     }
 
@@ -203,6 +287,7 @@ impl UpstreamSource {
             UpstreamSource::GitLab { owner, project } => {
                 format!("GitLab project: {}/{}", owner, project)
             },
+            UpstreamSource::PyPI { pname } => format!("PyPI package: {}", pname),
         }
     }
 }
@@ -422,6 +507,71 @@ mod tests {
         let url = "https://example.com/some/path";
         let source = UpstreamSource::from_url(url);
         assert!(source.is_none());
+    }
+
+    #[test]
+    fn test_from_url_pypi_project() {
+        let url = "https://pypi.org/project/requests/";
+        let source = UpstreamSource::from_url(url);
+        assert!(source.is_some());
+        match source.unwrap() {
+            UpstreamSource::PyPI { pname } => {
+                assert_eq!(pname, "requests");
+            },
+            _ => panic!("Expected PyPI source"),
+        }
+    }
+
+    #[test]
+    fn test_from_url_pypi_python_org() {
+        let url = "https://pypi.python.org/project/django/";
+        let source = UpstreamSource::from_url(url);
+        assert!(source.is_some());
+        match source.unwrap() {
+            UpstreamSource::PyPI { pname } => {
+                assert_eq!(pname, "django");
+            },
+            _ => panic!("Expected PyPI source"),
+        }
+    }
+
+    #[test]
+    fn test_from_url_pypi_files() {
+        let url = "https://files.pythonhosted.org/packages/abc/def/requests-2.28.1.tar.gz";
+        let source = UpstreamSource::from_url(url);
+        assert!(source.is_some());
+        match source.unwrap() {
+            UpstreamSource::PyPI { pname } => {
+                assert_eq!(pname, "requests");
+            },
+            _ => panic!("Expected PyPI source"),
+        }
+    }
+
+    #[test]
+    fn test_from_url_pypi_mirror() {
+        let url = "mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip";
+        let source = UpstreamSource::from_url(url);
+        assert!(source.is_some());
+        match source.unwrap() {
+            UpstreamSource::PyPI { pname } => {
+                assert_eq!(pname, "azure-mgmt-advisor");
+            },
+            _ => panic!("Expected PyPI source"),
+        }
+    }
+
+    #[test]
+    fn test_from_url_pypi_mirror_single_letter() {
+        let url = "mirror://pypi/r/requests/requests-2.28.1.tar.gz";
+        let source = UpstreamSource::from_url(url);
+        assert!(source.is_some());
+        match source.unwrap() {
+            UpstreamSource::PyPI { pname } => {
+                assert_eq!(pname, "requests");
+            },
+            _ => panic!("Expected PyPI source"),
+        }
     }
 
     #[test]
