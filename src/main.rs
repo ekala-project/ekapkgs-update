@@ -40,6 +40,9 @@ enum Commands {
         /// Ignore update script and use generic update method
         #[arg(long, default_value = "false")]
         ignore_update_script: bool,
+        /// Create a git commit after successful update
+        #[arg(long)]
+        commit: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -71,7 +74,10 @@ async fn main() -> anyhow::Result<()> {
             attr_path,
             semver,
             ignore_update_script,
-        } => commands::update::update(file, attr_path, semver, ignore_update_script).await?,
+            commit,
+        } => {
+            commands::update::update(file, attr_path, semver, ignore_update_script, commit).await?
+        },
         Commands::PruneMaintainers { directory } => {
             commands::prune_maintainers::prune_maintainers(directory).await?
         },
