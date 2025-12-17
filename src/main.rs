@@ -3,6 +3,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod database;
 mod github;
 mod gitlab;
 mod nix;
@@ -26,6 +27,9 @@ enum Commands {
         /// Nix file to evaluate
         #[arg(short, long)]
         file: String,
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
+        database: String,
     },
     /// Update a package in a Nix file
     Update {
@@ -68,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Commands::Run { file } => commands::run::run(file).await?,
+        Commands::Run { file, database } => commands::run::run(file, database).await?,
         Commands::Update {
             file,
             attr_path,
