@@ -53,6 +53,15 @@ enum Commands {
         /// Directory to process
         directory: String,
     },
+    /// Show update failure logs for a package
+    Log {
+        /// Drv path (e.g., /nix/store/...drv or hash-name.drv) or attr path (e.g.,
+        /// python.pkgs.setuptools)
+        identifier: String,
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
+        database: String,
+    },
 }
 
 #[tokio::main]
@@ -85,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::PruneMaintainers { directory } => {
             commands::prune_maintainers::prune_maintainers(directory).await?
         },
+        Commands::Log {
+            identifier,
+            database,
+        } => commands::log::show_log(database, identifier).await?,
     }
 
     Ok(())

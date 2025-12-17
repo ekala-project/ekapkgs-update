@@ -3,6 +3,7 @@
   fenix,
   pkg-config,
   openssl,
+  sqlite,
 }:
 
 stdenv.mkDerivation {
@@ -16,5 +17,7 @@ stdenv.mkDerivation {
       "rustc"
       "rustfmt-preview"
     ])
+    sqlite
   ];
+  buildInputs = [ sqlite ];
 }
