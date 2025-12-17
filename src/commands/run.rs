@@ -2,6 +2,7 @@ use futures::{StreamExt, pin_mut};
 use tracing::{debug, info, warn};
 
 use crate::database::Database;
+use crate::git::{cleanup_worktree, create_worktree};
 use crate::nix;
 use crate::nix::eval_nix_expr;
 use crate::nix::nix_eval_jobs::NixEvalItem;
@@ -251,30 +252,53 @@ async fn check_and_update_package(
         attr_path, current_version, latest_version
     );
 
-    // Get file location from meta.position
+    // Create a worktree for this update
+    let worktree_path = match create_worktree(attr_path).await {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("{}: Failed to create worktree: {}", attr_path, e);
+            return Ok(UpdateResult::Skipped(format!(
+                "Worktree creation failed: {}",
+                e
+            )));
+        },
+    };
+
+    // Get file location from meta.position (in the main repository)
     let file_location = match get_file_location(eval_entry_point, attr_path).await {
         Ok(loc) => loc,
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
+            cleanup_worktree(&worktree_path).await.ok();
             return Ok(UpdateResult::Skipped("Could not locate file".to_string()));
         },
     };
 
     debug!("{}: File location: {}", attr_path, file_location);
 
-    // Attempt the update
-    match crate::commands::update::update_from_file_path(
+    // Convert the file path to be relative to the worktree
+    let worktree_file_path = worktree_path.join(&file_location);
+    let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
+
+    // Attempt the update in the worktree
+    let update_result = crate::commands::update::update_from_file_path(
         eval_entry_point.to_string(),
         attr_path.to_string(),
-        file_location,
+        worktree_file_str,
         SemverStrategy::Latest,
         false, // Don't auto-commit in run mode
     )
-    .await
-    {
+    .await;
+
+    match update_result {
         Ok(()) => {
             // Update succeeded
             info!("{}: Successfully updated to {}", attr_path, latest_version);
+
+            // Clean up the worktree
+            if let Err(e) = cleanup_worktree(&worktree_path).await {
+                warn!("{}: Failed to clean up worktree: {}", attr_path, e);
+            }
 
             if let Err(e) = db
                 .record_successful_update(attr_path, current_version, &latest_version)
@@ -292,6 +316,14 @@ async fn check_and_update_package(
             // Update failed - record the failure log
             let error_message = format!("{:#}", e);
             warn!("{}: Update failed: {}", attr_path, error_message);
+
+            // Clean up the worktree
+            if let Err(cleanup_err) = cleanup_worktree(&worktree_path).await {
+                warn!(
+                    "{}: Failed to clean up worktree: {}",
+                    attr_path, cleanup_err
+                );
+            }
 
             if let Err(db_err) = db
                 .record_failed_update(

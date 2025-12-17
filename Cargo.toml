@@ -8,6 +8,7 @@ anyhow = "1.0"
 async-stream = "0.3"
 chrono = "0.4"
 clap = { version = "4.5.53", features = ["derive"] }
+directories = "5.0"
 futures = "0.3"
 openssl = { version = "0.10.75", features = ["vendored"] }
 regex = "1.0"

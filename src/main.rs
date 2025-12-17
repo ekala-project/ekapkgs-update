@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod database;
+mod git;
 mod github;
 mod gitlab;
 mod nix;
