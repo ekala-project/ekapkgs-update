@@ -331,7 +331,7 @@ async fn create_git_commit(
 }
 
 /// Update the nix expr generically
-async fn update_from_file_path(
+pub async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
     file_location: String,
