@@ -3,7 +3,7 @@ use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::nix::eval_nix_expr;
+use crate::nix::{eval_nix_expr, is_many_variants_package};
 use crate::package::PackageMetadata;
 use crate::rewrite::{
     find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
@@ -103,55 +103,175 @@ pub async fn update(
     Ok(())
 }
 
+/// Find version and hash in sibling files for mkManyVariants pattern
+///
+/// Searches parent directory for .nix files containing both the version and hash exactly once.
+/// Returns the path to the sibling file if found.
+async fn find_version_in_siblings(
+    file_path: &str,
+    version: &str,
+    hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    use std::path::Path;
+
+    use walkdir::WalkDir;
+
+    let path = Path::new(file_path);
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    debug!(
+        "Searching for version {} in siblings of {}",
+        version, file_path
+    );
+
+    // Iterate through .nix files in parent directory
+    for entry in WalkDir::new(parent)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let entry_path = entry.path();
+
+        // Skip non-nix files and the original file
+        if entry_path.extension().and_then(|s| s.to_str()) != Some("nix") {
+            continue;
+        }
+        if entry_path == path {
+            continue;
+        }
+
+        // Read the file content
+        let content = match tokio::fs::read_to_string(entry_path).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Count occurrences of version
+        let version_count = content.matches(version).count();
+
+        // Count occurrences of hash if provided
+        let hash_count = if let Some(h) = hash {
+            content.matches(h).count()
+        } else {
+            1 // If no hash provided, consider it matched
+        };
+
+        // If both appear exactly once, we found the variants file
+        if version_count == 1 && hash_count == 1 {
+            let sibling_path = entry_path.to_string_lossy().to_string();
+            info!(
+                "Found version {} and hash in sibling file: {}",
+                version, sibling_path
+            );
+            return Ok(Some(sibling_path));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Update version and hash attributes in Nix file using AST manipulation
+///
+/// Returns the actual file path that was updated (may differ from input due to mkManyVariants)
 async fn update_nix_file(
+    eval_entry_point: &str,
+    attr_path: &str,
     file_path: &str,
     old_version: &str,
     new_version: &str,
     old_hash: Option<&str>,
     new_hash: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     debug!("Updating Nix file at {} using AST manipulation", file_path);
     let content = tokio::fs::read_to_string(file_path).await?;
 
-    let updated_content =
-        find_and_update_attr(&content, "version", new_version, Some(old_version))?;
-    debug!(
-        "Updated version attribute: {} -> {}",
-        old_version, new_version
-    );
+    // Try to update the version attribute
+    let (updated_content, actual_file_path) =
+        match find_and_update_attr(&content, "version", new_version, Some(old_version)) {
+            Ok(content) => {
+                debug!(
+                    "Updated version attribute: {} -> {}",
+                    old_version, new_version
+                );
+                (content, file_path.to_string())
+            },
+            Err(e) if e.to_string().contains("not found") => {
+                // Version not found - check if this is a mkManyVariants package
+                debug!(
+                    "Version not found in {}, checking if mkManyVariants",
+                    file_path
+                );
+
+                if is_many_variants_package(eval_entry_point, attr_path).await? {
+                    // This is a mkManyVariants package - search sibling files
+                    match find_version_in_siblings(file_path, old_version, old_hash).await? {
+                        Some(sibling_path) => {
+                            info!("Using mkManyVariants file: {}", sibling_path);
+                            let sibling_content = tokio::fs::read_to_string(&sibling_path).await?;
+
+                            // Try simple string replacement for mkManyVariants files
+                            let updated = sibling_content.replace(old_version, new_version);
+                            (updated, sibling_path)
+                        },
+                        None => {
+                            // No sibling found, return original error
+                            return Err(e);
+                        },
+                    }
+                } else {
+                    // Not a mkManyVariants package, return original error
+                    return Err(e);
+                }
+            },
+            Err(e) => return Err(e),
+        };
 
     // Update hash if provided
     let final_content = if let (Some(old_h), Some(new_h)) = (old_hash, new_hash) {
-        // Try different hash attribute names
-        let hash_attrs = vec!["hash", "sha256", "outputHash"];
-        let mut result = updated_content.clone();
-        let mut hash_updated = false;
+        // For mkManyVariants, use simple string replacement
+        // For normal files, use AST-based replacement
+        if actual_file_path != file_path {
+            // mkManyVariants file - use string replacement
+            let result = updated_content.replace(old_h, new_h);
+            debug!(
+                "Updated hash using string replacement: {} -> {}",
+                old_h, new_h
+            );
+            result
+        } else {
+            // Normal file - try AST-based replacement
+            let hash_attrs = vec!["hash", "sha256", "outputHash", "src-hash"];
+            let mut result = updated_content.clone();
+            let mut hash_updated = false;
 
-        for attr_name in hash_attrs {
-            match find_and_update_attr(&result, attr_name, new_h, Some(old_h)) {
-                Ok(new_content) => {
-                    debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
-                    result = new_content;
-                    hash_updated = true;
-                    break;
-                },
-                Err(_) => continue, // Try next attribute name
+            for attr_name in hash_attrs {
+                match find_and_update_attr(&result, attr_name, new_h, Some(old_h)) {
+                    Ok(new_content) => {
+                        debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
+                        result = new_content;
+                        hash_updated = true;
+                        break;
+                    },
+                    Err(_) => continue, // Try next attribute name
+                }
             }
-        }
 
-        if !hash_updated {
-            warn!("Could not find hash attribute to update in Nix file");
-        }
+            if !hash_updated {
+                warn!("Could not find hash attribute to update in Nix file");
+            }
 
-        result
+            result
+        }
     } else {
         updated_content
     };
 
     // Write back to file
-    tokio::fs::write(file_path, final_content).await?;
-    Ok(())
+    tokio::fs::write(&actual_file_path, final_content).await?;
+    Ok(actual_file_path)
 }
 
 /// Update cargoHash attribute in Nix file
@@ -378,7 +498,9 @@ pub async fn update_from_file_path(
 
     // Step 5: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    update_nix_file(
+    let actual_file_location = update_nix_file(
+        &eval_entry_point,
+        &attr_path,
         &file_location,
         &metadata.version,
         &new_version,
@@ -387,7 +509,10 @@ pub async fn update_from_file_path(
     )
     .await?;
 
-    info!("Updated version and set invalid hash in {}", file_location);
+    info!(
+        "Updated version and set invalid hash in {}",
+        actual_file_location
+    );
 
     // Step 6: Build source to get correct hash
     let (success, _stdout, stderr) =
@@ -407,9 +532,11 @@ pub async fn update_from_file_path(
 
     info!("Extracted correct hash: {}", correct_hash);
 
-    // Step 7: Update hash with correct value
-    update_nix_file(
-        &file_location,
+    // Step 7: Update hash with correct value (use actual file location from step 5)
+    let _ = update_nix_file(
+        &eval_entry_point,
+        &attr_path,
+        &actual_file_location,
         &new_version, // version stays the same
         &new_version,
         Some(invalid_hash),
@@ -417,7 +544,7 @@ pub async fn update_from_file_path(
     )
     .await?;
 
-    info!("Updated hash in {}", file_location);
+    info!("Updated hash in {}", actual_file_location);
 
     // Step 8: Build source again to verify
     let (success, _stdout, stderr) =
@@ -435,9 +562,9 @@ pub async fn update_from_file_path(
 
         // Set invalid cargo hash
         let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_cargo_hash(&file_location, old_cargo_hash, invalid_cargo_hash).await?;
+        update_cargo_hash(&actual_file_location, old_cargo_hash, invalid_cargo_hash).await?;
 
-        info!("Set invalid cargoHash in {}", file_location);
+        info!("Set invalid cargoHash in {}", actual_file_location);
 
         // Build full package to get correct cargo hash
         let (success, _stdout, stderr) =
@@ -458,9 +585,14 @@ pub async fn update_from_file_path(
         info!("Extracted correct cargoHash: {}", correct_cargo_hash);
 
         // Update cargoHash with correct value
-        update_cargo_hash(&file_location, invalid_cargo_hash, &correct_cargo_hash).await?;
+        update_cargo_hash(
+            &actual_file_location,
+            invalid_cargo_hash,
+            &correct_cargo_hash,
+        )
+        .await?;
 
-        info!("Updated cargoHash in {}", file_location);
+        info!("Updated cargoHash in {}", actual_file_location);
     }
 
     // For Go packages, update vendorHash
@@ -469,9 +601,9 @@ pub async fn update_from_file_path(
 
         // Set invalid vendor hash
         let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_vendor_hash(&file_location, old_vendor_hash, invalid_vendor_hash).await?;
+        update_vendor_hash(&actual_file_location, old_vendor_hash, invalid_vendor_hash).await?;
 
-        info!("Set invalid vendorHash in {}", file_location);
+        info!("Set invalid vendorHash in {}", actual_file_location);
 
         // Build full package to get correct vendor hash
         let (success, _stdout, stderr) =
@@ -492,9 +624,14 @@ pub async fn update_from_file_path(
         info!("Extracted correct vendorHash: {}", correct_vendor_hash);
 
         // Update vendorHash with correct value
-        update_vendor_hash(&file_location, invalid_vendor_hash, &correct_vendor_hash).await?;
+        update_vendor_hash(
+            &actual_file_location,
+            invalid_vendor_hash,
+            &correct_vendor_hash,
+        )
+        .await?;
 
-        info!("Updated vendorHash in {}", file_location);
+        info!("Updated vendorHash in {}", actual_file_location);
     }
 
     // Step 9: Build full package to verify with reversed patch recovery
@@ -504,11 +641,11 @@ pub async fn update_from_file_path(
 
         if success {
             // Build succeeded - check if patches array is now empty
-            let content = tokio::fs::read_to_string(&file_location).await?;
+            let content = tokio::fs::read_to_string(&actual_file_location).await?;
             if is_patches_array_empty(&content) {
                 match remove_patches_attribute(&content) {
                     Ok(updated_content) => {
-                        tokio::fs::write(&file_location, updated_content).await?;
+                        tokio::fs::write(&actual_file_location, updated_content).await?;
                         debug!("Removed empty patches attribute");
                     },
                     Err(e) => {
@@ -525,13 +662,13 @@ pub async fn update_from_file_path(
             debug!("Detected reversed patch: {}", patch_name);
 
             // Read the file
-            let content = tokio::fs::read_to_string(&file_location).await?;
+            let content = tokio::fs::read_to_string(&actual_file_location).await?;
 
             // Remove the patch
             match remove_patch_from_array(&content, &patch_name) {
                 Ok(updated_content) => {
                     // Write the updated content back
-                    tokio::fs::write(&file_location, updated_content).await?;
+                    tokio::fs::write(&actual_file_location, updated_content).await?;
                     debug!("Removed obsolete patch: {}", patch_name);
                     // Continue loop to retry the build
                 },

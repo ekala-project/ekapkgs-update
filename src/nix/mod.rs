@@ -2,6 +2,7 @@ pub mod nix_eval_jobs;
 pub mod run_eval;
 
 use tokio::process::Command;
+use tracing::debug;
 
 /// Evaluate a Nix expression and return the result as a string
 ///
@@ -51,4 +52,29 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
         .to_string();
 
     Ok(result)
+}
+
+/// Check if a package uses mkManyVariants pattern by evaluating '<pkg> ? variants'
+pub async fn is_many_variants_package(
+    eval_entry_point: &str,
+    attr_path: &str,
+) -> anyhow::Result<bool> {
+    let check_expr = format!(
+        "with import ./{} {{ }}; {} ? variants",
+        eval_entry_point, attr_path
+    );
+
+    match eval_nix_expr(&check_expr).await {
+        Ok(result) => {
+            let is_many_variants = result.trim() == "true";
+            if is_many_variants {
+                debug!("{} is a mkManyVariants package", attr_path);
+            }
+            Ok(is_many_variants)
+        },
+        Err(e) => {
+            debug!("Failed to check if {} is mkManyVariants: {}", attr_path, e);
+            Ok(false)
+        },
+    }
 }
