@@ -10,12 +10,12 @@ use tracing::{debug, info};
 /// Represents a package update record in the database
 #[derive(Debug, Clone)]
 pub struct UpdateRecord {
-    pub attr_path: String,
+    pub _attr_path: String,
     pub last_attempted: Option<DateTime<Utc>>,
     pub next_attempt: Option<DateTime<Utc>>,
-    pub current_version: Option<String>,
+    pub _current_version: Option<String>,
     pub proposed_version: Option<String>,
-    pub latest_upstream_version: Option<String>,
+    pub _latest_upstream_version: Option<String>,
 }
 
 /// Represents a failed update log entry in the database
@@ -97,16 +97,16 @@ impl Database {
                 let next_attempt: Option<String> = row.try_get("next_attempt")?;
 
                 Ok(Some(UpdateRecord {
-                    attr_path: row.try_get("attr_path")?,
+                    _attr_path: row.try_get("attr_path")?,
                     last_attempted: last_attempted
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                         .map(|dt| dt.with_timezone(&Utc)),
                     next_attempt: next_attempt
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                         .map(|dt| dt.with_timezone(&Utc)),
-                    current_version: row.try_get("current_version")?,
+                    _current_version: row.try_get("current_version")?,
                     proposed_version: row.try_get("proposed_version")?,
-                    latest_upstream_version: row.try_get("latest_upstream_version")?,
+                    _latest_upstream_version: row.try_get("latest_upstream_version")?,
                 }))
             },
             None => Ok(None),
@@ -258,7 +258,7 @@ impl Database {
     }
 
     /// Record a proposed update (update was made but not yet merged)
-    pub async fn record_proposed_update(
+    pub async fn _record_proposed_update(
         &self,
         attr_path: &str,
         current_version: &str,
@@ -300,7 +300,7 @@ impl Database {
     }
 
     /// Get statistics about tracked packages
-    pub async fn get_statistics(&self) -> Result<DatabaseStatistics> {
+    pub async fn _get_statistics(&self) -> Result<_DatabaseStatistics> {
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM updates")
             .fetch_one(&self.pool)
             .await?;
@@ -315,7 +315,7 @@ impl Database {
                 .fetch_one(&self.pool)
                 .await?;
 
-        Ok(DatabaseStatistics {
+        Ok(_DatabaseStatistics {
             total_packages: total,
             packages_with_proposed_updates: with_proposed,
             packages_in_backoff: in_backoff,
@@ -396,7 +396,7 @@ impl Database {
     }
 
     /// Get the most recent failed log for an attr_path
-    pub async fn get_latest_failed_log_by_attr(
+    pub async fn _get_latest_failed_log_by_attr(
         &self,
         attr_path: &str,
     ) -> Result<Option<UpdateLog>> {
@@ -435,7 +435,7 @@ impl Database {
 }
 
 #[derive(Debug)]
-pub struct DatabaseStatistics {
+pub struct _DatabaseStatistics {
     pub total_packages: i64,
     pub packages_with_proposed_updates: i64,
     pub packages_in_backoff: i64,
