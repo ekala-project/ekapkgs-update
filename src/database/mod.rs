@@ -18,6 +18,27 @@ pub struct UpdateRecord {
     pub latest_upstream_version: Option<String>,
 }
 
+/// Represents a failed update log entry in the database
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UpdateLog {
+    pub drv_path: String,
+    pub attr_path: String,
+    pub timestamp: String,
+    pub status: String,
+    pub error_log: String,
+    pub old_version: Option<String>,
+    pub new_version: Option<String>,
+}
+
+impl UpdateLog {
+    /// Parse the timestamp string as a DateTime<Utc>
+    pub fn timestamp_as_datetime(&self) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&self.timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
+    }
+}
+
 /// Database connection wrapper for tracking package updates
 pub struct Database {
     pool: SqlitePool,
@@ -61,6 +82,44 @@ impl Database {
         .execute(&pool)
         .await
         .context("Failed to create updates table")?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS update_logs (
+                drv_path TEXT PRIMARY KEY,
+                attr_path TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_log TEXT NOT NULL,
+                old_version TEXT,
+                new_version TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .context("Failed to create update_logs table")?;
+
+        // Create indices for faster lookups
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_update_logs_attr_path
+            ON update_logs(attr_path)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .context("Failed to create attr_path index")?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_update_logs_timestamp
+            ON update_logs(timestamp DESC)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .context("Failed to create timestamp index")?;
 
         debug!("Database tables initialized");
 
@@ -310,6 +369,117 @@ impl Database {
             packages_with_proposed_updates: with_proposed,
             packages_in_backoff: in_backoff,
         })
+    }
+
+    /// Record a failed update attempt with error log
+    pub async fn record_failed_update(
+        &self,
+        drv_path: &str,
+        attr_path: &str,
+        error_log: &str,
+        old_version: Option<&str>,
+        new_version: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now();
+
+        debug!(
+            "{}: Recording failed update attempt for drv {}",
+            attr_path, drv_path
+        );
+
+        sqlx::query(
+            r#"
+            INSERT INTO update_logs (drv_path, attr_path, timestamp, status, error_log,
+                                    old_version, new_version)
+            VALUES (?, ?, ?, 'failed', ?, ?, ?)
+            ON CONFLICT(drv_path) DO UPDATE SET
+                timestamp = excluded.timestamp,
+                error_log = excluded.error_log,
+                old_version = excluded.old_version,
+                new_version = excluded.new_version
+            "#,
+        )
+        .bind(drv_path)
+        .bind(attr_path)
+        .bind(now.to_rfc3339())
+        .bind(error_log)
+        .bind(old_version)
+        .bind(new_version)
+        .execute(&self.pool)
+        .await
+        .context("Failed to record failed update")?;
+
+        Ok(())
+    }
+
+    /// Get a log entry by drv_path (supports both full path and hash-name format)
+    pub async fn get_log_by_drv(&self, drv_identifier: &str) -> Result<Option<UpdateLog>> {
+        // Try exact match first
+        let mut log = sqlx::query_as::<_, UpdateLog>(
+            r#"
+            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
+            FROM update_logs
+            WHERE drv_path = ?
+            "#,
+        )
+        .bind(drv_identifier)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        // If no exact match and identifier doesn't start with /nix/store/,
+        // try matching the end of drv_path
+        if log.is_none() && !drv_identifier.starts_with("/nix/store/") {
+            log = sqlx::query_as::<_, UpdateLog>(
+                r#"
+                SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
+                FROM update_logs
+                WHERE drv_path LIKE ?
+                "#,
+            )
+            .bind(format!("%/{}", drv_identifier))
+            .fetch_optional(&self.pool)
+            .await?;
+        }
+
+        Ok(log)
+    }
+
+    /// Get the most recent failed log for an attr_path
+    pub async fn get_latest_failed_log_by_attr(
+        &self,
+        attr_path: &str,
+    ) -> Result<Option<UpdateLog>> {
+        let log = sqlx::query_as::<_, UpdateLog>(
+            r#"
+            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
+            FROM update_logs
+            WHERE attr_path = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(attr_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(log)
+    }
+
+    /// Get all failed logs for an attr_path, ordered by most recent
+    pub async fn get_all_failed_logs_by_attr(&self, attr_path: &str) -> Result<Vec<UpdateLog>> {
+        let logs = sqlx::query_as::<_, UpdateLog>(
+            r#"
+            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
+            FROM update_logs
+            WHERE attr_path = ?
+            ORDER BY timestamp DESC
+            "#,
+        )
+        .bind(attr_path)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(logs)
     }
 }
 

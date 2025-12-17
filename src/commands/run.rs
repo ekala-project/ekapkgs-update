@@ -246,6 +246,10 @@ async fn check_and_update_package(
 
     // Update is needed - for now, just record it
     // In a full implementation, this would call the update logic
+    // TODO: When implementing actual updates, wrap update logic in match block:
+    //   - On success: call db.record_successful_update()
+    //   - On failure: call db.record_failed_update(drv.drv_path, attr_path, error_msg, old_version,
+    //     new_version)
     info!(
         "{}: Update available: {} -> {}",
         attr_path, current_version, latest_version
