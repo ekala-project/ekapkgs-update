@@ -3,6 +3,7 @@ use tracing::{debug, info, warn};
 
 use crate::database::Database;
 use crate::nix;
+use crate::nix::eval_nix_expr;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
@@ -244,27 +245,90 @@ async fn check_and_update_package(
         }
     }
 
-    // Update is needed - for now, just record it
-    // In a full implementation, this would call the update logic
-    // TODO: When implementing actual updates, wrap update logic in match block:
-    //   - On success: call db.record_successful_update()
-    //   - On failure: call db.record_failed_update(drv.drv_path, attr_path, error_msg, old_version,
-    //     new_version)
+    // Update is needed - attempt the update
     info!(
         "{}: Update available: {} -> {}",
         attr_path, current_version, latest_version
     );
 
-    // Record as proposed update for now
-    if let Err(e) = db
-        .record_proposed_update(attr_path, current_version, &latest_version, &latest_version)
-        .await
+    // Get file location from meta.position
+    let file_location = match get_file_location(eval_entry_point, attr_path).await {
+        Ok(loc) => loc,
+        Err(e) => {
+            warn!("{}: Failed to get file location: {}", attr_path, e);
+            return Ok(UpdateResult::Skipped("Could not locate file".to_string()));
+        },
+    };
+
+    debug!("{}: File location: {}", attr_path, file_location);
+
+    // Attempt the update
+    match crate::commands::update::update_from_file_path(
+        eval_entry_point.to_string(),
+        attr_path.to_string(),
+        file_location,
+        SemverStrategy::Latest,
+        false, // Don't auto-commit in run mode
+    )
+    .await
     {
-        warn!("{}: Failed to record proposed update: {}", attr_path, e);
+        Ok(()) => {
+            // Update succeeded
+            info!("{}: Successfully updated to {}", attr_path, latest_version);
+
+            if let Err(e) = db
+                .record_successful_update(attr_path, current_version, &latest_version)
+                .await
+            {
+                warn!("{}: Failed to record successful update: {}", attr_path, e);
+            }
+
+            Ok(UpdateResult::Updated {
+                old_version: current_version.to_string(),
+                new_version: latest_version.to_string(),
+            })
+        },
+        Err(e) => {
+            // Update failed - record the failure log
+            let error_message = format!("{:#}", e);
+            warn!("{}: Update failed: {}", attr_path, error_message);
+
+            if let Err(db_err) = db
+                .record_failed_update(
+                    &drv.drv_path,
+                    attr_path,
+                    &error_message,
+                    Some(current_version),
+                    Some(&latest_version),
+                )
+                .await
+            {
+                warn!("{}: Failed to record update failure: {}", attr_path, db_err);
+            }
+
+            // Return as skipped so it doesn't count as a successful update
+            Ok(UpdateResult::Skipped(format!("Update failed: {}", e)))
+        },
+    }
+}
+
+/// Get the file location for a package from meta.position
+async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
+    let position_expr = format!(
+        "with import ./{} {{ }}; {}.meta.position",
+        eval_entry_point, attr_path
+    );
+
+    let position = eval_nix_expr(&position_expr).await?;
+
+    if position.is_empty() {
+        anyhow::bail!("Empty position returned from meta.position");
     }
 
-    Ok(UpdateResult::Updated {
-        old_version: current_version.to_string(),
-        new_version: latest_version.to_string(),
-    })
+    // Parse position string (format: "file:line")
+    let (file_path, _line_str) = position
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+
+    Ok(file_path.to_string())
 }
