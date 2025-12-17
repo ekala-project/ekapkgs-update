@@ -66,62 +66,13 @@ impl Database {
 
         info!("Connected to database at {}", db_path);
 
-        // Create tables
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS updates (
-                attr_path TEXT PRIMARY KEY,
-                last_attempted TEXT,
-                next_attempt TEXT,
-                current_version TEXT,
-                proposed_version TEXT,
-                latest_upstream_version TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .context("Failed to create updates table")?;
+        // Run migrations
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .context("Failed to run database migrations")?;
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS update_logs (
-                drv_path TEXT PRIMARY KEY,
-                attr_path TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error_log TEXT NOT NULL,
-                old_version TEXT,
-                new_version TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .context("Failed to create update_logs table")?;
-
-        // Create indices for faster lookups
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_update_logs_attr_path
-            ON update_logs(attr_path)
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .context("Failed to create attr_path index")?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_update_logs_timestamp
-            ON update_logs(timestamp DESC)
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .context("Failed to create timestamp index")?;
-
-        debug!("Database tables initialized");
+        debug!("Database migrations completed");
 
         Ok(Self { pool })
     }
