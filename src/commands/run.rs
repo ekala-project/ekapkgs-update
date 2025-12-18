@@ -299,6 +299,10 @@ async fn check_and_update_package(
         worktree_file_str,
         SemverStrategy::Latest,
         false, // Don't auto-commit in run mode
+        false, // Don't create PR here (handled separately by create_pr_for_update)
+        None,  // owner
+        None,  // repo
+        None,  // base
     )
     .await;
 
