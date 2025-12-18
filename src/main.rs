@@ -31,6 +31,10 @@ enum Commands {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
         database: String,
+        /// Target repository for pull requests (format: owner/repo). If not specified,
+        /// auto-detects from git upstream.
+        #[arg(long)]
+        pr_repo: Option<String>,
     },
     /// Update a package in a Nix file
     Update {
@@ -82,7 +86,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Commands::Run { file, database } => commands::run::run(file, database).await?,
+        Commands::Run {
+            file,
+            database,
+            pr_repo,
+        } => commands::run::run(file, database, pr_repo).await?,
         Commands::Update {
             file,
             attr_path,

@@ -25,6 +25,13 @@ pub struct GithubTag {
     pub name: String,
 }
 
+/// GitHub PR creation response from the API
+#[derive(Debug, Deserialize)]
+pub struct GithubPullRequest {
+    pub html_url: String,
+    pub number: i64,
+}
+
 /// Parse GitHub URL to extract owner and repo
 ///
 /// Supports various GitHub URL formats:
@@ -146,6 +153,66 @@ pub async fn fetch_github_releases(
 
     let releases: Vec<GithubRelease> = response.json().await?;
     Ok(releases)
+}
+
+/// Create a pull request on GitHub
+///
+/// # Arguments
+/// * `owner` - Repository owner/organization
+/// * `repo` - Repository name
+/// * `title` - PR title
+/// * `body` - PR description/body
+/// * `head` - Branch name containing the changes (e.g., "update/foo-1.2.3")
+/// * `base` - Target branch to merge into (e.g., "main" or "master")
+/// * `token` - GitHub personal access token for authentication
+///
+/// # Returns
+/// The created pull request information (URL and number)
+pub async fn create_pull_request(
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+    head: &str,
+    base: &str,
+    token: &str,
+) -> anyhow::Result<GithubPullRequest> {
+    let url = format!("https://api.github.com/repos/{}/{}/pulls", owner, repo);
+
+    debug!("Creating PR at {}", url);
+
+    let client = reqwest::Client::new();
+    let request_body = serde_json::json!({
+        "title": title,
+        "body": body,
+        "head": head,
+        "base": base,
+    });
+
+    let response = client
+        .post(&url)
+        .header("User-Agent", "ekapkgs-update")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&request_body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await?;
+        anyhow::bail!(
+            "GitHub PR creation failed with status {}: {}",
+            status,
+            error_text
+        );
+    }
+
+    let pr: GithubPullRequest = response.json().await?;
+    debug!("Created PR #{}: {}", pr.number, pr.html_url);
+
+    Ok(pr)
 }
 
 #[cfg(test)]

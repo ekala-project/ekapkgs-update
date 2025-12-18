@@ -2,14 +2,18 @@ use futures::{StreamExt, pin_mut};
 use tracing::{debug, info, warn};
 
 use crate::database::Database;
-use crate::git::{cleanup_worktree, create_worktree};
+use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix;
 use crate::nix::eval_nix_expr;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
-pub async fn run(file: String, database_path: String) -> anyhow::Result<()> {
+pub async fn run(
+    file: String,
+    database_path: String,
+    pr_repo: Option<String>,
+) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
     // Expand tilde in database path
@@ -18,6 +22,13 @@ pub async fn run(file: String, database_path: String) -> anyhow::Result<()> {
     // Initialize database
     let db = Database::new(&expanded_db_path).await?;
     info!("Database initialized at: {}", expanded_db_path);
+
+    // Determine PR configuration: use CLI override or auto-detect from git
+    let pr_config = if let Some(repo_str) = pr_repo {
+        parse_pr_config(&repo_str).await.ok()
+    } else {
+        crate::git::get_pr_config_from_git().await.ok()
+    };
 
     let stream = nix::run_eval::run_nix_eval_jobs(file.clone());
     pin_mut!(stream);
@@ -59,7 +70,7 @@ pub async fn run(file: String, database_path: String) -> anyhow::Result<()> {
                 checked_count += 1;
 
                 // Attempt to check for updates
-                match check_and_update_package(&db, &file, &drv).await {
+                match check_and_update_package(&db, &file, &drv, pr_config.as_ref()).await {
                     Ok(UpdateResult::Updated {
                         old_version,
                         new_version,
@@ -142,6 +153,7 @@ async fn check_and_update_package(
     db: &Database,
     eval_entry_point: &str,
     drv: &crate::nix::nix_eval_jobs::NixEvalDrv,
+    pr_config: Option<&PrConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &drv.attr;
 
@@ -295,16 +307,39 @@ async fn check_and_update_package(
             // Update succeeded
             info!("{}: Successfully updated to {}", attr_path, latest_version);
 
-            // Clean up the worktree
-            if let Err(e) = cleanup_worktree(&worktree_path).await {
-                warn!("{}: Failed to clean up worktree: {}", attr_path, e);
-            }
-
+            // Record successful update first
             if let Err(e) = db
                 .record_successful_update(attr_path, current_version, &latest_version)
                 .await
             {
                 warn!("{}: Failed to record successful update: {}", attr_path, e);
+            }
+
+            // Create PR if configured
+            if let Some(config) = pr_config {
+                match create_pr_for_update(
+                    db,
+                    &worktree_path,
+                    attr_path,
+                    current_version,
+                    &latest_version,
+                    config,
+                )
+                .await
+                {
+                    Ok((pr_url, pr_number)) => {
+                        info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
+                    },
+                    Err(e) => {
+                        warn!("{}: Failed to create PR: {}", attr_path, e);
+                        // Don't fail the update if PR creation fails
+                    },
+                }
+            }
+
+            // Clean up the worktree
+            if let Err(e) = cleanup_worktree(&worktree_path).await {
+                warn!("{}: Failed to clean up worktree: {}", attr_path, e);
             }
 
             Ok(UpdateResult::Updated {
@@ -363,4 +398,79 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
 
     Ok(file_path.to_string())
+}
+
+/// Create a pull request for a successful update
+async fn create_pr_for_update(
+    db: &Database,
+    worktree_path: &std::path::Path,
+    attr_path: &str,
+    old_version: &str,
+    new_version: &str,
+    config: &PrConfig,
+) -> anyhow::Result<(String, i64)> {
+    // Get GitHub token from environment
+    let github_token = std::env::var("GITHUB_TOKEN")
+        .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN environment variable not set"))?;
+
+    // Create and push branch
+    let branch_name = crate::git::create_and_push_branch(
+        worktree_path,
+        attr_path,
+        old_version,
+        new_version,
+        "origin", // Push to origin remote
+    )
+    .await?;
+
+    // Create PR title and body
+    let title = format!(
+        "Update {} from {} to {}",
+        attr_path, old_version, new_version
+    );
+    let body = format!(
+        "## Summary\n\nThis PR updates `{}` from version {} to {}.\n\n## Changes\n\n- Updated \
+         package version\n- Updated source hash\n\n🤖 Generated with ekapkgs-update",
+        attr_path, old_version, new_version
+    );
+
+    // Create PR via GitHub API
+    let pr = crate::github::create_pull_request(
+        &config.owner,
+        &config.repo,
+        &title,
+        &body,
+        &branch_name,
+        &config.base_branch,
+        &github_token,
+    )
+    .await?;
+
+    // Record PR info in database
+    db.record_pr_info(attr_path, &pr.html_url, pr.number)
+        .await?;
+
+    Ok((pr.html_url, pr.number))
+}
+
+/// Parse PR repository configuration from "owner/repo" format
+/// Auto-detects the base branch from git configuration
+async fn parse_pr_config(repo_str: &str) -> anyhow::Result<PrConfig> {
+    let parts: Vec<&str> = repo_str.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid format. Expected 'owner/repo', got '{}'", repo_str);
+    }
+
+    // Try to auto-detect base branch from git
+    let base_branch = crate::git::get_pr_config_from_git()
+        .await
+        .ok()
+        .map(|config| config.base_branch)
+        .unwrap_or_else(|| "master".to_string());
+
+    Ok(PrConfig {
+        owner: parts[0].to_string(),
+        repo: parts[1].to_string(),
+        base_branch,
+    })
 }

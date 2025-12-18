@@ -257,6 +257,32 @@ impl Database {
         Ok(())
     }
 
+    /// Record PR information for a successful update
+    pub async fn record_pr_info(
+        &self,
+        attr_path: &str,
+        pr_url: &str,
+        pr_number: i64,
+    ) -> Result<()> {
+        info!("{}: Recording PR #{} ({})", attr_path, pr_number, pr_url);
+
+        sqlx::query(
+            r#"
+            UPDATE updates
+            SET pr_url = ?, pr_number = ?
+            WHERE attr_path = ?
+            "#,
+        )
+        .bind(pr_url)
+        .bind(pr_number)
+        .bind(attr_path)
+        .execute(&self.pool)
+        .await
+        .context("Failed to record PR info")?;
+
+        Ok(())
+    }
+
     /// Record a proposed update (update was made but not yet merged)
     pub async fn _record_proposed_update(
         &self,
