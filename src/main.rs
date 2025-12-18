@@ -52,6 +52,18 @@ enum Commands {
         /// Create a git commit after successful update
         #[arg(long)]
         commit: bool,
+        /// Create a pull request after successful update (implies --commit)
+        #[arg(long)]
+        create_pr: bool,
+        /// GitHub repository owner (auto-detects from git if not specified)
+        #[arg(long)]
+        owner: Option<String>,
+        /// GitHub repository name (auto-detects from git if not specified)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Base branch for pull request (auto-detects from git if not specified)
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -97,8 +109,23 @@ async fn main() -> anyhow::Result<()> {
             semver,
             ignore_update_script,
             commit,
+            create_pr,
+            owner,
+            repo,
+            base,
         } => {
-            commands::update::update(file, attr_path, semver, ignore_update_script, commit).await?
+            commands::update::update(
+                file,
+                attr_path,
+                semver,
+                ignore_update_script,
+                commit,
+                create_pr,
+                owner,
+                repo,
+                base,
+            )
+            .await?
         },
         Commands::PruneMaintainers { directory } => {
             commands::prune_maintainers::prune_maintainers(directory).await?

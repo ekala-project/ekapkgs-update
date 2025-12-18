@@ -1,8 +1,12 @@
+use std::process::Stdio;
+
 use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::git::{PrConfig, get_pr_config_from_git};
+use crate::github;
 use crate::nix::{eval_nix_expr, is_many_variants_package};
 use crate::package::PackageMetadata;
 use crate::rewrite::{
@@ -67,6 +71,10 @@ pub async fn update(
     semver_strategy: String,
     ignore_update_script: bool,
     commit: bool,
+    create_pr: bool,
+    owner: Option<String>,
+    repo: Option<String>,
+    base: Option<String>,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
@@ -98,7 +106,18 @@ pub async fn update(
         Ok(file_path.to_string())
     })?;
 
-    update_from_file_path(file, attr_path, expr_file_path, strategy, commit).await?;
+    update_from_file_path(
+        file,
+        attr_path,
+        expr_file_path,
+        strategy,
+        commit,
+        create_pr,
+        owner,
+        repo,
+        base,
+    )
+    .await?;
 
     Ok(())
 }
@@ -457,6 +476,10 @@ pub async fn update_from_file_path(
     file_location: String,
     strategy: SemverStrategy,
     commit: bool,
+    create_pr: bool,
+    owner: Option<String>,
+    repo: Option<String>,
+    base: Option<String>,
 ) -> anyhow::Result<()> {
     info!(
         "Starting generic update for {} at {}",
@@ -697,8 +720,128 @@ pub async fn update_from_file_path(
         attr_path, metadata.version, new_version
     );
 
-    // Create git commit if requested
-    if commit {
+    // Handle commit and PR creation
+    if create_pr {
+        // Get PR configuration - use CLI args or auto-detect from git
+        let pr_config = if owner.is_some() || repo.is_some() || base.is_some() {
+            // Use CLI-provided values, falling back to auto-detection for missing values
+            let auto_config = get_pr_config_from_git().await?;
+            PrConfig {
+                owner: owner.unwrap_or(auto_config.owner),
+                repo: repo.unwrap_or(auto_config.repo),
+                base_branch: base.unwrap_or(auto_config.base_branch),
+            }
+        } else {
+            // Auto-detect everything from git
+            get_pr_config_from_git().await?
+        };
+
+        // Get GitHub token from environment
+        let github_token = std::env::var("GITHUB_TOKEN").context(
+            "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
+             GITHUB_TOKEN=your_token_here",
+        )?;
+
+        info!("Creating pull request for {}", attr_path);
+
+        // Create branch name
+        let sanitized_attr = attr_path.replace(['.', '/'], "-");
+        let branch_name = format!("update/{}/{}", sanitized_attr, new_version);
+
+        // Create new branch
+        debug!("Creating branch '{}'", branch_name);
+        let output = Command::new("git")
+            .args(["checkout", "-b", &branch_name])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
+        }
+
+        // Stage all changes
+        debug!("Staging changes");
+        let output = Command::new("git")
+            .args(["add", "-A"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to stage changes: {}", stderr);
+        }
+
+        // Create commit with bot signature
+        let commit_message = format!(
+            "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
+             ekapkgs-update <noreply@ekapkgs.org>",
+            attr_path, metadata.version, new_version
+        );
+
+        debug!("Creating commit");
+        let output = Command::new("git")
+            .args(["commit", "-m", &commit_message])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to commit changes: {}", stderr);
+        }
+
+        // Push to remote
+        debug!("Pushing branch to remote");
+        let push_target = format!("{}:{}", branch_name, branch_name);
+        let remote = "origin"; // Default remote name
+        let output = Command::new("git")
+            .args(["push", "-u", remote, &push_target])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "Failed to push branch '{}' to remote '{}': {}",
+                branch_name,
+                remote,
+                stderr
+            );
+        }
+
+        info!("Pushed branch '{}' to remote", branch_name);
+
+        // Create pull request
+        let pr_title = format!("{}: {} -> {}", attr_path, metadata.version, new_version);
+        let pr_body = format!(
+            "## Update {}\n\nUpdates from version {} to {}.\n\n🤖 Generated with ekapkgs-update",
+            attr_path, metadata.version, new_version
+        );
+
+        debug!("Creating pull request");
+        let pr = github::create_pull_request(
+            &pr_config.owner,
+            &pr_config.repo,
+            &pr_title,
+            &pr_body,
+            &branch_name,
+            &pr_config.base_branch,
+            &github_token,
+        )
+        .await?;
+
+        info!("✓ Created pull request: {}", pr.html_url);
+        println!("Pull request created: {}", pr.html_url);
+    } else if commit {
+        // Just create a commit without PR
         create_git_commit(&attr_path, &metadata.version, &new_version).await?;
     }
 
