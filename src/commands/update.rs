@@ -320,6 +320,7 @@ fn detect_reversed_patch(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().collect();
     let start = lines.len().saturating_sub(20);
     let last_lines = &lines[start..];
+    let patch_regex = Regex::new(r"applying patch /nix/store/[^-]+-(.+)").ok()?;
 
     // Look for the reversed patch error message
     for (i, line) in last_lines.iter().enumerate() {
@@ -328,7 +329,6 @@ fn detect_reversed_patch(stderr: &str) -> Option<String> {
             for j in (0..i).rev() {
                 let prev_line = last_lines[j];
                 // Pattern: "applying patch /nix/store/${hash}-${name}"
-                let patch_regex = Regex::new(r"applying patch /nix/store/[^-]+-(.+)").ok()?;
                 if let Some(caps) = patch_regex.captures(prev_line) {
                     return Some(caps.get(1)?.as_str().to_string());
                 }

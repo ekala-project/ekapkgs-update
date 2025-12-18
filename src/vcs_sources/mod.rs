@@ -86,7 +86,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
     // URL format: https://files.pythonhosted.org/packages/hash/hash/package-version.tar.gz
     if url.contains("pythonhosted.org") || url.contains("pypi.python.org") {
         // Extract filename from URL
-        if let Some(filename) = url.split('/').last() {
+        if let Some(filename) = url.split('/').next_back() {
             // Remove file extension and version suffix to get package name
             // This is a heuristic and may not work for all cases
             if let Some(name_with_version) = filename.split('.').next() {
@@ -98,7 +98,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
                     if name_with_version[idx + 1..]
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_ascii_digit())
+                        .is_some_and(|c| c.is_ascii_digit())
                     {
                         return Some(potential_name.to_string());
                     }
@@ -131,11 +131,8 @@ impl UpstreamSource {
                 owner: gitlab_project.owner,
                 project: gitlab_project.project,
             })
-        } else if let Some(pypi_pname) = parse_pypi_url(url) {
-            // URL is from PyPI
-            Some(UpstreamSource::PyPI { pname: pypi_pname })
         } else {
-            None
+            parse_pypi_url(url).map(|pypi_pname| UpstreamSource::PyPI { pname: pypi_pname })
         }
     }
 
