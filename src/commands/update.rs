@@ -7,7 +7,9 @@ use tracing::{debug, info, warn};
 
 use crate::git::{PrConfig, get_pr_config_from_git};
 use crate::github;
-use crate::nix::{eval_nix_expr, is_many_variants_package};
+use crate::nix::{
+    eval_nix_expr, has_passthru_tests, is_many_variants_package, normalize_entry_point,
+};
 use crate::package::PackageMetadata;
 use crate::rewrite::{
     find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
@@ -22,9 +24,10 @@ async fn run_update_script(file: &str, attr_path: &str) -> anyhow::Result<bool> 
     info!("Checking for update script for {}", attr_path);
 
     // Check if an update script is defined for this package
+    let normalized_entry = normalize_entry_point(file);
     let nix_expr = format!(
-        "with import ./{} {{ }}; toString {}.updateScript",
-        file, attr_path
+        "with import {} {{ }}; toString {}.updateScript",
+        normalized_entry, attr_path
     );
 
     let script_path_result = eval_nix_expr(&nix_expr).await;
@@ -75,6 +78,7 @@ pub async fn update(
     owner: Option<String>,
     repo: Option<String>,
     base: Option<String>,
+    run_passthru_tests: bool,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
@@ -93,7 +97,11 @@ pub async fn update(
     // No update script or ignoring it - use generic update method
     // Try to find the package file location via meta.position
     debug!("Attempting to locate package definition...");
-    let position_expr = format!("with import ./{} {{ }}; {}.meta.position", file, attr_path);
+    let normalized_entry = normalize_entry_point(&file);
+    let position_expr = format!(
+        "with import {} {{ }}; {}.meta.position",
+        normalized_entry, attr_path
+    );
 
     let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
         if position.is_empty() {
@@ -116,6 +124,8 @@ pub async fn update(
         owner,
         repo,
         base,
+        run_passthru_tests,
+        false, // Don't fail on test errors for update command
     )
     .await?;
 
@@ -390,6 +400,7 @@ async fn create_git_commit(
     attr_path: &str,
     old_version: &str,
     new_version: &str,
+    tests_passed: bool,
 ) -> anyhow::Result<()> {
     info!("Creating git commit for update");
 
@@ -421,7 +432,7 @@ async fn create_git_commit(
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
             // Parse git status output (format: "XY filename")
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
             if parts.len() == 2 {
                 Some(parts[1].trim())
             } else {
@@ -452,7 +463,14 @@ async fn create_git_commit(
     }
 
     // Create commit with formatted message
-    let commit_message = format!("{}: {} -> {}", attr_path, old_version, new_version);
+    let commit_message = if tests_passed {
+        format!(
+            "{}: {} -> {}\n\nTests: passthru.tests passed",
+            attr_path, old_version, new_version
+        )
+    } else {
+        format!("{}: {} -> {}", attr_path, old_version, new_version)
+    };
     let commit_output = Command::new("git")
         .args(["commit", "-m", &commit_message])
         .output()
@@ -480,6 +498,8 @@ pub async fn update_from_file_path(
     owner: Option<String>,
     repo: Option<String>,
     base: Option<String>,
+    run_passthru_tests: bool,
+    fail_on_test_failure: bool,
 ) -> anyhow::Result<()> {
     info!(
         "Starting generic update for {} at {}",
@@ -715,6 +735,36 @@ pub async fn update_from_file_path(
         }
     }
 
+    // Run passthru.tests if requested
+    let mut tests_passed = false;
+    info!("Checking for passthru.tests...");
+    if run_passthru_tests {
+        // Check if tests exist using nix eval
+        let normalized_entry = normalize_entry_point(&eval_entry_point);
+
+        if has_passthru_tests(&normalized_entry, &attr_path).await? {
+            info!("Found {}.passthru.tests, building tests...", &attr_path);
+
+            // Build tests
+            let (success, _stdout, stderr) =
+                build_nix_expr(&eval_entry_point, &attr_path, Some("passthru.tests")).await?;
+
+            if !success {
+                warn!("Tests failed:\n{}", stderr);
+                if fail_on_test_failure {
+                    anyhow::bail!("Package tests failed after update");
+                } else {
+                    warn!("Package tests failed after update, but continuing anyway");
+                }
+            } else {
+                info!("✓ Tests passed");
+                tests_passed = true;
+            }
+        } else {
+            info!("No passthru.tests found for {}", attr_path);
+        }
+    }
+
     info!(
         "✓ Successfully updated {} from {} to {}",
         attr_path, metadata.version, new_version
@@ -777,11 +827,19 @@ pub async fn update_from_file_path(
         }
 
         // Create commit with bot signature
-        let commit_message = format!(
-            "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-             ekapkgs-update <noreply@ekapkgs.org>",
-            attr_path, metadata.version, new_version
-        );
+        let commit_message = if tests_passed {
+            format!(
+                "Update {} from {} to {}\n\nTests: passthru.tests passed\n\n🤖 Generated with \
+                 ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>",
+                attr_path, metadata.version, new_version
+            )
+        } else {
+            format!(
+                "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
+                 ekapkgs-update <noreply@ekapkgs.org>",
+                attr_path, metadata.version, new_version
+            )
+        };
 
         debug!("Creating commit");
         let output = Command::new("git")
@@ -842,7 +900,7 @@ pub async fn update_from_file_path(
         println!("Pull request created: {}", pr.html_url);
     } else if commit {
         // Just create a commit without PR
-        create_git_commit(&attr_path, &metadata.version, &new_version).await?;
+        create_git_commit(&attr_path, &metadata.version, &new_version, tests_passed).await?;
     }
 
     Ok(())

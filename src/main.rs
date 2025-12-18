@@ -35,6 +35,9 @@ enum Commands {
         /// auto-detects from git upstream.
         #[arg(long)]
         pr_repo: Option<String>,
+        /// Run passthru.tests if available before considering update successful
+        #[arg(long)]
+        run_passthru_tests: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -64,6 +67,9 @@ enum Commands {
         /// Base branch for pull request (auto-detects from git if not specified)
         #[arg(long)]
         base: Option<String>,
+        /// Run passthru.tests if available before considering update successful
+        #[arg(long)]
+        run_passthru_tests: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -102,7 +108,8 @@ async fn main() -> anyhow::Result<()> {
             file,
             database,
             pr_repo,
-        } => commands::run::run(file, database, pr_repo).await?,
+            run_passthru_tests,
+        } => commands::run::run(file, database, pr_repo, run_passthru_tests).await?,
         Commands::Update {
             file,
             attr_path,
@@ -113,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
             owner,
             repo,
             base,
+            run_passthru_tests,
         } => {
             commands::update::update(
                 file,
@@ -124,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 owner,
                 repo,
                 base,
+                run_passthru_tests,
             )
             .await?
         },
