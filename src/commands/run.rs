@@ -4,8 +4,8 @@ use tracing::{debug, info, warn};
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix;
-use crate::nix::eval_nix_expr;
 use crate::nix::nix_eval_jobs::NixEvalItem;
+use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
@@ -13,6 +13,7 @@ pub async fn run(
     file: String,
     database_path: String,
     pr_repo: Option<String>,
+    run_passthru_tests: bool,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
@@ -70,7 +71,15 @@ pub async fn run(
                 checked_count += 1;
 
                 // Attempt to check for updates
-                match check_and_update_package(&db, &file, &drv, pr_config.as_ref()).await {
+                match check_and_update_package(
+                    &db,
+                    &file,
+                    &drv,
+                    pr_config.as_ref(),
+                    run_passthru_tests,
+                )
+                .await
+                {
                     Ok(UpdateResult::Updated {
                         old_version,
                         new_version,
@@ -154,6 +163,7 @@ async fn check_and_update_package(
     eval_entry_point: &str,
     drv: &crate::nix::nix_eval_jobs::NixEvalDrv,
     pr_config: Option<&PrConfig>,
+    run_passthru_tests: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &drv.attr;
 
@@ -303,6 +313,8 @@ async fn check_and_update_package(
         None,  // owner
         None,  // repo
         None,  // base
+        run_passthru_tests,
+        run_passthru_tests, // Fail on test errors in run mode
     )
     .await;
 
@@ -385,9 +397,10 @@ async fn check_and_update_package(
 
 /// Get the file location for a package from meta.position
 async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
     let position_expr = format!(
-        "with import ./{} {{ }}; {}.meta.position",
-        eval_entry_point, attr_path
+        "with import {} {{ }}; {}.meta.position",
+        normalized_entry, attr_path
     );
 
     let position = eval_nix_expr(&position_expr).await?;
