@@ -440,16 +440,42 @@ async fn create_pr_for_update(
     )
     .await?;
 
+    // Fetch package metadata for PR body
+    let eval_entry_point = normalize_entry_point("<nixpkgs>");
+    let metadata = PackageMetadata::from_attr_path(&eval_entry_point, attr_path)
+        .await
+        .ok();
+
     // Create PR title and body
     let title = format!(
         "Update {} from {} to {}",
         attr_path, old_version, new_version
     );
-    let body = format!(
+    let mut body = format!(
         "## Summary\n\nThis PR updates `{}` from version {} to {}.\n\n## Changes\n\n- Updated \
-         package version\n- Updated source hash\n\n🤖 Generated with ekapkgs-update",
+         package version\n- Updated source hash",
         attr_path, old_version, new_version
     );
+
+    // Add optional metadata fields if available
+    if let Some(meta) = metadata.as_ref() {
+        if let Some(description) = meta.description.as_ref() {
+            body.push_str(&format!(
+                "\n\n## Package Information\n\n**Description:** {}",
+                description
+            ));
+        } else {
+            body.push_str("\n\n## Package Information");
+        }
+        if let Some(homepage) = meta.homepage.as_ref() {
+            body.push_str(&format!("\n\n**Homepage:** {}", homepage));
+        }
+        if let Some(changelog) = meta.changelog.as_ref() {
+            body.push_str(&format!("\n\n**Changelog:** {}", changelog));
+        }
+    }
+
+    body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
     // Create PR via GitHub API
     let pr = crate::github::create_pull_request(

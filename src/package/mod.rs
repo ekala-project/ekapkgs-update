@@ -12,6 +12,9 @@ pub struct PackageMetadata {
     pub cargo_hash: Option<String>,
     pub vendor_hash: Option<String>,
     pub pname: Option<String>,
+    pub description: Option<String>,
+    pub homepage: Option<String>,
+    pub changelog: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -77,6 +80,9 @@ impl PackageMetadata {
         let cargo_hash = package.get_attr("cargoHash").await;
         let vendor_hash = package.get_attr("vendorHash").await;
         let pname = package.get_attr("pname").await;
+        let description = package.get_attr("meta.description").await;
+        let homepage = package.get_attr("meta.homepage").await;
+        let changelog = package.get_attr("meta.changelog").await;
 
         Ok(PackageMetadata {
             version,
@@ -85,6 +91,9 @@ impl PackageMetadata {
             cargo_hash,
             vendor_hash,
             pname,
+            description,
+            homepage,
+            changelog,
         })
     }
 }

@@ -879,10 +879,23 @@ pub async fn update_from_file_path(
 
         // Create pull request
         let pr_title = format!("{}: {} -> {}", attr_path, metadata.version, new_version);
-        let pr_body = format!(
-            "## Update {}\n\nUpdates from version {} to {}.\n\n🤖 Generated with ekapkgs-update",
+        let mut pr_body = format!(
+            "## Update {}\n\nUpdates from version {} to {}.",
             attr_path, metadata.version, new_version
         );
+
+        // Add optional metadata fields
+        if let Some(description) = metadata.description.as_ref() {
+            pr_body.push_str(&format!("\n\n**Description:** {}", description));
+        }
+        if let Some(homepage) = metadata.homepage.as_ref() {
+            pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
+        }
+        if let Some(changelog) = metadata.changelog.as_ref() {
+            pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
+        }
+
+        pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
         debug!("Creating pull request");
         let pr = github::create_pull_request(
