@@ -12,7 +12,8 @@ use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 pub async fn run(
     file: String,
     database_path: String,
-    pr_repo: Option<String>,
+    upstream: Option<String>,
+    fork: String,
     run_passthru_tests: bool,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
@@ -25,8 +26,10 @@ pub async fn run(
     info!("Database initialized at: {}", expanded_db_path);
 
     // Determine PR configuration: use CLI override or auto-detect from git
-    let pr_config = if let Some(repo_str) = pr_repo {
-        parse_pr_config(&repo_str).await.ok()
+    let pr_config = if let Some(remote_name) = upstream {
+        crate::git::get_pr_config_from_remote(&remote_name)
+            .await
+            .ok()
     } else {
         crate::git::get_pr_config_from_git().await.ok()
     };
@@ -76,6 +79,7 @@ pub async fn run(
                     &file,
                     &drv,
                     pr_config.as_ref(),
+                    &fork,
                     run_passthru_tests,
                 )
                 .await
@@ -163,6 +167,7 @@ async fn check_and_update_package(
     eval_entry_point: &str,
     drv: &crate::nix::nix_eval_jobs::NixEvalDrv,
     pr_config: Option<&PrConfig>,
+    fork: &str,
     run_passthru_tests: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &drv.attr;
@@ -308,11 +313,10 @@ async fn check_and_update_package(
         attr_path.to_string(),
         worktree_file_str,
         SemverStrategy::Latest,
-        false, // Don't auto-commit in run mode
-        false, // Don't create PR here (handled separately by create_pr_for_update)
-        None,  // owner
-        None,  // repo
-        None,  // base
+        false,                // Don't auto-commit in run mode
+        false,                // Don't create PR here (handled separately by create_pr_for_update)
+        None,                 // upstream - not needed in run mode, PR handled separately
+        "origin".to_string(), // fork - not used since create_pr is false
         run_passthru_tests,
         run_passthru_tests, // Fail on test errors in run mode
     )
@@ -340,6 +344,7 @@ async fn check_and_update_package(
                     current_version,
                     &latest_version,
                     config,
+                    fork,
                 )
                 .await
                 {
@@ -425,6 +430,7 @@ async fn create_pr_for_update(
     old_version: &str,
     new_version: &str,
     config: &PrConfig,
+    fork: &str,
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -436,7 +442,7 @@ async fn create_pr_for_update(
         attr_path,
         old_version,
         new_version,
-        "origin", // Push to origin remote
+        &fork,
     )
     .await?;
 
@@ -494,26 +500,4 @@ async fn create_pr_for_update(
         .await?;
 
     Ok((pr.html_url, pr.number))
-}
-
-/// Parse PR repository configuration from "owner/repo" format
-/// Auto-detects the base branch from git configuration
-async fn parse_pr_config(repo_str: &str) -> anyhow::Result<PrConfig> {
-    let parts: Vec<&str> = repo_str.split('/').collect();
-    if parts.len() != 2 {
-        anyhow::bail!("Invalid format. Expected 'owner/repo', got '{}'", repo_str);
-    }
-
-    // Try to auto-detect base branch from git
-    let base_branch = crate::git::get_pr_config_from_git()
-        .await
-        .ok()
-        .map(|config| config.base_branch)
-        .unwrap_or_else(|| "master".to_string());
-
-    Ok(PrConfig {
-        owner: parts[0].to_string(),
-        repo: parts[1].to_string(),
-        base_branch,
-    })
 }

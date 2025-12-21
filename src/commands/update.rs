@@ -5,7 +5,7 @@ use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::git::{PrConfig, get_pr_config_from_git};
+use crate::git::get_pr_config_from_git;
 use crate::github;
 use crate::nix::{
     eval_nix_expr, has_passthru_tests, is_many_variants_package, normalize_entry_point,
@@ -75,9 +75,8 @@ pub async fn update(
     ignore_update_script: bool,
     commit: bool,
     create_pr: bool,
-    owner: Option<String>,
-    repo: Option<String>,
-    base: Option<String>,
+    upstream: Option<String>,
+    fork: String,
     run_passthru_tests: bool,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
@@ -121,9 +120,8 @@ pub async fn update(
         strategy,
         commit,
         create_pr,
-        owner,
-        repo,
-        base,
+        upstream,
+        fork,
         run_passthru_tests,
         false, // Don't fail on test errors for update command
     )
@@ -495,9 +493,8 @@ pub async fn update_from_file_path(
     strategy: SemverStrategy,
     commit: bool,
     create_pr: bool,
-    owner: Option<String>,
-    repo: Option<String>,
-    base: Option<String>,
+    upstream: Option<String>,
+    fork: String,
     run_passthru_tests: bool,
     fail_on_test_failure: bool,
 ) -> anyhow::Result<()> {
@@ -772,17 +769,10 @@ pub async fn update_from_file_path(
 
     // Handle commit and PR creation
     if create_pr {
-        // Get PR configuration - use CLI args or auto-detect from git
-        let pr_config = if owner.is_some() || repo.is_some() || base.is_some() {
-            // Use CLI-provided values, falling back to auto-detection for missing values
-            let auto_config = get_pr_config_from_git().await?;
-            PrConfig {
-                owner: owner.unwrap_or(auto_config.owner),
-                repo: repo.unwrap_or(auto_config.repo),
-                base_branch: base.unwrap_or(auto_config.base_branch),
-            }
+        // Get PR configuration - use CLI override or auto-detect from git
+        let pr_config = if let Some(remote_name) = upstream {
+            crate::git::get_pr_config_from_remote(&remote_name).await?
         } else {
-            // Auto-detect everything from git
             get_pr_config_from_git().await?
         };
 
@@ -857,9 +847,8 @@ pub async fn update_from_file_path(
         // Push to remote
         debug!("Pushing branch to remote");
         let push_target = format!("{}:{}", branch_name, branch_name);
-        let remote = "origin"; // Default remote name
         let output = Command::new("git")
-            .args(["push", "-u", remote, &push_target])
+            .args(["push", "-u", &fork, &push_target])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -870,7 +859,7 @@ pub async fn update_from_file_path(
             anyhow::bail!(
                 "Failed to push branch '{}' to remote '{}': {}",
                 branch_name,
-                remote,
+                fork,
                 stderr
             );
         }

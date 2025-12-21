@@ -31,10 +31,12 @@ enum Commands {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
         database: String,
-        /// Target repository for pull requests (format: owner/repo). If not specified,
-        /// auto-detects from git upstream.
+        /// Upstream git remote. Inferred if left unset. E.g. nixpkgs
         #[arg(long)]
-        pr_repo: Option<String>,
+        upstream: Option<String>,
+        /// Remote repository to push branches. E.g. my-fork
+        #[arg(long, default_value = "origin")]
+        fork: String,
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
@@ -58,15 +60,14 @@ enum Commands {
         /// Create a pull request after successful update (implies --commit)
         #[arg(long)]
         create_pr: bool,
-        /// GitHub repository owner (auto-detects from git if not specified)
+        /// Upstream git remote. Inferred if left unset. E.g. nixpkgs.
+        /// Only used with --create-pr.
         #[arg(long)]
-        owner: Option<String>,
-        /// GitHub repository name (auto-detects from git if not specified)
-        #[arg(long)]
-        repo: Option<String>,
-        /// Base branch for pull request (auto-detects from git if not specified)
-        #[arg(long)]
-        base: Option<String>,
+        upstream: Option<String>,
+        /// Remote repository to push branches. E.g. my-fork
+        /// Only used with --create-pr.
+        #[arg(long, default_value = "origin")]
+        fork: String,
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
@@ -107,9 +108,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run {
             file,
             database,
-            pr_repo,
+            upstream,
+            fork,
             run_passthru_tests,
-        } => commands::run::run(file, database, pr_repo, run_passthru_tests).await?,
+        } => commands::run::run(file, database, upstream, fork, run_passthru_tests).await?,
         Commands::Update {
             file,
             attr_path,
@@ -117,9 +119,8 @@ async fn main() -> anyhow::Result<()> {
             ignore_update_script,
             commit,
             create_pr,
-            owner,
-            repo,
-            base,
+            upstream,
+            fork,
             run_passthru_tests,
         } => {
             commands::update::update(
@@ -129,9 +130,8 @@ async fn main() -> anyhow::Result<()> {
                 ignore_update_script,
                 commit,
                 create_pr,
-                owner,
-                repo,
-                base,
+                upstream,
+                fork,
                 run_passthru_tests,
             )
             .await?
