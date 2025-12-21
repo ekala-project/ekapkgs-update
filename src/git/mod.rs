@@ -195,6 +195,29 @@ pub struct PrConfig {
     pub base_branch: String,
 }
 
+/// Get PR configuration from a specific remote
+pub async fn get_pr_config_from_remote(remote: &str) -> anyhow::Result<PrConfig> {
+    debug!("Getting PR configuration from remote: {}", remote);
+
+    // Get remote URL
+    let remote_url = get_remote_url(remote).await?;
+    debug!("Remote URL: {}", remote_url);
+
+    // Parse GitHub owner/repo from URL
+    let github_repo = parse_github_url(&remote_url)
+        .ok_or_else(|| anyhow::anyhow!("Remote URL is not a GitHub repository: {}", remote_url))?;
+
+    // Get default/base branch
+    let base_branch = get_default_branch(remote).await?;
+    debug!("Base branch: {}", base_branch);
+
+    Ok(PrConfig {
+        owner: github_repo.owner,
+        repo: github_repo.repo,
+        base_branch,
+    })
+}
+
 /// Automatically detect PR configuration from git upstream
 pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
     debug!("Auto-detecting PR configuration from git upstream");
@@ -207,23 +230,8 @@ pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
     let remote = get_upstream_remote(&current_branch).await?;
     debug!("Upstream remote: {}", remote);
 
-    // Get remote URL
-    let remote_url = get_remote_url(&remote).await?;
-    debug!("Remote URL: {}", remote_url);
-
-    // Parse GitHub owner/repo from URL
-    let github_repo = parse_github_url(&remote_url)
-        .ok_or_else(|| anyhow::anyhow!("Remote URL is not a GitHub repository: {}", remote_url))?;
-
-    // Get default/base branch
-    let base_branch = get_default_branch(&remote).await?;
-    debug!("Base branch: {}", base_branch);
-
-    Ok(PrConfig {
-        owner: github_repo.owner,
-        repo: github_repo.repo,
-        base_branch,
-    })
+    // Use the helper function
+    get_pr_config_from_remote(&remote).await
 }
 
 /// Get the current git branch name
