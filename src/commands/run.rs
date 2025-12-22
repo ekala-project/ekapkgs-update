@@ -1,4 +1,5 @@
 use futures::{StreamExt, pin_mut};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::database::Database;
@@ -16,6 +17,7 @@ pub async fn run(
     fork: String,
     run_passthru_tests: bool,
     dry_run: bool,
+    concurrent_updates: Option<usize>,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
@@ -25,6 +27,13 @@ pub async fn run(
     // Initialize database
     let db = Database::new(&expanded_db_path).await?;
     info!("Database initialized at: {}", expanded_db_path);
+
+    // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
+    let concurrency = concurrent_updates.unwrap_or_else(|| {
+        let cpus = num_cpus::get();
+        std::cmp::max(1, cpus / 4)
+    });
+    info!("Running with concurrency level: {}", concurrency);
 
     // Determine PR configuration: use CLI override or auto-detect from git
     let pr_config = if let Some(remote_name) = upstream {
@@ -44,6 +53,21 @@ pub async fn run(
     let mut checked_count = 0;
     let mut updated_count = 0;
     let mut failed_count = 0;
+
+    // JoinSet for managing concurrent update tasks
+    let mut join_set: JoinSet<(anyhow::Result<UpdateResult>, String)> = JoinSet::new();
+
+    // Helper function to process a completed task result
+    let mut process_result = |result: anyhow::Result<UpdateResult>, attr_path: &str| {
+        match result {
+            Ok(UpdateResult::Updated { .. }) | Ok(UpdateResult::DryRun { .. }) => {
+                updated_count += 1
+            },
+            Err(_) => failed_count += 1,
+            _ => {},
+        }
+        handle_result(result, attr_path);
+    };
 
     // Consume the stream, processing each item as it arrives
     while let Some(result) = stream.next().await {
@@ -74,55 +98,42 @@ pub async fn run(
 
                 checked_count += 1;
 
-                // Attempt to check for updates
-                match check_and_update_package(
-                    &db,
-                    &file,
-                    &drv,
-                    pr_config.as_ref(),
-                    &fork,
-                    run_passthru_tests,
-                    dry_run,
-                )
-                .await
-                {
-                    Ok(UpdateResult::Updated {
-                        old_version,
-                        new_version,
-                    }) => {
-                        info!(
-                            "{}: Updated from {} to {}",
-                            attr_path, old_version, new_version
-                        );
-                        updated_count += 1;
-                    },
-                    Ok(UpdateResult::NoUpdateNeeded {
-                        current_version,
-                        latest_version,
-                    }) => {
-                        debug!(
-                            "{}: No update needed (current: {}, latest: {})",
-                            attr_path, current_version, latest_version
-                        );
-                    },
-                    Ok(UpdateResult::Skipped(reason)) => {
-                        debug!("{}: Skipped - {}", attr_path, reason);
-                    },
-                    Ok(UpdateResult::DryRun {
-                        current_version,
-                        new_version,
-                    }) => {
-                        info!(
-                            "{}: Would update {} -> {}",
-                            attr_path, current_version, new_version
-                        );
-                        updated_count += 1;
-                    },
-                    Err(e) => {
-                        warn!("{}: Failed to check for updates: {}", attr_path, e);
-                        failed_count += 1;
-                    },
+                // Wait if we've reached the concurrency limit
+                while join_set.len() >= concurrency {
+                    if let Some(task_result) = join_set.join_next().await {
+                        match task_result {
+                            Ok((result, task_attr_path)) => {
+                                process_result(result, &task_attr_path);
+                            },
+                            Err(e) => {
+                                warn!("Task panicked: {}", e);
+                            },
+                        }
+                    }
                 }
+
+                // Clone data needed for the async task
+                let db_clone = db.clone();
+                let file_clone = file.clone();
+                let drv_clone = drv.clone();
+                let pr_config_clone = pr_config.clone();
+                let fork_clone = fork.clone();
+                let attr_path_clone = attr_path.clone();
+
+                // Spawn the update task
+                join_set.spawn(async move {
+                    let result = check_and_update_package(
+                        &db_clone,
+                        &file_clone,
+                        &drv_clone,
+                        pr_config_clone.as_ref(),
+                        &fork_clone,
+                        run_passthru_tests,
+                        dry_run,
+                    )
+                    .await;
+                    (result, attr_path_clone)
+                });
             },
             Ok(NixEvalItem::Error(e)) => {
                 debug!("Evaluation error: {:?}", e);
@@ -130,6 +141,18 @@ pub async fn run(
             },
             Err(e) => {
                 return Err(e);
+            },
+        }
+    }
+
+    // Wait for all remaining tasks to complete
+    while let Some(task_result) = join_set.join_next().await {
+        match task_result {
+            Ok((result, attr_path)) => {
+                process_result(result, &attr_path);
+            },
+            Err(e) => {
+                warn!("Task panicked: {}", e);
             },
         }
     }
@@ -162,6 +185,45 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Do additional processing depending on the result of the update
+fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &str) {
+    match result {
+        Ok(UpdateResult::Updated {
+            old_version,
+            new_version,
+        }) => {
+            info!(
+                "{}: Updated from {} to {}",
+                attr_path, old_version, new_version
+            );
+        },
+        Ok(UpdateResult::NoUpdateNeeded {
+            current_version,
+            latest_version,
+        }) => {
+            debug!(
+                "{}: No update needed (current: {}, latest: {})",
+                attr_path, current_version, latest_version
+            );
+        },
+        Ok(UpdateResult::Skipped(reason)) => {
+            debug!("{}: Skipped - {}", attr_path, reason);
+        },
+        Ok(UpdateResult::DryRun {
+            current_version,
+            new_version,
+        }) => {
+            info!(
+                "{}: Would update {} -> {}",
+                attr_path, current_version, new_version
+            );
+        },
+        Err(e) => {
+            warn!("{}: Failed to check for updates: {}", attr_path, e);
+        },
+    }
 }
 
 #[derive(Debug)]
