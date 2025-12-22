@@ -26,7 +26,7 @@ enum Commands {
     /// Run the update process
     Run {
         /// Nix file to evaluate
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "default.nix")]
         file: String,
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
@@ -40,6 +40,9 @@ enum Commands {
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
+        /// Check for updates without rewriting, building, committing, or creating PRs
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -111,7 +114,10 @@ async fn main() -> anyhow::Result<()> {
             upstream,
             fork,
             run_passthru_tests,
-        } => commands::run::run(file, database, upstream, fork, run_passthru_tests).await?,
+            dry_run,
+        } => {
+            commands::run::run(file, database, upstream, fork, run_passthru_tests, dry_run).await?
+        },
         Commands::Update {
             file,
             attr_path,
