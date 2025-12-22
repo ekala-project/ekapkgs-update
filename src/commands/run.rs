@@ -15,6 +15,7 @@ pub async fn run(
     upstream: Option<String>,
     fork: String,
     run_passthru_tests: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
@@ -81,6 +82,7 @@ pub async fn run(
                     pr_config.as_ref(),
                     &fork,
                     run_passthru_tests,
+                    dry_run,
                 )
                 .await
                 {
@@ -106,6 +108,16 @@ pub async fn run(
                     Ok(UpdateResult::Skipped(reason)) => {
                         debug!("{}: Skipped - {}", attr_path, reason);
                     },
+                    Ok(UpdateResult::DryRun {
+                        current_version,
+                        new_version,
+                    }) => {
+                        info!(
+                            "{}: Would update {} -> {}",
+                            attr_path, current_version, new_version
+                        );
+                        updated_count += 1;
+                    },
                     Err(e) => {
                         warn!("{}: Failed to check for updates: {}", attr_path, e);
                         failed_count += 1;
@@ -128,7 +140,11 @@ pub async fn run(
     if error_count > 0 {
         info!("Evaluation errors: {}", error_count);
     }
-    info!("Update summary:");
+    if dry_run {
+        info!("Update summary (dry-run scan - no changes made):");
+    } else {
+        info!("Update summary:");
+    }
     info!("  Checked: {}", checked_count);
     info!("  Skipped (backoff): {}", skipped_count);
     info!("  Updated: {}", updated_count);
@@ -159,6 +175,10 @@ enum UpdateResult {
         latest_version: String,
     },
     Skipped(String),
+    DryRun {
+        current_version: String,
+        new_version: String,
+    },
 }
 
 /// Check if a package needs updating and attempt to update it
@@ -169,6 +189,7 @@ async fn check_and_update_package(
     pr_config: Option<&PrConfig>,
     fork: &str,
     run_passthru_tests: bool,
+    dry_run: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &drv.attr;
 
@@ -278,6 +299,14 @@ async fn check_and_update_package(
         "{}: Update available: {} -> {}",
         attr_path, current_version, latest_version
     );
+
+    // If dry-run mode, report the update without performing it
+    if dry_run {
+        return Ok(UpdateResult::DryRun {
+            current_version: current_version.to_string(),
+            new_version: latest_version.to_string(),
+        });
+    }
 
     // Create a worktree for this update
     let worktree_path = match create_worktree(attr_path).await {

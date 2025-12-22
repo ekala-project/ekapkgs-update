@@ -10,6 +10,13 @@ pub enum NixEvalItem {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NixMeta {
+    pub homepage: Option<String>,
+    pub changelog: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NixEvalDrv {
     /// String of full attr path
     /// E.g. "python.pkgs.setuptools"
@@ -36,6 +43,9 @@ pub struct NixEvalDrv {
 
     /// Build platform system
     pub system: String,
+
+    /// Meta information about the package
+    pub meta: Option<NixMeta>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
