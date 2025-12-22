@@ -43,6 +43,9 @@ enum Commands {
         /// Check for updates without rewriting, building, committing, or creating PRs
         #[arg(long)]
         dry_run: bool,
+        /// Maximum number of concurrent package updates (default: CPU cores / 4)
+        #[arg(long)]
+        concurrent_updates: Option<usize>,
     },
     /// Update a package in a Nix file
     Update {
@@ -115,8 +118,18 @@ async fn main() -> anyhow::Result<()> {
             fork,
             run_passthru_tests,
             dry_run,
+            concurrent_updates,
         } => {
-            commands::run::run(file, database, upstream, fork, run_passthru_tests, dry_run).await?
+            commands::run::run(
+                file,
+                database,
+                upstream,
+                fork,
+                run_passthru_tests,
+                dry_run,
+                concurrent_updates,
+            )
+            .await?
         },
         Commands::Update {
             file,

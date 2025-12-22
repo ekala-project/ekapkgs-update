@@ -40,6 +40,7 @@ impl UpdateLog {
 }
 
 /// Database connection wrapper for tracking package updates
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }
