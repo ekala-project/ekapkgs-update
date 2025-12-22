@@ -1,3 +1,14 @@
+CREATE TABLE IF NOT EXISTS updates (
+    attr_path TEXT PRIMARY KEY,
+    last_attempted TEXT,
+    next_attempt TEXT,
+    current_version TEXT,
+    proposed_version TEXT,
+    latest_upstream_version TEXT,
+    pr_url TEXT,
+    pr_number INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS update_logs (
     drv_path TEXT PRIMARY KEY,
     attr_path TEXT NOT NULL,
