@@ -352,16 +352,19 @@ fn find_best_release(
 }
 
 /// Extract version from tag name by pruning leading non-numerical characters
+/// and truncating '-unstable' suffixes
 ///
-/// Removes all leading non-numerical characters from tag names to extract the version.
+/// Removes all leading non-numerical characters from tag names to extract the version,
+/// and truncates everything from '-unstable' onwards if present.
 /// This handles various tag naming conventions like "v1.0.0", "release-1.0.0", "version-2.3.4",
-/// etc.
+/// etc., as well as unstable versions like "1.2.3-unstable-2024-01-01".
 ///
 /// # Arguments
 /// * `tag` - The tag name to extract version from
 ///
 /// # Returns
-/// The version string with leading non-numerical characters removed
+/// The version string with leading non-numerical characters removed and '-unstable' suffix
+/// truncated
 ///
 /// # Example
 /// ```
@@ -371,14 +374,71 @@ fn find_best_release(
 /// assert_eq!(extract_version_from_tag("release-2.3.4"), "2.3.4");
 /// assert_eq!(extract_version_from_tag("version-1.2.3"), "1.2.3");
 /// assert_eq!(extract_version_from_tag("1.0.0"), "1.0.0");
+/// assert_eq!(extract_version_from_tag("1.2.3-unstable"), "1.2.3");
+/// assert_eq!(
+///     extract_version_from_tag("v2.0.0-unstable-2024-01-01"),
+///     "2.0.0"
+/// );
 /// ```
 pub fn extract_version_from_tag(tag: &str) -> &str {
     // Find the first digit in the tag
-    if let Some(pos) = tag.find(|c: char| c.is_ascii_digit()) {
+    let version = if let Some(pos) = tag.find(|c: char| c.is_ascii_digit()) {
         &tag[pos..]
     } else {
         // If no digit found, return the original tag
-        tag
+        return tag;
+    };
+
+    // Truncate '-unstable' suffix if present
+    if let Some(unstable_pos) = version.find("-unstable") {
+        &version[..unstable_pos]
+    } else {
+        version
+    }
+}
+
+/// Normalize a version string to ensure it has at least 3 components for semver parsing
+///
+/// Appends missing version components to ensure the version can be parsed as valid semver.
+/// This prevents falling back to lexicographic string comparison for versions like "1.25".
+///
+/// # Arguments
+/// * `version` - The version string to normalize
+///
+/// # Returns
+/// A normalized version string with at least 3 components (MAJOR.MINOR.PATCH)
+///
+/// # Examples
+/// ```
+/// use ekapkgs_update::vcs_sources::normalize_version;
+///
+/// assert_eq!(normalize_version("1.25"), "1.25.0");
+/// assert_eq!(normalize_version("1.9"), "1.9.0");
+/// assert_eq!(normalize_version("2"), "2.0.0");
+/// assert_eq!(normalize_version("1.2.3"), "1.2.3");
+/// assert_eq!(normalize_version("1.0.0-beta"), "1.0.0-beta");
+/// ```
+pub fn normalize_version(version: &str) -> String {
+    // Count the number of dots to determine component count
+    // Handle pre-release versions by splitting on '-' first
+    let (base_version, suffix) = if let Some(dash_pos) = version.find('-') {
+        (&version[..dash_pos], Some(&version[dash_pos..]))
+    } else {
+        (version, None)
+    };
+
+    let dot_count = base_version.matches('.').count();
+
+    let normalized_base = match dot_count {
+        0 => format!("{}.0.0", base_version), // "1" -> "1.0.0"
+        1 => format!("{}.0", base_version),   // "1.25" -> "1.25.0"
+        _ => base_version.to_string(),        // "1.2.3" or more -> unchanged
+    };
+
+    if let Some(suffix) = suffix {
+        format!("{}{}", normalized_base, suffix)
+    } else {
+        normalized_base
     }
 }
 
@@ -422,9 +482,15 @@ pub fn is_version_acceptable(
         .trim_start_matches("version-");
     let clean_new = new.trim_start_matches('v').trim_start_matches("version-");
 
+    // Normalize versions to ensure they have 3 components for semver parsing
+    let normalized_current = normalize_version(clean_current);
+    let normalized_new = normalize_version(clean_new);
+
     // Try semantic versioning first
-    if let (Ok(curr_ver), Ok(new_ver)) = (Version::parse(clean_current), Version::parse(clean_new))
-    {
+    if let (Ok(curr_ver), Ok(new_ver)) = (
+        Version::parse(&normalized_current),
+        Version::parse(&normalized_new),
+    ) {
         // First check if new version is actually newer
         if new_ver <= curr_ver {
             return Ok(false);
@@ -731,5 +797,63 @@ mod tests {
         assert!(!is_version_acceptable("0.1.0", "0.2.0", SemverStrategy::Patch).unwrap());
 
         assert!(is_version_acceptable("0.1.0", "0.1.1", SemverStrategy::Patch).unwrap());
+    }
+
+    // Test normalize_version function
+    #[test]
+    fn test_normalize_version() {
+        // Two-component versions
+        assert_eq!(normalize_version("1.25"), "1.25.0");
+        assert_eq!(normalize_version("1.9"), "1.9.0");
+        assert_eq!(normalize_version("0.5"), "0.5.0");
+
+        // Single-component versions
+        assert_eq!(normalize_version("2"), "2.0.0");
+        assert_eq!(normalize_version("10"), "10.0.0");
+
+        // Already normalized (three components)
+        assert_eq!(normalize_version("1.2.3"), "1.2.3");
+        assert_eq!(normalize_version("0.0.1"), "0.0.1");
+
+        // With pre-release suffixes
+        assert_eq!(normalize_version("1.0-beta"), "1.0.0-beta");
+        assert_eq!(normalize_version("2.5-rc1"), "2.5.0-rc1");
+        assert_eq!(normalize_version("1.2.3-alpha"), "1.2.3-alpha");
+
+        // With unstable suffix (gets normalized before truncation)
+        assert_eq!(normalize_version("1.25-unstable"), "1.25.0-unstable");
+    }
+
+    // Test two-component version comparison (the libdeflate 1.25 vs 1.9 issue)
+    #[test]
+    fn test_version_acceptable_two_components() {
+        // This is the key test case: 1.25 should be considered newer than 1.9
+        assert!(!is_version_acceptable("1.25", "1.9", SemverStrategy::Latest).unwrap());
+        assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Latest).unwrap());
+
+        // More two-component version tests
+        assert!(is_version_acceptable("1.0", "1.1", SemverStrategy::Latest).unwrap());
+        assert!(is_version_acceptable("1.9", "1.10", SemverStrategy::Latest).unwrap());
+        assert!(is_version_acceptable("2.0", "2.1", SemverStrategy::Latest).unwrap());
+
+        // Two-component with Minor strategy
+        assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Minor).unwrap());
+        assert!(!is_version_acceptable("1.9", "2.0", SemverStrategy::Minor).unwrap());
+
+        // Two-component with Patch strategy (should upgrade minor version)
+        assert!(!is_version_acceptable("1.9", "1.25", SemverStrategy::Patch).unwrap());
+        assert!(is_version_acceptable("1.9", "1.9.1", SemverStrategy::Patch).unwrap());
+    }
+
+    // Test mixed component version comparison
+    #[test]
+    fn test_version_acceptable_mixed_components() {
+        // Two-component current, three-component new
+        assert!(is_version_acceptable("1.9", "1.25.0", SemverStrategy::Latest).unwrap());
+        assert!(is_version_acceptable("1.9", "1.9.1", SemverStrategy::Latest).unwrap());
+
+        // Three-component current, two-component new
+        assert!(is_version_acceptable("1.9.0", "1.25", SemverStrategy::Latest).unwrap());
+        assert!(!is_version_acceptable("1.25.0", "1.9", SemverStrategy::Latest).unwrap());
     }
 }
