@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 use crate::rewrite::replace_maintainers_with_empty;
@@ -13,10 +13,12 @@ use crate::rewrite::replace_maintainers_with_empty;
 ///
 /// # Arguments
 /// * `directory` - Path to the directory to process
+/// * `check` - If true, only check if changes would be made without modifying files
 ///
 /// # Returns
-/// Ok(()) if successful, or an error if the directory cannot be processed
-pub async fn prune_maintainers(directory: String) -> anyhow::Result<()> {
+/// Ok(()) if successful, or an error if the directory cannot be processed or if
+/// check mode is enabled and changes would be made
+pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result<()> {
     let dir_path = Path::new(&directory);
 
     if !dir_path.exists() {
@@ -27,7 +29,14 @@ pub async fn prune_maintainers(directory: String) -> anyhow::Result<()> {
         anyhow::bail!("Path is not a directory: {}", directory);
     }
 
-    info!("Pruning maintainers from .nix files in: {}", directory);
+    if check {
+        info!(
+            "Checking for maintainers to prune in .nix files in: {}",
+            directory
+        );
+    } else {
+        info!("Pruning maintainers from .nix files in: {}", directory);
+    }
 
     let mut processed_count = 0;
     let mut modified_count = 0;
@@ -51,7 +60,11 @@ pub async fn prune_maintainers(directory: String) -> anyhow::Result<()> {
 
         match process_file(path).await {
             Ok(true) => {
-                info!("Modified: {}", path.display());
+                if check {
+                    info!("Would modify: {}", path.display());
+                } else {
+                    info!("Modified: {}", path.display());
+                }
                 modified_count += 1;
             },
             Ok(false) => {
@@ -64,13 +77,31 @@ pub async fn prune_maintainers(directory: String) -> anyhow::Result<()> {
         }
     }
 
-    info!(
-        "Completed: {} files processed, {} modified, {} errors",
-        processed_count, modified_count, error_count
-    );
+    if check {
+        info!(
+            "Check completed: {} files processed, {} would be modified, {} errors",
+            processed_count, modified_count, error_count
+        );
+    } else {
+        info!(
+            "Completed: {} files processed, {} modified, {} errors",
+            processed_count, modified_count, error_count
+        );
+    }
 
     if error_count > 0 {
         warn!("{} files had errors and were not modified", error_count);
+    }
+
+    if check && modified_count > 0 {
+        error!(
+            "Check failed: {} files would be modified by prune-maintainers",
+            modified_count
+        );
+        anyhow::bail!(
+            "Check failed: {} files would be modified by prune-maintainers",
+            modified_count
+        );
     }
 
     Ok(())
@@ -80,10 +111,11 @@ pub async fn prune_maintainers(directory: String) -> anyhow::Result<()> {
 ///
 /// # Arguments
 /// * `path` - Path to the .nix file to process
+/// * `check` - If true, only check if changes would be made without modifying the file
 ///
 /// # Returns
-/// Ok(true) if the file was modified, Ok(false) if no changes were made,
-/// or an error if the file cannot be processed
+/// Ok(true) if the file was modified (or would be modified in check mode),
+/// Ok(false) if no changes were made, or an error if the file cannot be processed
 async fn process_file(path: &Path) -> anyhow::Result<bool> {
     // Read the file
     let content = fs::read_to_string(path).await?;
@@ -92,7 +124,7 @@ async fn process_file(path: &Path) -> anyhow::Result<bool> {
     let (updated_content, changed) = replace_maintainers_with_empty(&content)?;
 
     if changed {
-        // Write back the modified content
+        // Write back the modified content only if not in check mode
         fs::write(path, updated_content).await?;
         Ok(true)
     } else {

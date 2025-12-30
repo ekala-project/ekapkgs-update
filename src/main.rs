@@ -82,6 +82,9 @@ enum Commands {
     PruneMaintainers {
         /// Directory to process
         directory: String,
+        /// Check mode: fail if any changes would be made
+        #[arg(long, default_value = "false")]
+        check: bool,
     },
     /// Show update failure logs for a package
     Log {
@@ -155,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         },
-        Commands::PruneMaintainers { directory } => {
-            commands::prune_maintainers::prune_maintainers(directory).await?
+        Commands::PruneMaintainers { directory, check } => {
+            commands::prune_maintainers::prune_maintainers(directory, check).await?
         },
         Commands::Log {
             identifier,
