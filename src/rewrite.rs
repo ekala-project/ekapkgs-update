@@ -168,6 +168,14 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
         anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
     }
 
+    // Check if maintainers is already exactly empty (maintainers = [ ];)
+    // Pattern matches: maintainers = [ ]; with any whitespace inside the brackets
+    let empty_pattern = Regex::new(r"(?m)^\s*maintainers\s*=\s*\[\s*\]\s*;")?;
+    if empty_pattern.is_match(content) {
+        // Already empty, no need to change
+        return Ok((content.to_string(), false));
+    }
+
     // Pattern to match maintainers attribute with any value
     // Handles: maintainers = [ ... ]; or maintainers = with lib; [ ... ];
     // This matches the attribute name, =, and everything until the closing ];
@@ -837,7 +845,7 @@ mod tests {
         let result = replace_maintainers_with_empty(content);
         assert!(result.is_ok());
         let (updated, changed) = result.unwrap();
-        assert!(changed); // Still counts as changed because pattern matches
+        assert!(!changed); // Not changed because maintainers is already empty
         assert!(updated.contains("maintainers = [ ];"));
     }
 
