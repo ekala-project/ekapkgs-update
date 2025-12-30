@@ -292,4 +292,27 @@ mod tests {
         assert_eq!(extract_version_from_tag("latest"), "latest");
         assert_eq!(extract_version_from_tag("main"), "main");
     }
+
+    #[test]
+    fn test_extract_version_from_tag_unstable_suffix() {
+        // Test basic unstable truncation
+        assert_eq!(extract_version_from_tag("1.2.3-unstable"), "1.2.3");
+        assert_eq!(
+            extract_version_from_tag("2.0.0-unstable-2024-01-01"),
+            "2.0.0"
+        );
+
+        // Test unstable with version prefixes
+        assert_eq!(extract_version_from_tag("v1.5.0-unstable"), "1.5.0");
+        assert_eq!(
+            extract_version_from_tag("release-3.2.1-unstable-abc123"),
+            "3.2.1"
+        );
+        assert_eq!(extract_version_from_tag("version-4.0.0-unstable"), "4.0.0");
+
+        // Test that non-unstable versions are unchanged
+        assert_eq!(extract_version_from_tag("1.2.3-rc1"), "1.2.3-rc1");
+        assert_eq!(extract_version_from_tag("v2.0.0-beta"), "2.0.0-beta");
+        assert_eq!(extract_version_from_tag("1.0.0-alpha.1"), "1.0.0-alpha.1");
+    }
 }
