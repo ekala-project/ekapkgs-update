@@ -533,7 +533,7 @@ async fn create_pr_for_update(
         attr_path,
         old_version,
         new_version,
-        &fork,
+        fork,
     )
     .await?;
 
