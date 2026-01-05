@@ -46,6 +46,9 @@ enum Commands {
         /// Maximum number of concurrent package updates (default: CPU cores / 4)
         #[arg(long)]
         concurrent_updates: Option<usize>,
+        /// Skip packages with 'unstable' in their version
+        #[arg(long)]
+        skip_unstable: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -122,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
             run_passthru_tests,
             dry_run,
             concurrent_updates,
+            skip_unstable,
         } => {
             commands::run::run(
                 file,
@@ -131,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
                 run_passthru_tests,
                 dry_run,
                 concurrent_updates,
+                skip_unstable,
             )
             .await?
         },

@@ -18,6 +18,7 @@ pub async fn run(
     run_passthru_tests: bool,
     dry_run: bool,
     concurrent_updates: Option<usize>,
+    skip_unstable: bool,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
@@ -130,6 +131,7 @@ pub async fn run(
                         &fork_clone,
                         run_passthru_tests,
                         dry_run,
+                        skip_unstable,
                     )
                     .await;
                     (result, attr_path_clone)
@@ -252,6 +254,7 @@ async fn check_and_update_package(
     fork: &str,
     run_passthru_tests: bool,
     dry_run: bool,
+    skip_unstable: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &drv.attr;
 
@@ -268,6 +271,17 @@ async fn check_and_update_package(
 
     let current_version = &metadata.version;
     debug!("{}: Current version: {}", attr_path, current_version);
+
+    // Skip packages with 'unstable' in version if flag is set
+    if skip_unstable && current_version.contains("unstable") {
+        debug!(
+            "{}: Skipping due to --skip-unstable flag (version: {})",
+            attr_path, current_version
+        );
+        return Ok(UpdateResult::Skipped(
+            "Version contains 'unstable'".to_string(),
+        ));
+    }
 
     // Determine upstream source
     let upstream_source = if let Some(ref src_url) = metadata.src_url {
