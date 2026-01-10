@@ -1,9 +1,11 @@
 use futures::{StreamExt, pin_mut};
+use std::collections::HashMap;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
+use crate::groups::GroupsData;
 use crate::nix;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::nix::{eval_nix_expr, normalize_entry_point};
@@ -19,6 +21,7 @@ pub async fn run(
     dry_run: bool,
     concurrent_updates: Option<usize>,
     skip_unstable: bool,
+    grouping_file: Option<String>,
 ) -> anyhow::Result<()> {
     info!("Running nix-eval-jobs on: {}", file);
 
@@ -45,6 +48,17 @@ pub async fn run(
         crate::git::get_pr_config_from_git().await.ok()
     };
 
+    // Load and parse grouping file if provided
+    let groups_data = if let Some(ref path) = grouping_file {
+        info!("Loading grouping file: {}", path);
+        let data = GroupsData::load_from_file(path).await?;
+        info!("Loaded grouping configuration");
+        Some(data)
+    } else {
+        None
+    };
+    let groupings = groups_data.as_ref().map(|data| data.build_index());
+
     let stream = nix::run_eval::run_nix_eval_jobs(file.clone());
     pin_mut!(stream);
 
@@ -57,6 +71,9 @@ pub async fn run(
 
     // JoinSet for managing concurrent update tasks
     let mut join_set: JoinSet<(anyhow::Result<UpdateResult>, String)> = JoinSet::new();
+
+    // Track grouped packages: group_name -> Vec<NixEvalDrv>
+    let mut grouped_packages: HashMap<String, Vec<crate::nix::nix_eval_jobs::NixEvalDrv>> = HashMap::new();
 
     // Helper function to process a completed task result
     let mut process_result = |result: anyhow::Result<UpdateResult>, attr_path: &str| {
@@ -99,6 +116,19 @@ pub async fn run(
 
                 checked_count += 1;
 
+                // Check if this package belongs to a group
+                if let Some(ref groupings_ref) = groupings {
+                    if let Some(group_name) = groupings_ref.group_name(attr_path) {
+                        // Add to grouped packages for later batch processing
+                        debug!("{}: Adding to group '{}'", attr_path, group_name);
+                        grouped_packages
+                            .entry(group_name.clone())
+                            .or_insert_with(Vec::new)
+                            .push(drv.clone());
+                        continue;
+                    }
+                }
+
                 // Wait if we've reached the concurrency limit
                 while join_set.len() >= concurrency {
                     if let Some(task_result) = join_set.join_next().await {
@@ -121,7 +151,7 @@ pub async fn run(
                 let fork_clone = fork.clone();
                 let attr_path_clone = attr_path.clone();
 
-                // Spawn the update task
+                // Spawn the update task for individual package
                 join_set.spawn(async move {
                     let result = check_and_update_package(
                         &db_clone,
@@ -156,6 +186,38 @@ pub async fn run(
             Err(e) => {
                 warn!("Task panicked: {}", e);
             },
+        }
+    }
+
+    // Process grouped packages
+    if !grouped_packages.is_empty() {
+        info!("Processing {} package groups", grouped_packages.len());
+        for (group_name, packages) in grouped_packages {
+            info!("Processing group '{}' with {} packages", group_name, packages.len());
+
+            let result = process_grouped_update(
+                &db,
+                &file,
+                &group_name,
+                packages,
+                pr_config.as_ref(),
+                &fork,
+                run_passthru_tests,
+                dry_run,
+                skip_unstable,
+            )
+            .await;
+
+            match result {
+                Ok(count) => {
+                    info!("Group '{}': Updated {} packages", group_name, count);
+                    updated_count += count;
+                },
+                Err(e) => {
+                    warn!("Group '{}': Failed to process: {}", group_name, e);
+                    failed_count += 1;
+                },
+            }
         }
     }
 
@@ -606,3 +668,344 @@ async fn create_pr_for_update(
 
     Ok((pr.html_url, pr.number))
 }
+
+/// Process a group of packages together in one worktree and PR
+/// Returns the count of successfully updated packages
+async fn process_grouped_update(
+    db: &Database,
+    eval_entry_point: &str,
+    group_name: &str,
+    packages: Vec<crate::nix::nix_eval_jobs::NixEvalDrv>,
+    pr_config: Option<&PrConfig>,
+    fork: &str,
+    run_passthru_tests: bool,
+    dry_run: bool,
+    skip_unstable: bool,
+) -> anyhow::Result<usize> {
+    if packages.is_empty() {
+        return Ok(0);
+    }
+
+    info!("Group '{}': Starting batch update for {} packages", group_name, packages.len());
+
+    // Create a single worktree for the entire group
+    let worktree_path = create_worktree(group_name).await?;
+
+    let mut successful_updates: Vec<(String, String, String)> = Vec::new(); // (attr_path, old_version, new_version)
+    let mut failed_updates: Vec<(String, String)> = Vec::new(); // (attr_path, error)
+
+    // Process each package in the group
+    for drv in &packages {
+        let attr_path = &drv.attr;
+        info!("Group '{}': Processing {}", group_name, attr_path);
+
+        // Check if we should skip this package (backoff, unstable, etc.)
+        match db.should_check_update(attr_path).await {
+            Ok(false) => {
+                debug!("Group '{}': {}: Skipping (in backoff period)", group_name, attr_path);
+                continue;
+            },
+            Ok(true) => {},
+            Err(e) => {
+                warn!("Group '{}': {}: Database error: {}", group_name, attr_path, e);
+            },
+        }
+
+        // Extract package metadata
+        let metadata = match PackageMetadata::from_attr_path(eval_entry_point, attr_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                debug!("Group '{}': {}: Failed to extract metadata: {}", group_name, attr_path, e);
+                failed_updates.push((attr_path.clone(), format!("Could not extract metadata: {}", e)));
+                continue;
+            },
+        };
+
+        let current_version = &metadata.version;
+
+        // Skip packages with 'unstable' in version if flag is set
+        if skip_unstable && current_version.contains("unstable") {
+            debug!("Group '{}': {}: Skipping (unstable version)", group_name, attr_path);
+            continue;
+        }
+
+        // Determine upstream source
+        let upstream_source = if let Some(ref src_url) = metadata.src_url {
+            match UpstreamSource::from_url(src_url) {
+                Some(source) => source,
+                None => {
+                    debug!("Group '{}': {}: Could not parse upstream source", group_name, attr_path);
+                    failed_updates.push((attr_path.clone(), "Unsupported source".to_string()));
+                    continue;
+                },
+            }
+        } else if let Some(ref pname) = metadata.pname {
+            UpstreamSource::PyPI {
+                pname: pname.clone(),
+            }
+        } else {
+            debug!("Group '{}': {}: No source URL or pname", group_name, attr_path);
+            failed_updates.push((attr_path.clone(), "No source info".to_string()));
+            continue;
+        };
+
+        // Fetch latest compatible release
+        let best_release = match upstream_source
+            .get_compatible_release(current_version, SemverStrategy::Latest)
+            .await
+        {
+            Ok(release) => release,
+            Err(e) => {
+                debug!("Group '{}': {}: Failed to fetch upstream: {}", group_name, attr_path, e);
+                failed_updates.push((attr_path.clone(), format!("Could not fetch upstream: {}", e)));
+                continue;
+            },
+        };
+
+        let latest_version = UpstreamSource::get_version(&best_release);
+
+        // Check if update is needed
+        if current_version == &latest_version {
+            debug!("Group '{}': {}: No update needed ({})", group_name, attr_path, current_version);
+            if let Err(e) = db.record_no_update(attr_path, current_version, &latest_version).await {
+                warn!("Group '{}': {}: Failed to record no update: {}", group_name, attr_path, e);
+            }
+            continue;
+        }
+
+        // Check if already proposed
+        let record = db.get_update_record(attr_path).await?;
+        if let Some(ref rec) = record {
+            if let Some(ref proposed) = rec.proposed_version {
+                if proposed == &latest_version {
+                    debug!("Group '{}': {}: Already proposed {}", group_name, attr_path, proposed);
+                    continue;
+                }
+            }
+        }
+
+        info!("Group '{}': {}: Update available {} -> {}", group_name, attr_path, current_version, latest_version);
+
+        if dry_run {
+            info!("Group '{}': {}: Would update {} -> {}", group_name, attr_path, current_version, latest_version);
+            successful_updates.push((attr_path.clone(), current_version.to_string(), latest_version.to_string()));
+            continue;
+        }
+
+        // Get file location and convert to worktree path
+        let file_location = match get_file_location(eval_entry_point, attr_path).await {
+            Ok(loc) => loc,
+            Err(e) => {
+                warn!("Group '{}': {}: Failed to get file location: {}", group_name, attr_path, e);
+                failed_updates.push((attr_path.clone(), format!("Could not locate file: {}", e)));
+                continue;
+            },
+        };
+
+        let worktree_file_path = worktree_path.join(&file_location);
+        let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
+
+        // Attempt the update
+        let update_result = crate::commands::update::update_from_file_path(
+            eval_entry_point.to_string(),
+            attr_path.to_string(),
+            worktree_file_str,
+            SemverStrategy::Latest,
+            true,                  // Auto-commit each update in the group
+            false,                 // Don't create PR yet (handled at group level)
+            None,
+            "origin".to_string(),
+            run_passthru_tests,
+            run_passthru_tests,
+        )
+        .await;
+
+        match update_result {
+            Ok(()) => {
+                info!("Group '{}': {}: Successfully updated to {}", group_name, attr_path, latest_version);
+                successful_updates.push((attr_path.clone(), current_version.to_string(), latest_version.to_string()));
+
+                // Record successful update
+                if let Err(e) = db.record_successful_update(attr_path, current_version, &latest_version).await {
+                    warn!("Group '{}': {}: Failed to record update: {}", group_name, attr_path, e);
+                }
+            },
+            Err(e) => {
+                let error_msg = format!("{:#}", e);
+                warn!("Group '{}': {}: Update failed: {}", group_name, attr_path, error_msg);
+                failed_updates.push((attr_path.clone(), error_msg.clone()));
+
+                // Record failure
+                if let Err(db_err) = db.record_failed_update(
+                    &drv.drv_path,
+                    attr_path,
+                    &error_msg,
+                    Some(current_version),
+                    Some(&latest_version),
+                ).await {
+                    warn!("Group '{}': {}: Failed to record failure: {}", group_name, attr_path, db_err);
+                }
+            },
+        }
+    }
+
+    // Build all successfully updated packages
+    if !successful_updates.is_empty() && !dry_run {
+        info!("Group '{}': Building {} updated packages", group_name, successful_updates.len());
+
+        for (attr_path, _, _) in &successful_updates {
+            info!("Group '{}': Building {}", group_name, attr_path);
+
+            // Build the package in the worktree
+            let build_result = tokio::process::Command::new("nix-build")
+                .arg(eval_entry_point)
+                .arg("-A")
+                .arg(attr_path)
+                .current_dir(&worktree_path)
+                .output()
+                .await;
+
+            match build_result {
+                Ok(output) if output.status.success() => {
+                    info!("Group '{}': {}: Build successful", group_name, attr_path);
+                },
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("Group '{}': {}: Build failed: {}", group_name, attr_path, stderr);
+                    // Note: We continue even if build fails, as per user preference
+                },
+                Err(e) => {
+                    warn!("Group '{}': {}: Failed to run build: {}", group_name, attr_path, e);
+                },
+            }
+        }
+    }
+
+    // Create PR if we have successful updates and PR config is available
+    if !successful_updates.is_empty() && !dry_run {
+        if let Some(config) = pr_config {
+            match create_grouped_pr(
+                db,
+                &worktree_path,
+                group_name,
+                &successful_updates,
+                &failed_updates,
+                config,
+                fork,
+            )
+            .await
+            {
+                Ok((pr_url, pr_number)) => {
+                    info!("Group '{}': Created PR #{}: {}", group_name, pr_number, pr_url);
+                },
+                Err(e) => {
+                    warn!("Group '{}': Failed to create PR: {}", group_name, e);
+                },
+            }
+        }
+    }
+
+    // Clean up worktree
+    if let Err(e) = cleanup_worktree(&worktree_path).await {
+        warn!("Group '{}': Failed to clean up worktree: {}", group_name, e);
+    }
+
+    let success_count = successful_updates.len();
+    if !failed_updates.is_empty() {
+        info!("Group '{}': {} succeeded, {} failed", group_name, success_count, failed_updates.len());
+    }
+
+    Ok(success_count)
+}
+
+/// Create a pull request for a group of updates
+async fn create_grouped_pr(
+    db: &Database,
+    worktree_path: &std::path::Path,
+    group_name: &str,
+    successful_updates: &[(String, String, String)], // (attr_path, old_version, new_version)
+    failed_updates: &[(String, String)],             // (attr_path, error)
+    config: &PrConfig,
+    fork: &str,
+) -> anyhow::Result<(String, i64)> {
+    // Get GitHub token from environment
+    let github_token = std::env::var("GITHUB_TOKEN")
+        .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN environment variable not set"))?;
+
+    // Create and push branch with group name
+    let branch_name = format!("update/{}", group_name);
+    info!("Creating branch: {}", branch_name);
+
+    // Create new branch (commits were already created by update_from_file_path)
+    let output = tokio::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["checkout", "-b", &branch_name])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
+    }
+
+    // Push to remote
+    let push_target = format!("{}:{}", branch_name, branch_name);
+    let output = tokio::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["push", "-u", fork, &push_target])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to push branch '{}': {}", branch_name, stderr);
+    }
+
+    // Build PR title and body
+    let title = format!("Update {} packages", group_name);
+
+    let mut body = String::new();
+    body.push_str("## Summary\n\n");
+    body.push_str(&format!("This PR updates {} packages in the `{}` group:\n\n", successful_updates.len(), group_name));
+
+    for (attr_path, old_version, new_version) in successful_updates {
+        body.push_str(&format!("- **{}**: {} → {}\n", attr_path, old_version, new_version));
+    }
+
+    if !failed_updates.is_empty() {
+        body.push_str(&format!("\n### Failed Updates ({})\n\n", failed_updates.len()));
+        body.push_str("The following packages could not be updated:\n\n");
+        for (attr_path, error) in failed_updates {
+            body.push_str(&format!("- **{}**: {}\n", attr_path, error));
+        }
+    }
+
+    body.push_str("\n\n🤖 Generated with ekapkgs-update");
+
+    // Create PR via GitHub API
+    let pr = crate::github::create_pull_request(
+        &config.owner,
+        &config.repo,
+        &title,
+        &body,
+        &branch_name,
+        &config.base_branch,
+        &github_token,
+    )
+    .await?;
+
+    // Record PR info for each successfully updated package
+    for (attr_path, _, new_version) in successful_updates {
+        if let Err(e) = db.record_pr_info(attr_path, &pr.html_url, pr.number).await {
+            warn!("Failed to record PR info for {}: {}", attr_path, e);
+        }
+        // Also record the proposed version
+        if let Err(e) = db.record_successful_update(attr_path, "", new_version).await {
+            warn!("Failed to update proposed version for {}: {}", attr_path, e);
+        }
+    }
+
+    Ok((pr.html_url, pr.number))
+}
+
+

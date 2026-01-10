@@ -7,6 +7,7 @@ mod database;
 mod git;
 mod github;
 mod gitlab;
+mod groups;
 mod nix;
 mod package;
 mod pypi;
@@ -49,6 +50,9 @@ enum Commands {
         /// Skip packages with 'unstable' in their version
         #[arg(long)]
         skip_unstable: bool,
+        /// Path to JSON file containing package groups for batch updates
+        #[arg(long)]
+        grouping_file: Option<String>,
     },
     /// Update a package in a Nix file
     Update {
@@ -126,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             concurrent_updates,
             skip_unstable,
+            grouping_file,
         } => {
             commands::run::run(
                 file,
@@ -136,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
                 concurrent_updates,
                 skip_unstable,
+                grouping_file,
             )
             .await?
         },
