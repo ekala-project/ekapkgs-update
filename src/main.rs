@@ -11,6 +11,7 @@ mod nix;
 mod package;
 mod pypi;
 mod rewrite;
+mod variant_strategy;
 mod vcs_sources;
 
 #[derive(Parser)]
@@ -80,6 +81,12 @@ enum Commands {
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
+        /// For mkManyVariants packages: update only this specific variant (e.g., v1_2, v0_20)
+        #[arg(long)]
+        variant: Option<String>,
+        /// For mkManyVariants packages: explicitly update all variants (this is the default)
+        #[arg(long)]
+        all_variants: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -149,6 +156,8 @@ async fn main() -> anyhow::Result<()> {
             upstream,
             fork,
             run_passthru_tests,
+            variant,
+            all_variants,
         } => {
             commands::update::update(
                 file,
@@ -160,6 +169,8 @@ async fn main() -> anyhow::Result<()> {
                 upstream,
                 fork,
                 run_passthru_tests,
+                variant,
+                all_variants,
             )
             .await?
         },

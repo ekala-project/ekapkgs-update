@@ -90,13 +90,13 @@ pub async fn is_many_variants_package(
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let check_expr = format!(
-        "with import {} {{ }}; {} ? variants",
+        "with import {} {{ }}; toString ({} ? variants)",
         normalized_entry, attr_path
     );
 
     match eval_nix_expr(&check_expr).await {
         Ok(result) => {
-            let is_many_variants = result.trim() == "true";
+            let is_many_variants = result.trim() == "1";
             if is_many_variants {
                 debug!("{} is a mkManyVariants package", attr_path);
             }
@@ -107,6 +107,85 @@ pub async fn is_many_variants_package(
             Ok(false)
         },
     }
+}
+
+/// Get list of all variant names for a mkManyVariants package
+///
+/// Evaluates `builtins.attrNames pkg.variants` to get all variant attribute names.
+///
+/// # Arguments
+/// * `eval_entry_point` - Path to the Nix file to import (e.g., "default.nix")
+/// * `attr_path` - The package attribute path (e.g., "pkgs.isl")
+///
+/// # Returns
+/// A vector of variant names (e.g., ["v0_20", "v0_23", "v0_27"])
+///
+/// # Errors
+/// Returns an error if the package is not mkManyVariants or evaluation fails
+pub async fn get_variants_list(
+    eval_entry_point: &str,
+    attr_path: &str,
+) -> anyhow::Result<Vec<String>> {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+    let expr = format!(
+        "with import {} {{ }}; builtins.toJSON (builtins.attrNames {}.variants)",
+        normalized_entry, attr_path
+    );
+
+    let output = eval_nix_expr(&expr).await?;
+    let variants: Vec<String> = serde_json::from_str(&output)?;
+
+    debug!("{} has variants: {:?}", attr_path, variants);
+    Ok(variants)
+}
+
+/// Get version for a specific variant
+///
+/// # Arguments
+/// * `eval_entry_point` - Path to the Nix file to import
+/// * `attr_path` - The package attribute path
+/// * `variant_name` - The variant to query (e.g., "v0_20")
+///
+/// # Returns
+/// The version string for the specified variant
+pub async fn get_variant_version(
+    eval_entry_point: &str,
+    attr_path: &str,
+    variant_name: &str,
+) -> anyhow::Result<String> {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+    let expr = format!(
+        "with import {} {{ }}; {}.variants.{}.version",
+        normalized_entry, attr_path, variant_name
+    );
+
+    eval_nix_expr(&expr).await
+}
+
+/// Get all variant versions as a map
+///
+/// # Arguments
+/// * `eval_entry_point` - Path to the Nix file to import
+/// * `attr_path` - The package attribute path
+///
+/// # Returns
+/// A HashMap mapping variant names to their versions
+pub async fn get_all_variant_versions(
+    eval_entry_point: &str,
+    attr_path: &str,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+    let expr = format!(
+        "with import {} {{ }}; builtins.toJSON (builtins.mapAttrs (name: variant: \
+         variant.version) {}.variants)",
+        normalized_entry, attr_path
+    );
+
+    let output = eval_nix_expr(&expr).await?;
+    let versions: std::collections::HashMap<String, String> = serde_json::from_str(&output)?;
+
+    debug!("{} variant versions: {:?}", attr_path, versions);
+    Ok(versions)
 }
 
 /// Check if a package has a specific attribute
