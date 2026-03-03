@@ -482,6 +482,20 @@ pub fn is_version_acceptable(
         .trim_start_matches("version-");
     let clean_new = new.trim_start_matches('v').trim_start_matches("version-");
 
+    // Reject versions that don't have at least major and minor components
+    // Extract base version (before any '-' for pre-release)
+    let base_new = clean_new.split('-').next().unwrap_or(clean_new);
+    let base_current = clean_current.split('-').next().unwrap_or(clean_current);
+
+    // Require at least one dot (indicating major.minor format)
+    if !base_new.contains('.') || !base_current.contains('.') {
+        debug!(
+            "Rejecting version without major.minor components (current: {}, new: {})",
+            clean_current, clean_new
+        );
+        return Ok(false);
+    }
+
     // Normalize versions to ensure they have 3 components for semver parsing
     let normalized_current = normalize_version(clean_current);
     let normalized_new = normalize_version(clean_new);
@@ -855,5 +869,25 @@ mod tests {
         // Three-component current, two-component new
         assert!(is_version_acceptable("1.9.0", "1.25", SemverStrategy::Latest).unwrap());
         assert!(!is_version_acceptable("1.25.0", "1.9", SemverStrategy::Latest).unwrap());
+    }
+
+    // Test that single-component versions are rejected
+    #[test]
+    fn test_version_acceptable_single_component_rejected() {
+        // Single-component versions should be rejected (no major.minor)
+        // Date-like version (the ninja 120715 case)
+        assert!(!is_version_acceptable("1.13.1", "120715", SemverStrategy::Latest).unwrap());
+        assert!(!is_version_acceptable("1.13.1", "120715", SemverStrategy::Minor).unwrap());
+
+        // Regular single-component version
+        assert!(!is_version_acceptable("1.0.0", "2", SemverStrategy::Latest).unwrap());
+        assert!(!is_version_acceptable("1", "2", SemverStrategy::Latest).unwrap());
+
+        // With v prefix
+        assert!(!is_version_acceptable("v1.0.0", "v2", SemverStrategy::Latest).unwrap());
+
+        // Two-component versions should still work
+        assert!(is_version_acceptable("1.13", "1.14", SemverStrategy::Latest).unwrap());
+        assert!(is_version_acceptable("1.13.1", "1.13.2", SemverStrategy::Latest).unwrap());
     }
 }
