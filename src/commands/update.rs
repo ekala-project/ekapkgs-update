@@ -8,13 +8,16 @@ use tracing::{debug, info, warn};
 use crate::git::get_pr_config_from_git;
 use crate::github;
 use crate::nix::{
-    eval_nix_expr, has_passthru_tests, is_many_variants_package, normalize_entry_point,
+    eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package,
+    normalize_entry_point,
 };
 use crate::package::PackageMetadata;
 use crate::rewrite::{
-    find_and_update_attr, is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
+    find_and_update_attr, is_patches_array_empty, remove_patch_from_array,
+    remove_patches_attribute, update_variant_attr,
 };
-use crate::vcs_sources::{SemverStrategy, UpstreamSource};
+use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
+use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
 
 /// Check for and run update script if it exists
 ///
@@ -68,6 +71,61 @@ async fn run_update_script(file: &str, attr_path: &str) -> anyhow::Result<bool> 
     }
 }
 
+/// Get the default variant name for a mkManyVariants package
+///
+/// This function determines which variant is the default by comparing the version
+/// of the base package with the versions of all variants.
+///
+/// # Arguments
+/// * `file` - Path to the Nix file to evaluate
+/// * `attr_path` - The package attribute path (e.g., "pkgs.ninja")
+///
+/// # Returns
+/// The name of the default variant (e.g., "v1_13")
+///
+/// # Errors
+/// Returns an error if:
+/// - The package is not a mkManyVariants package
+/// - Unable to determine the default variant
+async fn get_default_variant(file: &str, attr_path: &str) -> anyhow::Result<String> {
+    // Get the version of the base package (which is the default variant)
+    let normalized_entry = normalize_entry_point(file);
+    let base_version_expr = format!(
+        "with import {} {{ }}; {}.version",
+        normalized_entry, attr_path
+    );
+    let base_version = eval_nix_expr(&base_version_expr).await?;
+    debug!("Base package version: {}", base_version);
+
+    // Normalize base version for comparison (removes "v" prefix, etc.)
+    let base_version_normalized = extract_version_from_tag(&base_version);
+
+    // Get all variants and their versions
+    let variants = get_variants_list(file, attr_path).await?;
+
+    // Find which variant has the matching version
+    for variant_name in variants {
+        let variant_version =
+            crate::nix::get_variant_version(file, attr_path, &variant_name).await?;
+        // Normalize variant version for comparison
+        let variant_version_normalized = extract_version_from_tag(&variant_version);
+
+        if variant_version_normalized == base_version_normalized {
+            debug!(
+                "Found default variant: {} (version: {})",
+                variant_name, variant_version
+            );
+            return Ok(variant_name);
+        }
+    }
+
+    anyhow::bail!(
+        "Could not determine default variant for {} (base version: {})",
+        attr_path,
+        base_version
+    )
+}
+
 pub async fn update(
     file: String,
     attr_path: String,
@@ -78,11 +136,94 @@ pub async fn update(
     upstream: Option<String>,
     fork: String,
     run_passthru_tests: bool,
+    variant: Option<String>,
+    all_variants: bool,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
     info!("Using semver strategy: {:?}", strategy);
 
+    // Check if this is a mkManyVariants package
+    let is_many_variants = is_many_variants_package(&file, &attr_path).await?;
+
+    if is_many_variants {
+        info!("{} is a mkManyVariants package", attr_path);
+
+        // Determine which variants to update
+        let variants_to_update = if let Some(ref specific_variant) = variant {
+            // Update only the specified variant
+            vec![specific_variant.clone()]
+        } else if all_variants {
+            // Update all variants (when --all-variants flag is set)
+            get_variants_list(&file, &attr_path).await?
+        } else {
+            // Update only the default variant
+            let default_variant = get_default_variant(&file, &attr_path).await?;
+            info!("Using default variant: {}", default_variant);
+            vec![default_variant]
+        };
+
+        info!("Variants to update: {:?}", variants_to_update);
+
+        // Update each variant
+        for variant_name in variants_to_update {
+            // Skip pinned variants (3+ version components)
+            if is_variant_pinned(&variant_name) {
+                info!(
+                    "Skipping pinned variant '{}' (3+ version components)",
+                    variant_name
+                );
+                continue;
+            }
+
+            // Infer or use explicit strategy for this variant
+            let variant_strategy = match infer_strategy_from_variant(&variant_name) {
+                Some(inferred) => {
+                    info!(
+                        "Inferred {:?} strategy for variant '{}'",
+                        inferred, variant_name
+                    );
+                    inferred
+                },
+                None => {
+                    info!(
+                        "No strategy inferred for variant '{}', using explicit strategy: {:?}",
+                        variant_name, strategy
+                    );
+                    strategy
+                },
+            };
+
+            // Update this variant
+            info!(
+                "Updating variant '{}' with strategy {:?}",
+                variant_name, variant_strategy
+            );
+            match update_single_variant(
+                &file,
+                &attr_path,
+                &variant_name,
+                variant_strategy,
+                commit,
+                create_pr,
+                upstream.clone(),
+                fork.clone(),
+                run_passthru_tests,
+            )
+            .await
+            {
+                Ok(()) => info!("Successfully updated variant '{}'", variant_name),
+                Err(e) => {
+                    warn!("Failed to update variant '{}': {}", variant_name, e);
+                    // Continue with other variants
+                },
+            }
+        }
+
+        return Ok(());
+    }
+
+    // Not a mkManyVariants package - use regular update flow
     // Try to run update script if not ignored
     if !ignore_update_script {
         let script_executed = run_update_script(&file, &attr_path).await?;
@@ -128,6 +269,203 @@ pub async fn update(
     .await?;
 
     Ok(())
+}
+
+/// Update a single variant in a mkManyVariants package
+async fn update_single_variant(
+    file: &str,
+    attr_path: &str,
+    variant_name: &str,
+    strategy: SemverStrategy,
+    _commit: bool,
+    _create_pr: bool,
+    _upstream: Option<String>,
+    _fork: String,
+    _run_passthru_tests: bool,
+) -> anyhow::Result<()> {
+    // Get metadata for this specific variant
+    let variant_attr_path = format!("{}.variants.{}", attr_path, variant_name);
+    let metadata = PackageMetadata::from_attr_path(file, &variant_attr_path).await?;
+
+    info!(
+        "Current version for variant '{}': {}",
+        variant_name, metadata.version
+    );
+
+    // Find the upstream source
+    let src_url = metadata
+        .src_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{}'", variant_name))?;
+
+    let upstream_source = UpstreamSource::from_url(src_url)
+        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {}", src_url))?;
+
+    info!("Upstream source: {:?}", upstream_source);
+
+    // Fetch new version based on strategy
+    let release = upstream_source
+        .get_compatible_release(&metadata.version, strategy)
+        .await?;
+
+    // Normalize version from release tag (removes "v" prefix, etc.)
+    let new_version = extract_version_from_tag(&release.tag_name);
+
+    if new_version == metadata.version {
+        info!(
+            "Variant '{}' is already up-to-date ({})",
+            variant_name, metadata.version
+        );
+        return Ok(());
+    }
+
+    info!(
+        "New version available for variant '{}': {} -> {}",
+        variant_name, metadata.version, new_version
+    );
+
+    // Find the variants.nix file
+    let variants_file_path = find_variants_file(file, attr_path).await?;
+    info!("Variants file: {}", variants_file_path);
+
+    // Read the variants.nix file
+    let variants_content = tokio::fs::read_to_string(&variants_file_path).await?;
+
+    // Update the version in the variant
+    let updated_content = update_variant_attr(
+        &variants_content,
+        variant_name,
+        "version",
+        new_version,
+        Some(&metadata.version),
+    )?;
+
+    // Discover new hash by building with wrong hash
+    let new_hash =
+        discover_hash_for_variant(file, attr_path, variant_name, &updated_content).await?;
+
+    // Update the hash in the variant
+    let final_content =
+        if let (Some(old_hash), Some(ref new_h)) = (&metadata.output_hash, &new_hash) {
+            update_variant_attr(
+                &updated_content,
+                variant_name,
+                "src-hash",
+                new_h,
+                Some(old_hash),
+            )?
+        } else {
+            updated_content
+        };
+
+    // Write the updated file
+    tokio::fs::write(&variants_file_path, &final_content).await?;
+    info!(
+        "Updated variant '{}' in {}",
+        variant_name, variants_file_path
+    );
+
+    // Build to verify
+    info!("Building variant '{}' to verify update...", variant_name);
+    let build_result = Command::new("nix-build")
+        .arg("-A")
+        .arg(&variant_attr_path)
+        .arg(file)
+        .output()
+        .await?;
+
+    if !build_result.status.success() {
+        let stderr = String::from_utf8_lossy(&build_result.stderr);
+        anyhow::bail!("Build failed for variant '{}': {}", variant_name, stderr);
+    }
+
+    info!("Build successful for variant '{}'", variant_name);
+
+    Ok(())
+}
+
+/// Find the variants.nix file for a mkManyVariants package
+async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<String> {
+    // Get the package's meta.position to find the directory
+    let normalized_entry = normalize_entry_point(file);
+    let position_expr = format!(
+        "with import {} {{ }}; {}.meta.position",
+        normalized_entry, attr_path
+    );
+
+    let position = eval_nix_expr(&position_expr).await?;
+    let (file_path, _) = position
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+
+    // The variants.nix file should be in the same directory
+    let path = std::path::Path::new(file_path);
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot get parent directory of {}", file_path))?;
+
+    let variants_path = dir.join("variants.nix");
+
+    if variants_path.exists() {
+        Ok(variants_path.to_string_lossy().to_string())
+    } else {
+        anyhow::bail!("variants.nix not found in {}", dir.display())
+    }
+}
+
+/// Discover hash for a variant by writing temporary file and building
+async fn discover_hash_for_variant(
+    file: &str,
+    attr_path: &str,
+    variant_name: &str,
+    temp_content: &str,
+) -> anyhow::Result<Option<String>> {
+    // Write temporary variants.nix
+    let variants_file_path = find_variants_file(file, attr_path).await?;
+    let backup_content = tokio::fs::read_to_string(&variants_file_path).await?;
+
+    // Set a known invalid hash
+    let temp_with_bad_hash = update_variant_attr(
+        temp_content,
+        variant_name,
+        "src-hash",
+        "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        None,
+    )?;
+
+    tokio::fs::write(&variants_file_path, &temp_with_bad_hash).await?;
+
+    let variant_attr_path = format!("{}.variants.{}", attr_path, variant_name);
+
+    // Try to build - it will fail but give us the correct hash
+    let build_result = Command::new("nix-build")
+        .arg("-A")
+        .arg(&variant_attr_path)
+        .arg(file)
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    // Restore original content
+    tokio::fs::write(&variants_file_path, &backup_content).await?;
+
+    if build_result.status.success() {
+        // Shouldn't happen with a wrong hash, but handle it
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&build_result.stderr);
+
+    // Extract hash from error message
+    let hash_pattern = Regex::new(r"got:\s+(sha256-[A-Za-z0-9+/=]+)")?;
+    if let Some(captures) = hash_pattern.captures(&stderr) {
+        let hash = captures.get(1).unwrap().as_str().to_string();
+        info!("Discovered hash for variant '{}': {}", variant_name, hash);
+        Ok(Some(hash))
+    } else {
+        warn!("Could not extract hash from build error: {}", stderr);
+        Ok(None)
+    }
 }
 
 /// Find version and hash in sibling files for mkManyVariants pattern
