@@ -14,6 +14,9 @@ mod rewrite;
 mod variant_strategy;
 mod vcs_sources;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
 #[command(about = "Update ekapkgs packages", long_about = None)]
@@ -105,6 +108,14 @@ enum Commands {
         #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
         database: String,
     },
+    /// Migrate a package from nixpkgs to ekapkgs paradigms
+    Migrate {
+        /// Nix file to evaluate (for attr paths)
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Attribute path or file path to migrate
+        target: String,
+    },
 }
 
 #[tokio::main]
@@ -181,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             identifier,
             database,
         } => commands::log::show_log(database, identifier).await?,
+        Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await?,
     }
 
     Ok(())
