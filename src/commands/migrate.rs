@@ -209,7 +209,10 @@ fn add_do_check_false(content: &str) -> anyhow::Result<String> {
         let indent = &caps[1];
         let result = passthru_pattern.replace(
             content,
-            format!("{}# Test suite is quite long, run as passthru\n{}doCheck = false;\n\n{}passthru =", indent, indent, indent),
+            format!(
+                "{}# Test suite is quite long, run as passthru\n{}doCheck = false;\n\n{}passthru =",
+                indent, indent, indent
+            ),
         );
         return Ok(result.into_owned());
     }
