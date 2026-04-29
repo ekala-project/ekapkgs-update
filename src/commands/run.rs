@@ -395,59 +395,23 @@ async fn check_and_update_package(
 
     debug!("{}: File location: {}", attr_path, file_location);
 
-    // Use the shared pipeline: worktree + update + commit + PR if configured
-    if let Some(config) = pr_config {
+    // Use the shared updater pipeline
+    let update_result = if let Some(config) = pr_config {
         // Full pipeline with worktree and PR
-        match crate::commands::update::perform_update_with_worktree(
-            eval_entry_point,
-            attr_path,
-            &file_location,
-            SemverStrategy::Latest,
+        let updater = crate::commands::updater::Updater {
+            eval_entry_point: eval_entry_point.to_string(),
+            attr_path: attr_path.to_string(),
+            file_location,
+            strategy: SemverStrategy::Latest,
             run_passthru_tests,
-            run_passthru_tests, // Fail on test errors in run mode
-            config,
-            fork,
-        )
-        .await
-        {
-            Ok(outcome) => {
-                info!("{}: Successfully updated to {}", attr_path, outcome.new_version);
-
-                if let Err(e) = db
-                    .record_successful_update(attr_path, current_version, &outcome.new_version)
-                    .await
-                {
-                    warn!("{}: Failed to record successful update: {}", attr_path, e);
-                }
-
-                Ok(UpdateResult::Updated {
-                    old_version: current_version.to_string(),
-                    new_version: outcome.new_version,
-                })
-            },
-            Err(e) => {
-                let error_message = format!("{:#}", e);
-                warn!("{}: Update failed: {}", attr_path, error_message);
-
-                if let Err(db_err) = db
-                    .record_failed_update(
-                        &drv.drv_path,
-                        attr_path,
-                        &error_message,
-                        Some(current_version),
-                        Some(&latest_version),
-                    )
-                    .await
-                {
-                    warn!("{}: Failed to record update failure: {}", attr_path, db_err);
-                }
-
-                Ok(UpdateResult::Skipped(format!("Update failed: {}", e)))
-            },
-        }
+            fail_on_test_failure: run_passthru_tests,
+            pr_config: config.clone(),
+            fork: fork.to_string(),
+        };
+        updater.execute().await
     } else {
         // No PR config — run update in-place (no worktree)
-        match crate::commands::update::perform_update(
+        crate::commands::update::perform_update(
             eval_entry_point.to_string(),
             attr_path.to_string(),
             file_location,
@@ -456,42 +420,43 @@ async fn check_and_update_package(
             run_passthru_tests,
         )
         .await
-        {
-            Ok(outcome) => {
-                info!("{}: Successfully updated to {}", attr_path, outcome.new_version);
+    };
 
-                if let Err(e) = db
-                    .record_successful_update(attr_path, current_version, &outcome.new_version)
-                    .await
-                {
-                    warn!("{}: Failed to record successful update: {}", attr_path, e);
-                }
+    match update_result {
+        Ok(outcome) => {
+            info!("{}: Successfully updated to {}", attr_path, outcome.new_version);
 
-                Ok(UpdateResult::Updated {
-                    old_version: current_version.to_string(),
-                    new_version: outcome.new_version,
-                })
-            },
-            Err(e) => {
-                let error_message = format!("{:#}", e);
-                warn!("{}: Update failed: {}", attr_path, error_message);
+            if let Err(e) = db
+                .record_successful_update(attr_path, current_version, &outcome.new_version)
+                .await
+            {
+                warn!("{}: Failed to record successful update: {}", attr_path, e);
+            }
 
-                if let Err(db_err) = db
-                    .record_failed_update(
-                        &drv.drv_path,
-                        attr_path,
-                        &error_message,
-                        Some(current_version),
-                        Some(&latest_version),
-                    )
-                    .await
-                {
-                    warn!("{}: Failed to record update failure: {}", attr_path, db_err);
-                }
+            Ok(UpdateResult::Updated {
+                old_version: current_version.to_string(),
+                new_version: outcome.new_version,
+            })
+        },
+        Err(e) => {
+            let error_message = format!("{:#}", e);
+            warn!("{}: Update failed: {}", attr_path, error_message);
 
-                Ok(UpdateResult::Skipped(format!("Update failed: {}", e)))
-            },
-        }
+            if let Err(db_err) = db
+                .record_failed_update(
+                    &drv.drv_path,
+                    attr_path,
+                    &error_message,
+                    Some(current_version),
+                    Some(&latest_version),
+                )
+                .await
+            {
+                warn!("{}: Failed to record update failure: {}", attr_path, db_err);
+            }
+
+            Ok(UpdateResult::Skipped(format!("Update failed: {}", e)))
+        },
     }
 }
 

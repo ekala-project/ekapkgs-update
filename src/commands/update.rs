@@ -5,8 +5,7 @@ use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::git::{self, PrConfig};
-use crate::github;
+use crate::git;
 use crate::nix::{
     eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package,
     normalize_entry_point,
@@ -183,24 +182,24 @@ pub async fn update(
     let file_location = get_file_location(&file, &attr_path).await?;
 
     if create_pr {
-        // Determine PR config before doing work
         let pr_config = if let Some(remote_name) = upstream {
             git::get_pr_config_from_remote(&remote_name).await?
         } else {
             git::get_pr_config_from_git().await?
         };
 
-        let outcome = perform_update_with_worktree(
-            &file,
-            &attr_path,
-            &file_location,
+        let updater = super::updater::Updater {
+            eval_entry_point: file,
+            attr_path: attr_path.clone(),
+            file_location,
             strategy,
             run_passthru_tests,
-            false, // Don't fail on test errors for update command
-            &pr_config,
-            &fork,
-        )
-        .await?;
+            fail_on_test_failure: false,
+            pr_config,
+            fork,
+        };
+
+        let outcome = updater.execute().await?;
 
         info!(
             "✓ Successfully updated {} from {} to {} with PR",
@@ -1070,126 +1069,6 @@ pub async fn perform_update(
         tests_passed,
         metadata,
     })
-}
-
-/// Full pipeline: create worktree, update, commit, push, create PR, clean up.
-/// Used by both `update --create-pr` and `run`.
-pub async fn perform_update_with_worktree(
-    eval_entry_point: &str,
-    attr_path: &str,
-    file_location: &str,
-    strategy: SemverStrategy,
-    run_passthru_tests: bool,
-    fail_on_test_failure: bool,
-    pr_config: &PrConfig,
-    fork: &str,
-) -> anyhow::Result<UpdateOutcome> {
-    let repo_root = git::get_repo_root().await?;
-    let worktree_path = git::create_worktree(attr_path).await?;
-
-    // Remap both eval_entry_point and file_location into worktree
-    let wt_eval = git::remap_to_worktree(eval_entry_point, &repo_root, &worktree_path);
-    let wt_file = git::remap_to_worktree(file_location, &repo_root, &worktree_path);
-
-    debug!(
-        "Worktree paths: eval={}, file={}",
-        wt_eval, wt_file
-    );
-
-    // Run the update in the worktree
-    let outcome = match perform_update(
-        wt_eval,
-        attr_path.to_string(),
-        wt_file,
-        strategy,
-        run_passthru_tests,
-        fail_on_test_failure,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            git::cleanup_worktree(&worktree_path).await.ok();
-            return Err(e);
-        },
-    };
-
-    // Commit, push, create PR from worktree
-    let github_token = std::env::var("GITHUB_TOKEN").context(
-        "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
-         GITHUB_TOKEN=your_token_here",
-    )?;
-
-    let branch_name = match git::create_and_push_branch(
-        &worktree_path,
-        attr_path,
-        &outcome.old_version,
-        &outcome.new_version,
-        fork,
-        outcome.tests_passed,
-    )
-    .await
-    {
-        Ok(name) => name,
-        Err(e) => {
-            git::cleanup_worktree(&worktree_path).await.ok();
-            return Err(e);
-        },
-    };
-
-    // Build PR title and body
-    let pr_title = format!(
-        "{}: {} -> {}",
-        attr_path, outcome.old_version, outcome.new_version
-    );
-    let mut pr_body = format!(
-        "## Summary\n\nThis PR updates `{}` from version {} to {}.\n\n## Changes\n\n- Updated \
-         package version\n- Updated source hash",
-        attr_path, outcome.old_version, outcome.new_version
-    );
-
-    if let Some(description) = outcome.metadata.description.as_ref() {
-        pr_body.push_str(&format!(
-            "\n\n## Package Information\n\n**Description:** {}",
-            description
-        ));
-    } else {
-        pr_body.push_str("\n\n## Package Information");
-    }
-    if let Some(homepage) = outcome.metadata.homepage.as_ref() {
-        pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
-    }
-    if let Some(changelog) = outcome.metadata.changelog.as_ref() {
-        pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
-    }
-
-    pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
-
-    let pr = match github::create_pull_request(
-        &pr_config.owner,
-        &pr_config.repo,
-        &pr_title,
-        &pr_body,
-        &branch_name,
-        &pr_config.base_branch,
-        &github_token,
-    )
-    .await
-    {
-        Ok(pr) => pr,
-        Err(e) => {
-            git::cleanup_worktree(&worktree_path).await.ok();
-            return Err(e);
-        },
-    };
-
-    info!("✓ Created pull request: {}", pr.html_url);
-    println!("Pull request created: {}", pr.html_url);
-
-    // Clean up worktree
-    git::cleanup_worktree(&worktree_path).await.ok();
-
-    Ok(outcome)
 }
 
 #[cfg(test)]
