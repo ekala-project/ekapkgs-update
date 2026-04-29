@@ -80,9 +80,6 @@ enum Commands {
         /// Version selection strategy: latest, major, minor, or patch
         #[arg(long, default_value = "latest")]
         semver: String,
-        /// Ignore update script and use generic update method
-        #[arg(long, default_value = "false")]
-        ignore_update_script: bool,
         /// Create a git commit after successful update
         #[arg(long)]
         commit: bool,
@@ -183,7 +180,6 @@ async fn main() -> anyhow::Result<()> {
             file,
             attr_path,
             semver,
-            ignore_update_script,
             commit,
             create_pr,
             upstream,
@@ -196,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
                 file,
                 attr_path,
                 semver,
-                ignore_update_script,
                 commit,
                 create_pr,
                 upstream,
