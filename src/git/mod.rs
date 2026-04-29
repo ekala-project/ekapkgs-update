@@ -1,10 +1,43 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::github::parse_github_url;
+
+/// Get the root of the current git repository
+pub async fn get_repo_root() -> anyhow::Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to run git rev-parse --show-toplevel")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Not in a git repository: {}", stderr);
+    }
+
+    let root = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(PathBuf::from(root))
+}
+
+/// Remap a path from the main repo into a worktree.
+/// Handles both absolute paths (from meta.position) and relative paths (from CLI --file).
+pub fn remap_to_worktree(path: &str, repo_root: &Path, worktree_path: &Path) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        if let Ok(relative) = p.strip_prefix(repo_root) {
+            return worktree_path.join(relative).to_string_lossy().to_string();
+        }
+    }
+    // Relative path: join directly with worktree
+    worktree_path.join(p).to_string_lossy().to_string()
+}
 
 /// Create a git worktree for an isolated update
 pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
@@ -95,6 +128,7 @@ pub async fn create_and_push_branch(
     old_version: &str,
     new_version: &str,
     remote_repo: &str,
+    tests_passed: bool,
 ) -> anyhow::Result<String> {
     // Create a safe branch name from attr_path and version
     let sanitized_attr = attr_path.replace(['.', '/'], "-");
@@ -134,11 +168,19 @@ pub async fn create_and_push_branch(
     }
 
     // Create commit message
-    let commit_message = format!(
-        "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-         ekapkgs-update <noreply@ekapkgs.org>",
-        attr_path, old_version, new_version
-    );
+    let commit_message = if tests_passed {
+        format!(
+            "Update {} from {} to {}\n\nTests: passthru.tests passed\n\n🤖 Generated with \
+             ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>",
+            attr_path, old_version, new_version
+        )
+    } else {
+        format!(
+            "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
+             ekapkgs-update <noreply@ekapkgs.org>",
+            attr_path, old_version, new_version
+        )
+    };
 
     // Commit changes
     let output = Command::new("git")

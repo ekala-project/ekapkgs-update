@@ -5,7 +5,7 @@ use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::git::get_pr_config_from_git;
+use crate::git::{self, PrConfig};
 use crate::github;
 use crate::nix::{
     eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package,
@@ -19,56 +19,12 @@ use crate::rewrite::{
 use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
 use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
 
-/// Check for and run update script if it exists
-///
-/// Returns Ok(true) if update script was found and executed successfully,
-/// Ok(false) if no update script exists, or Err if execution failed.
-async fn run_update_script(file: &str, attr_path: &str) -> anyhow::Result<bool> {
-    info!("Checking for update script for {}", attr_path);
-
-    // Check if an update script is defined for this package
-    let normalized_entry = normalize_entry_point(file);
-    let nix_expr = format!(
-        "with import {} {{ }}; toString {}.updateScript",
-        normalized_entry, attr_path
-    );
-
-    let script_path_result = eval_nix_expr(&nix_expr).await;
-
-    // If update script exists, use it
-    match script_path_result {
-        Ok(script_path) if !script_path.is_empty() => {
-            info!("Found update script: {}", script_path);
-
-            // Execute the update script
-            debug!("Executing update script...");
-            let status = Command::new(&script_path)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-                .await?;
-
-            if !status.success() {
-                anyhow::bail!(
-                    "Update script failed with exit code: {}",
-                    status.code().unwrap_or(-1)
-                );
-            }
-
-            info!("Update script completed successfully for {}", attr_path);
-            Ok(true)
-        },
-        Ok(_) => {
-            debug!("Update script path is empty");
-            Ok(false)
-        },
-        Err(e) => {
-            debug!("No update script found for {}", attr_path);
-            debug!("nix-instantiate stderr: {}", e);
-            Ok(false)
-        },
-    }
+/// Result of a successful package update
+pub struct UpdateOutcome {
+    pub old_version: String,
+    pub new_version: String,
+    pub tests_passed: bool,
+    pub metadata: PackageMetadata,
 }
 
 /// Get the default variant name for a mkManyVariants package
@@ -130,7 +86,6 @@ pub async fn update(
     file: String,
     attr_path: String,
     semver_strategy: String,
-    ignore_update_script: bool,
     commit: bool,
     create_pr: bool,
     upstream: Option<String>,
@@ -223,50 +178,56 @@ pub async fn update(
         return Ok(());
     }
 
-    // Not a mkManyVariants package - use regular update flow
-    // Try to run update script if not ignored
-    if !ignore_update_script {
-        let script_executed = run_update_script(&file, &attr_path).await?;
-        if script_executed {
-            return Ok(());
-        }
+    // Not a mkManyVariants package - use generic update method
+    // Resolve the package file location via meta.position
+    let file_location = get_file_location(&file, &attr_path).await?;
+
+    if create_pr {
+        // Determine PR config before doing work
+        let pr_config = if let Some(remote_name) = upstream {
+            git::get_pr_config_from_remote(&remote_name).await?
+        } else {
+            git::get_pr_config_from_git().await?
+        };
+
+        let outcome = perform_update_with_worktree(
+            &file,
+            &attr_path,
+            &file_location,
+            strategy,
+            run_passthru_tests,
+            false, // Don't fail on test errors for update command
+            &pr_config,
+            &fork,
+        )
+        .await?;
+
+        info!(
+            "✓ Successfully updated {} from {} to {} with PR",
+            attr_path, outcome.old_version, outcome.new_version
+        );
     } else {
-        info!("Ignoring update script for {}", attr_path);
-    }
+        // Run update in-place (no worktree)
+        let outcome = perform_update(
+            file.clone(),
+            attr_path.clone(),
+            file_location,
+            strategy,
+            run_passthru_tests,
+            false,
+        )
+        .await?;
 
-    // No update script or ignoring it - use generic update method
-    // Try to find the package file location via meta.position
-    debug!("Attempting to locate package definition...");
-    let normalized_entry = normalize_entry_point(&file);
-    let position_expr = format!(
-        "with import {} {{ }}; {}.meta.position",
-        normalized_entry, attr_path
-    );
-
-    let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
-        if position.is_empty() {
-            anyhow::bail!("Empty position returned from meta.position");
+        if commit {
+            create_git_commit(
+                &attr_path,
+                &outcome.old_version,
+                &outcome.new_version,
+                outcome.tests_passed,
+            )
+            .await?;
         }
-        // Parse position string (format: "file:line")
-        let (file_path, _line_str) = position
-            .rsplit_once(':')
-            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
-        Ok(file_path.to_string())
-    })?;
-
-    update_from_file_path(
-        file,
-        attr_path,
-        expr_file_path,
-        strategy,
-        commit,
-        create_pr,
-        upstream,
-        fork,
-        run_passthru_tests,
-        false, // Don't fail on test errors for update command
-    )
-    .await?;
+    }
 
     Ok(())
 }
@@ -823,19 +784,38 @@ async fn create_git_commit(
     Ok(())
 }
 
-/// Update the nix expr generically
-pub async fn update_from_file_path(
+/// Resolve the file location for a package from meta.position
+pub async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+    let position_expr = format!(
+        "with import {} {{ }}; {}.meta.position",
+        normalized_entry, attr_path
+    );
+
+    let position = eval_nix_expr(&position_expr).await?;
+
+    if position.is_empty() {
+        anyhow::bail!("Empty position returned from meta.position");
+    }
+
+    // Parse position string (format: "file:line")
+    let (file_path, _line_str) = position
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+
+    Ok(file_path.to_string())
+}
+
+/// Pure update logic: edit files, discover hashes, build, test.
+/// Does NOT do any git operations. Returns outcome on success.
+pub async fn perform_update(
     eval_entry_point: String,
     attr_path: String,
     file_location: String,
     strategy: SemverStrategy,
-    commit: bool,
-    create_pr: bool,
-    upstream: Option<String>,
-    fork: String,
     run_passthru_tests: bool,
     fail_on_test_failure: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<UpdateOutcome> {
     info!(
         "Starting generic update for {} at {}",
         attr_path, file_location
@@ -847,11 +827,9 @@ pub async fn update_from_file_path(
 
     // Step 2: Determine upstream source
     let upstream_source = if let Some(ref src_url) = metadata.src_url {
-        // Try to parse URL as GitHub/GitLab/PyPI
         UpstreamSource::from_url(src_url)
             .context("Source is not from a supported VCS platform (GitHub, GitLab, PyPI)")?
     } else if let Some(ref pname) = metadata.pname {
-        // If no src_url but pname exists, create PyPI source directly
         UpstreamSource::PyPI {
             pname: pname.clone(),
         }
@@ -874,7 +852,7 @@ pub async fn update_from_file_path(
         strategy, metadata.version, new_version
     );
 
-    // Step 5: Update version in file with invalid hash
+    // Step 4: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let actual_file_location = update_nix_file(
         &eval_entry_point,
@@ -892,7 +870,7 @@ pub async fn update_from_file_path(
         actual_file_location
     );
 
-    // Step 6: Build source to get correct hash
+    // Step 5: Build source to get correct hash
     let (success, _stdout, stderr) =
         build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
 
@@ -910,12 +888,12 @@ pub async fn update_from_file_path(
 
     info!("Extracted correct hash: {}", correct_hash);
 
-    // Step 7: Update hash with correct value (use actual file location from step 5)
+    // Step 6: Update hash with correct value
     let _ = update_nix_file(
         &eval_entry_point,
         &attr_path,
         &actual_file_location,
-        &new_version, // version stays the same
+        &new_version,
         &new_version,
         Some(invalid_hash),
         Some(&correct_hash),
@@ -924,7 +902,7 @@ pub async fn update_from_file_path(
 
     info!("Updated hash in {}", actual_file_location);
 
-    // Step 8: Build source again to verify
+    // Step 7: Build source again to verify
     let (success, _stdout, stderr) =
         build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
 
@@ -938,13 +916,9 @@ pub async fn update_from_file_path(
     if let Some(old_cargo_hash) = &metadata.cargo_hash {
         info!("Detected Rust package, updating cargoHash");
 
-        // Set invalid cargo hash
         let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_cargo_hash(&actual_file_location, old_cargo_hash, invalid_cargo_hash).await?;
 
-        info!("Set invalid cargoHash in {}", actual_file_location);
-
-        // Build full package to get correct cargo hash
         let (success, _stdout, stderr) =
             build_nix_expr(&eval_entry_point, &attr_path, None).await?;
 
@@ -962,7 +936,6 @@ pub async fn update_from_file_path(
 
         info!("Extracted correct cargoHash: {}", correct_cargo_hash);
 
-        // Update cargoHash with correct value
         update_cargo_hash(
             &actual_file_location,
             invalid_cargo_hash,
@@ -977,13 +950,9 @@ pub async fn update_from_file_path(
     if let Some(old_vendor_hash) = &metadata.vendor_hash {
         info!("Detected Go package, updating vendorHash");
 
-        // Set invalid vendor hash
         let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_vendor_hash(&actual_file_location, old_vendor_hash, invalid_vendor_hash).await?;
 
-        info!("Set invalid vendorHash in {}", actual_file_location);
-
-        // Build full package to get correct vendor hash
         let (success, _stdout, stderr) =
             build_nix_expr(&eval_entry_point, &attr_path, None).await?;
 
@@ -1001,7 +970,6 @@ pub async fn update_from_file_path(
 
         info!("Extracted correct vendorHash: {}", correct_vendor_hash);
 
-        // Update vendorHash with correct value
         update_vendor_hash(
             &actual_file_location,
             invalid_vendor_hash,
@@ -1012,7 +980,7 @@ pub async fn update_from_file_path(
         info!("Updated vendorHash in {}", actual_file_location);
     }
 
-    // Step 9: Build full package to verify with reversed patch recovery
+    // Step 8: Build full package to verify with reversed patch recovery
     loop {
         let (success, _stdout, stderr) =
             build_nix_expr(&eval_entry_point, &attr_path, None).await?;
@@ -1028,7 +996,6 @@ pub async fn update_from_file_path(
                     },
                     Err(e) => {
                         debug!("Could not remove empty patches attribute: {}", e);
-                        // Not a critical error, continue
                     },
                 }
             }
@@ -1039,20 +1006,15 @@ pub async fn update_from_file_path(
         if let Some(patch_name) = detect_reversed_patch(&stderr) {
             debug!("Detected reversed patch: {}", patch_name);
 
-            // Read the file
             let content = tokio::fs::read_to_string(&actual_file_location).await?;
 
-            // Remove the patch
             match remove_patch_from_array(&content, &patch_name) {
                 Ok(updated_content) => {
-                    // Write the updated content back
                     tokio::fs::write(&actual_file_location, updated_content).await?;
                     debug!("Removed obsolete patch: {}", patch_name);
-                    // Continue loop to retry the build
                 },
                 Err(e) => {
                     warn!("Failed to remove patch {}: {}", patch_name, e);
-                    // Can't remove the patch, return the original error
                     anyhow::bail!(
                         "Package build failed after update. Detected reversed patch but couldn't \
                          remove it: {}\n{}",
@@ -1062,7 +1024,6 @@ pub async fn update_from_file_path(
                 },
             }
         } else {
-            // No reversed patch detected - this is a real build failure
             warn!("Full package build failed:\n{}", stderr);
             anyhow::bail!(
                 "Package build failed after update. You may need to manually fix build issues."
@@ -1070,17 +1031,15 @@ pub async fn update_from_file_path(
         }
     }
 
-    // Run passthru.tests if requested
+    // Step 9: Run passthru.tests if requested
     let mut tests_passed = false;
     info!("Checking for passthru.tests...");
     if run_passthru_tests {
-        // Check if tests exist using nix eval
         let normalized_entry = normalize_entry_point(&eval_entry_point);
 
         if has_passthru_tests(&normalized_entry, &attr_path).await? {
             info!("Found {}.passthru.tests, building tests...", &attr_path);
 
-            // Build tests
             let (success, _stdout, stderr) =
                 build_nix_expr(&eval_entry_point, &attr_path, Some("passthru.tests")).await?;
 
@@ -1105,145 +1064,132 @@ pub async fn update_from_file_path(
         attr_path, metadata.version, new_version
     );
 
-    // Handle commit and PR creation
-    if create_pr {
-        // Get PR configuration - use CLI override or auto-detect from git
-        let pr_config = if let Some(remote_name) = upstream {
-            crate::git::get_pr_config_from_remote(&remote_name).await?
-        } else {
-            get_pr_config_from_git().await?
-        };
+    Ok(UpdateOutcome {
+        old_version: metadata.version.clone(),
+        new_version,
+        tests_passed,
+        metadata,
+    })
+}
 
-        // Get GitHub token from environment
-        let github_token = std::env::var("GITHUB_TOKEN").context(
-            "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
-             GITHUB_TOKEN=your_token_here",
-        )?;
+/// Full pipeline: create worktree, update, commit, push, create PR, clean up.
+/// Used by both `update --create-pr` and `run`.
+pub async fn perform_update_with_worktree(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &str,
+    strategy: SemverStrategy,
+    run_passthru_tests: bool,
+    fail_on_test_failure: bool,
+    pr_config: &PrConfig,
+    fork: &str,
+) -> anyhow::Result<UpdateOutcome> {
+    let repo_root = git::get_repo_root().await?;
+    let worktree_path = git::create_worktree(attr_path).await?;
 
-        info!("Creating pull request for {}", attr_path);
+    // Remap both eval_entry_point and file_location into worktree
+    let wt_eval = git::remap_to_worktree(eval_entry_point, &repo_root, &worktree_path);
+    let wt_file = git::remap_to_worktree(file_location, &repo_root, &worktree_path);
 
-        // Create branch name
-        let sanitized_attr = attr_path.replace(['.', '/'], "-");
-        let branch_name = format!("update/{}/{}", sanitized_attr, new_version);
+    debug!(
+        "Worktree paths: eval={}, file={}",
+        wt_eval, wt_file
+    );
 
-        // Create new branch
-        debug!("Creating branch '{}'", branch_name);
-        let output = Command::new("git")
-            .args(["checkout", "-b", &branch_name])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+    // Run the update in the worktree
+    let outcome = match perform_update(
+        wt_eval,
+        attr_path.to_string(),
+        wt_file,
+        strategy,
+        run_passthru_tests,
+        fail_on_test_failure,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            git::cleanup_worktree(&worktree_path).await.ok();
+            return Err(e);
+        },
+    };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
-        }
+    // Commit, push, create PR from worktree
+    let github_token = std::env::var("GITHUB_TOKEN").context(
+        "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
+         GITHUB_TOKEN=your_token_here",
+    )?;
 
-        // Stage all changes
-        debug!("Staging changes");
-        let output = Command::new("git")
-            .args(["add", "-A"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+    let branch_name = match git::create_and_push_branch(
+        &worktree_path,
+        attr_path,
+        &outcome.old_version,
+        &outcome.new_version,
+        fork,
+        outcome.tests_passed,
+    )
+    .await
+    {
+        Ok(name) => name,
+        Err(e) => {
+            git::cleanup_worktree(&worktree_path).await.ok();
+            return Err(e);
+        },
+    };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to stage changes: {}", stderr);
-        }
+    // Build PR title and body
+    let pr_title = format!(
+        "{}: {} -> {}",
+        attr_path, outcome.old_version, outcome.new_version
+    );
+    let mut pr_body = format!(
+        "## Summary\n\nThis PR updates `{}` from version {} to {}.\n\n## Changes\n\n- Updated \
+         package version\n- Updated source hash",
+        attr_path, outcome.old_version, outcome.new_version
+    );
 
-        // Create commit with bot signature
-        let commit_message = if tests_passed {
-            format!(
-                "Update {} from {} to {}\n\nTests: passthru.tests passed\n\n🤖 Generated with \
-                 ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>",
-                attr_path, metadata.version, new_version
-            )
-        } else {
-            format!(
-                "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-                 ekapkgs-update <noreply@ekapkgs.org>",
-                attr_path, metadata.version, new_version
-            )
-        };
-
-        debug!("Creating commit");
-        let output = Command::new("git")
-            .args(["commit", "-m", &commit_message])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to commit changes: {}", stderr);
-        }
-
-        // Push to remote
-        debug!("Pushing branch to remote");
-        let push_target = format!("{}:{}", branch_name, branch_name);
-        let output = Command::new("git")
-            .args(["push", "-u", &fork, &push_target])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "Failed to push branch '{}' to remote '{}': {}",
-                branch_name,
-                fork,
-                stderr
-            );
-        }
-
-        info!("Pushed branch '{}' to remote", branch_name);
-
-        // Create pull request
-        let pr_title = format!("{}: {} -> {}", attr_path, metadata.version, new_version);
-        let mut pr_body = format!(
-            "## Update {}\n\nUpdates from version {} to {}.",
-            attr_path, metadata.version, new_version
-        );
-
-        // Add optional metadata fields
-        if let Some(description) = metadata.description.as_ref() {
-            pr_body.push_str(&format!("\n\n**Description:** {}", description));
-        }
-        if let Some(homepage) = metadata.homepage.as_ref() {
-            pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
-        }
-        if let Some(changelog) = metadata.changelog.as_ref() {
-            pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
-        }
-
-        pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
-
-        debug!("Creating pull request");
-        let pr = github::create_pull_request(
-            &pr_config.owner,
-            &pr_config.repo,
-            &pr_title,
-            &pr_body,
-            &branch_name,
-            &pr_config.base_branch,
-            &github_token,
-        )
-        .await?;
-
-        info!("✓ Created pull request: {}", pr.html_url);
-        println!("Pull request created: {}", pr.html_url);
-    } else if commit {
-        // Just create a commit without PR
-        create_git_commit(&attr_path, &metadata.version, &new_version, tests_passed).await?;
+    if let Some(description) = outcome.metadata.description.as_ref() {
+        pr_body.push_str(&format!(
+            "\n\n## Package Information\n\n**Description:** {}",
+            description
+        ));
+    } else {
+        pr_body.push_str("\n\n## Package Information");
+    }
+    if let Some(homepage) = outcome.metadata.homepage.as_ref() {
+        pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
+    }
+    if let Some(changelog) = outcome.metadata.changelog.as_ref() {
+        pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
     }
 
-    Ok(())
+    pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
+
+    let pr = match github::create_pull_request(
+        &pr_config.owner,
+        &pr_config.repo,
+        &pr_title,
+        &pr_body,
+        &branch_name,
+        &pr_config.base_branch,
+        &github_token,
+    )
+    .await
+    {
+        Ok(pr) => pr,
+        Err(e) => {
+            git::cleanup_worktree(&worktree_path).await.ok();
+            return Err(e);
+        },
+    };
+
+    info!("✓ Created pull request: {}", pr.html_url);
+    println!("Pull request created: {}", pr.html_url);
+
+    // Clean up worktree
+    git::cleanup_worktree(&worktree_path).await.ok();
+
+    Ok(outcome)
 }
 
 #[cfg(test)]
