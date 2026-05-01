@@ -147,6 +147,8 @@ impl UpstreamSource {
     /// # Arguments
     /// * `current_version` - The current version to compare against
     /// * `strategy` - The semver update strategy to apply
+    /// * `version_prefix` - Optional version prefix to filter releases (e.g., "1.2" for v1_2
+    ///   variants)
     ///
     /// # Returns
     /// The best compatible release information
@@ -157,6 +159,7 @@ impl UpstreamSource {
         &self,
         current_version: &str,
         strategy: SemverStrategy,
+        version_prefix: Option<&str>,
     ) -> anyhow::Result<Release> {
         match self {
             UpstreamSource::GitHub { owner, repo } => {
@@ -197,7 +200,7 @@ impl UpstreamSource {
                 };
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy)
+                find_best_release(&releases, current_version, strategy, version_prefix)
             },
             UpstreamSource::GitLab { owner, project } => {
                 let token = env::var("GITLAB_TOKEN").ok();
@@ -237,7 +240,7 @@ impl UpstreamSource {
                 };
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy)
+                find_best_release(&releases, current_version, strategy, version_prefix)
             },
             UpstreamSource::PyPI { pname } => {
                 // PyPI doesn't require authentication tokens
@@ -259,7 +262,7 @@ impl UpstreamSource {
                 }
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy)
+                find_best_release(&releases, current_version, strategy, version_prefix)
             },
         }
     }
@@ -293,13 +296,15 @@ impl UpstreamSource {
 ///
 /// Filters releases by:
 /// 1. Excluding prereleases
-/// 2. Checking version compatibility with strategy
-/// 3. Returns the newest compatible version
+/// 2. Filtering by version prefix if provided (e.g., only "1.2.*" releases)
+/// 3. Checking version compatibility with strategy
+/// 4. Returns the newest compatible version
 ///
 /// # Arguments
 /// * `releases` - List of releases to filter
 /// * `current_version` - Current version to compare against
 /// * `strategy` - Semver strategy to apply
+/// * `version_prefix` - Optional version prefix to filter releases (e.g., "1.2" for v1_2 variants)
 ///
 /// # Returns
 /// The best matching release
@@ -310,6 +315,7 @@ fn find_best_release(
     releases: &[Release],
     current_version: &str,
     strategy: SemverStrategy,
+    version_prefix: Option<&str>,
 ) -> anyhow::Result<Release> {
     // Filter out prereleases and find compatible versions
     let mut compatible_releases: Vec<&Release> = releases
@@ -317,6 +323,18 @@ fn find_best_release(
         .filter(|r| !r.is_prerelease)
         .filter(|r| {
             let version = extract_version_from_tag(&r.tag_name);
+
+            // If version_prefix is specified, only consider releases that start with that prefix
+            if let Some(prefix) = version_prefix {
+                if !version.starts_with(prefix) {
+                    debug!(
+                        "Skipping release {} - doesn't match version prefix {}",
+                        version, prefix
+                    );
+                    return false;
+                }
+            }
+
             is_version_acceptable(current_version, version, strategy).unwrap_or(false)
         })
         .collect();

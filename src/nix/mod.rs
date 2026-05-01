@@ -162,32 +162,6 @@ pub async fn get_variant_version(
     eval_nix_expr(&expr).await
 }
 
-/// Get all variant versions as a map
-///
-/// # Arguments
-/// * `eval_entry_point` - Path to the Nix file to import
-/// * `attr_path` - The package attribute path
-///
-/// # Returns
-/// A HashMap mapping variant names to their versions
-pub async fn get_all_variant_versions(
-    eval_entry_point: &str,
-    attr_path: &str,
-) -> anyhow::Result<std::collections::HashMap<String, String>> {
-    let normalized_entry = normalize_entry_point(eval_entry_point);
-    let expr = format!(
-        "with import {} {{ }}; builtins.toJSON (builtins.mapAttrs (name: variant: \
-         variant.version) {}.variants)",
-        normalized_entry, attr_path
-    );
-
-    let output = eval_nix_expr(&expr).await?;
-    let versions: std::collections::HashMap<String, String> = serde_json::from_str(&output)?;
-
-    debug!("{} variant versions: {:?}", attr_path, versions);
-    Ok(versions)
-}
-
 /// Check if a package has a specific attribute
 ///
 /// Evaluates a Nix expression using the `?` operator to check if an attribute exists

@@ -138,7 +138,7 @@ async fn check_for_update(
 
     // Fetch latest compatible release
     let best_release = match upstream_source
-        .get_compatible_release(current_version, SemverStrategy::Latest)
+        .get_compatible_release(current_version, SemverStrategy::Latest, None)
         .await
     {
         Ok(release) => release,
