@@ -19,10 +19,12 @@ fn increase_fd_limit() -> anyhow::Result<()> {
 }
 
 mod commands;
+mod config;
 mod database;
 mod git;
 mod github;
 mod gitlab;
+mod hash_discovery;
 mod nix;
 mod package;
 mod pypi;
