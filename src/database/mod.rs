@@ -8,8 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};
-
-pub use types::{UpdateLog, UpdateRecord, _DatabaseStatistics};
+pub use types::{_DatabaseStatistics, UpdateLog, UpdateRecord};
 
 /// Database connection wrapper for tracking package updates
 #[derive(Clone)]

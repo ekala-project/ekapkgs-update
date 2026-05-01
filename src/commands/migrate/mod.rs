@@ -3,13 +3,10 @@ mod final_attrs;
 mod transforms;
 
 use anyhow::Context;
-use tracing::{debug, info};
-
 pub use arguments::add_run_unit_tests_argument;
 pub use final_attrs::{convert_to_final_attrs_pattern, fix_closing_brace};
-pub use transforms::{
-    add_unittests_to_passthru, ensure_do_check_false, update_test_comments,
-};
+use tracing::{debug, info};
+pub use transforms::{add_unittests_to_passthru, ensure_do_check_false, update_test_comments};
 
 /// Migrate a Nix package file to use runUnitTests pattern
 ///
