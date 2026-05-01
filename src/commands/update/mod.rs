@@ -1,30 +1,27 @@
 mod build;
 mod file_update;
 mod git;
+mod hash_workflows;
+mod pr;
 mod script;
 mod variants;
-
-use std::process::Stdio;
 
 use anyhow::Context;
 pub use build::*;
 pub use file_update::*;
 pub use git::*;
+pub use hash_workflows::*;
+pub use pr::*;
 pub use script::*;
-use tokio::process::Command;
 use tracing::{debug, info, warn};
 pub use variants::*;
 
-use crate::git::get_pr_config_from_git;
 use crate::nix::{
-    eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package,
-    normalize_entry_point,
+    eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point,
 };
 use crate::package::PackageMetadata;
-use crate::rewrite::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
 use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
-use crate::{github, hash_discovery};
 
 /// Main update entry point
 pub async fn update(
@@ -172,11 +169,6 @@ pub async fn update(
     Ok(())
 }
 
-/// Extract hash from Nix build error output (local helper)
-fn extract_hash_from_error(stderr: &str) -> Option<String> {
-    hash_discovery::extract_hash(stderr)
-}
-
 /// Update a package from a specific file path
 pub async fn update_from_file_path(
     eval_entry_point: String,
@@ -201,11 +193,9 @@ pub async fn update_from_file_path(
 
     // Step 2: Determine upstream source
     let upstream_source = if let Some(ref src_url) = metadata.src_url {
-        // Try to parse URL as GitHub/GitLab/PyPI
         UpstreamSource::from_url(src_url)
             .context("Source is not from a supported VCS platform (GitHub, GitLab, PyPI)")?
     } else if let Some(ref pname) = metadata.pname {
-        // If no src_url but pname exists, create PyPI source directly
         UpstreamSource::PyPI {
             pname: pname.clone(),
         }
@@ -217,7 +207,7 @@ pub async fn update_from_file_path(
 
     info!("{}", upstream_source.description());
 
-    // Step 3: Fetch best compatible release based on strategy
+    // Step 3: Fetch best compatible release
     let best_release = upstream_source
         .get_compatible_release(&metadata.version, strategy)
         .await?;
@@ -228,374 +218,64 @@ pub async fn update_from_file_path(
         strategy, metadata.version, new_version
     );
 
-    // Step 5: Update version in file with invalid hash
-    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    let actual_file_location = update_nix_file(
+    // Step 4: Update source hash
+    let actual_file_location = update_source_hash(
         &eval_entry_point,
         &attr_path,
         &file_location,
         &metadata.version,
         &new_version,
         metadata.output_hash.as_deref(),
-        Some(invalid_hash),
     )
     .await?;
 
-    info!(
-        "Updated version and set invalid hash in {}",
-        actual_file_location
-    );
-
-    // Step 6: Build source to get correct hash
-    let (success, _stdout, stderr) =
-        build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
-
-    if success {
-        warn!("Build succeeded with invalid hash - this shouldn't happen");
-        anyhow::bail!("Expected hash mismatch error but build succeeded");
-    }
-
-    let correct_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Could not extract correct hash from build error:\n{}",
-            stderr
-        )
-    })?;
-
-    info!("Extracted correct hash: {}", correct_hash);
-
-    // Step 7: Update hash with correct value (use actual file location from step 5)
-    let _ = update_nix_file(
+    // Step 5: Update cargoHash for Rust packages
+    update_cargo_hash_if_needed(
         &eval_entry_point,
         &attr_path,
         &actual_file_location,
-        &new_version, // version stays the same
-        &new_version,
-        Some(invalid_hash),
-        Some(&correct_hash),
+        metadata.cargo_hash.as_deref(),
     )
     .await?;
 
-    info!("Updated hash in {}", actual_file_location);
+    // Step 6: Update vendorHash for Go packages
+    update_vendor_hash_if_needed(
+        &eval_entry_point,
+        &attr_path,
+        &actual_file_location,
+        metadata.vendor_hash.as_deref(),
+    )
+    .await?;
 
-    // Step 8: Build source again to verify
-    let (success, _stdout, stderr) =
-        build_nix_expr(&eval_entry_point, &attr_path, Some("src")).await?;
+    // Step 7: Build with patch recovery
+    build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
 
-    if !success {
-        anyhow::bail!("Source build failed after hash update:\n{}", stderr);
-    }
-
-    info!("Source build successful");
-
-    // For Rust packages, update cargoHash
-    if let Some(old_cargo_hash) = &metadata.cargo_hash {
-        info!("Detected Rust package, updating cargoHash");
-
-        // Set invalid cargo hash
-        let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_cargo_hash(&actual_file_location, old_cargo_hash, invalid_cargo_hash).await?;
-
-        info!("Set invalid cargoHash in {}", actual_file_location);
-
-        // Build full package to get correct cargo hash
-        let (success, _stdout, stderr) =
-            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid cargoHash - this shouldn't happen");
-            anyhow::bail!("Expected cargoHash mismatch error but build succeeded");
-        }
-
-        let correct_cargo_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct cargoHash from build error:\n{}",
-                stderr
-            )
-        })?;
-
-        info!("Extracted correct cargoHash: {}", correct_cargo_hash);
-
-        // Update cargoHash with correct value
-        update_cargo_hash(
-            &actual_file_location,
-            invalid_cargo_hash,
-            &correct_cargo_hash,
-        )
-        .await?;
-
-        info!("Updated cargoHash in {}", actual_file_location);
-    }
-
-    // For Go packages, update vendorHash
-    if let Some(old_vendor_hash) = &metadata.vendor_hash {
-        info!("Detected Go package, updating vendorHash");
-
-        // Set invalid vendor hash
-        let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_vendor_hash(&actual_file_location, old_vendor_hash, invalid_vendor_hash).await?;
-
-        info!("Set invalid vendorHash in {}", actual_file_location);
-
-        // Build full package to get correct vendor hash
-        let (success, _stdout, stderr) =
-            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid vendorHash - this shouldn't happen");
-            anyhow::bail!("Expected vendorHash mismatch error but build succeeded");
-        }
-
-        let correct_vendor_hash = extract_hash_from_error(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct vendorHash from build error:\n{}",
-                stderr
-            )
-        })?;
-
-        info!("Extracted correct vendorHash: {}", correct_vendor_hash);
-
-        // Update vendorHash with correct value
-        update_vendor_hash(
-            &actual_file_location,
-            invalid_vendor_hash,
-            &correct_vendor_hash,
-        )
-        .await?;
-
-        info!("Updated vendorHash in {}", actual_file_location);
-    }
-
-    // Step 9: Build full package to verify with reversed patch recovery
-    loop {
-        let (success, _stdout, stderr) =
-            build_nix_expr(&eval_entry_point, &attr_path, None).await?;
-
-        if success {
-            // Build succeeded - check if patches array is now empty
-            let content = tokio::fs::read_to_string(&actual_file_location).await?;
-            if is_patches_array_empty(&content) {
-                match remove_patches_attribute(&content) {
-                    Ok(updated_content) => {
-                        tokio::fs::write(&actual_file_location, updated_content).await?;
-                        debug!("Removed empty patches attribute");
-                    },
-                    Err(e) => {
-                        debug!("Could not remove empty patches attribute: {}", e);
-                        // Not a critical error, continue
-                    },
-                }
-            }
-            break;
-        }
-
-        // Build failed - check for reversed patch errors
-        if let Some(patch_name) = detect_reversed_patch(&stderr) {
-            debug!("Detected reversed patch: {}", patch_name);
-
-            // Read the file
-            let content = tokio::fs::read_to_string(&actual_file_location).await?;
-
-            // Remove the patch
-            match remove_patch_from_array(&content, &patch_name) {
-                Ok(updated_content) => {
-                    // Write the updated content back
-                    tokio::fs::write(&actual_file_location, updated_content).await?;
-                    debug!("Removed obsolete patch: {}", patch_name);
-                    // Continue loop to retry the build
-                },
-                Err(e) => {
-                    warn!("Failed to remove patch {}: {}", patch_name, e);
-                    // Can't remove the patch, return the original error
-                    anyhow::bail!(
-                        "Package build failed after update. Detected reversed patch but couldn't \
-                         remove it: {}\n{}",
-                        e,
-                        stderr
-                    );
-                },
-            }
-        } else {
-            // No reversed patch detected - this is a real build failure
-            warn!("Full package build failed:\n{}", stderr);
-            anyhow::bail!(
-                "Package build failed after update. You may need to manually fix build issues."
-            );
-        }
-    }
-
-    // Run passthru.tests if requested
-    let mut tests_passed = false;
-    info!("Checking for passthru.tests...");
-    if run_passthru_tests {
-        // Check if tests exist using nix eval
-        let normalized_entry = normalize_entry_point(&eval_entry_point);
-
-        if has_passthru_tests(&normalized_entry, &attr_path).await? {
-            info!("Found {}.passthru.tests, building tests...", &attr_path);
-
-            // Build tests
-            let (success, _stdout, stderr) =
-                build_nix_expr(&eval_entry_point, &attr_path, Some("passthru.tests")).await?;
-
-            if !success {
-                warn!("Tests failed:\n{}", stderr);
-                if fail_on_test_failure {
-                    anyhow::bail!("Package tests failed after update");
-                } else {
-                    warn!("Package tests failed after update, but continuing anyway");
-                }
-            } else {
-                info!("✓ Tests passed");
-                tests_passed = true;
-            }
-        } else {
-            info!("No passthru.tests found for {}", attr_path);
-        }
-    }
+    // Step 8: Run passthru.tests if requested
+    let tests_passed = run_package_tests(
+        &eval_entry_point,
+        &attr_path,
+        run_passthru_tests,
+        fail_on_test_failure,
+    )
+    .await?;
 
     info!(
         "✓ Successfully updated {} from {} to {}",
         attr_path, metadata.version, new_version
     );
 
-    // Handle commit and PR creation
-    if create_pr {
-        // Get PR configuration - use CLI override or auto-detect from git
-        let pr_config = if let Some(remote_name) = upstream {
-            crate::git::get_pr_config_from_remote(&remote_name).await?
-        } else {
-            get_pr_config_from_git().await?
-        };
-
-        // Get GitHub token from environment
-        let github_token = std::env::var("GITHUB_TOKEN").context(
-            "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
-             GITHUB_TOKEN=your_token_here",
-        )?;
-
-        info!("Creating pull request for {}", attr_path);
-
-        // Create branch name
-        let sanitized_attr = attr_path.replace(['.', '/'], "-");
-        let branch_name = format!("update/{}/{}", sanitized_attr, new_version);
-
-        // Create new branch
-        debug!("Creating branch '{}'", branch_name);
-        let output = Command::new("git")
-            .args(["checkout", "-b", &branch_name])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
-        }
-
-        // Stage all changes
-        debug!("Staging changes");
-        let output = Command::new("git")
-            .args(["add", "-A"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to stage changes: {}", stderr);
-        }
-
-        // Create commit with bot signature
-        let commit_message = if tests_passed {
-            format!(
-                "Update {} from {} to {}\n\nTests: passthru.tests passed\n\n🤖 Generated with \
-                 ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>",
-                attr_path, metadata.version, new_version
-            )
-        } else {
-            format!(
-                "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-                 ekapkgs-update <noreply@ekapkgs.org>",
-                attr_path, metadata.version, new_version
-            )
-        };
-
-        debug!("Creating commit");
-        let output = Command::new("git")
-            .args(["commit", "-m", &commit_message])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to commit changes: {}", stderr);
-        }
-
-        // Push to remote
-        debug!("Pushing branch to remote");
-        let push_target = format!("{}:{}", branch_name, branch_name);
-        let output = Command::new("git")
-            .args(["push", "-u", &fork, &push_target])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "Failed to push branch '{}' to remote '{}': {}",
-                branch_name,
-                fork,
-                stderr
-            );
-        }
-
-        info!("Pushed branch '{}' to remote", branch_name);
-
-        // Create pull request
-        let pr_title = format!("{}: {} -> {}", attr_path, metadata.version, new_version);
-        let mut pr_body = format!(
-            "## Update {}\n\nUpdates from version {} to {}.",
-            attr_path, metadata.version, new_version
-        );
-
-        // Add optional metadata fields
-        if let Some(description) = metadata.description.as_ref() {
-            pr_body.push_str(&format!("\n\n**Description:** {}", description));
-        }
-        if let Some(homepage) = metadata.homepage.as_ref() {
-            pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
-        }
-        if let Some(changelog) = metadata.changelog.as_ref() {
-            pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
-        }
-
-        pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
-
-        debug!("Creating pull request");
-        let pr = github::create_pull_request(
-            &pr_config.owner,
-            &pr_config.repo,
-            &pr_title,
-            &pr_body,
-            &branch_name,
-            &pr_config.base_branch,
-            &github_token,
-        )
-        .await?;
-
-        info!("✓ Created pull request: {}", pr.html_url);
-        println!("Pull request created: {}", pr.html_url);
-    } else if commit {
-        // Just create a commit without PR
-        create_git_commit(&attr_path, &metadata.version, &new_version, tests_passed).await?;
-    }
+    // Step 9: Handle commit and PR creation
+    handle_commit_or_pr(
+        &attr_path,
+        &metadata,
+        &new_version,
+        commit,
+        create_pr,
+        upstream,
+        &fork,
+        tests_passed,
+    )
+    .await?;
 
     Ok(())
 }
