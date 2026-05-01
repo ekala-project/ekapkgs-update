@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 use crate::nix::{eval_nix_expr, get_variants_list, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::rewrite::update_variant_attr;
-use crate::vcs_sources::{extract_version_from_tag, SemverStrategy, UpstreamSource};
+use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
 
 /// Get the default variant name for a mkManyVariants package
 ///

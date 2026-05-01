@@ -1,9 +1,8 @@
 use tracing::{debug, info, warn};
 
+use super::variants::find_version_in_siblings;
 use crate::nix::is_many_variants_package;
 use crate::rewrite::find_and_update_attr;
-
-use super::variants::find_version_in_siblings;
 
 /// Update version and hash in a Nix file
 ///
@@ -107,7 +106,11 @@ pub async fn update_nix_file(
 }
 
 /// Update cargoHash attribute in Nix file
-pub async fn update_cargo_hash(file_path: &str, old_hash: &str, new_hash: &str) -> anyhow::Result<()> {
+pub async fn update_cargo_hash(
+    file_path: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> anyhow::Result<()> {
     debug!("Updating cargoHash in {} using AST manipulation", file_path);
     let content = tokio::fs::read_to_string(file_path).await?;
 
@@ -119,7 +122,11 @@ pub async fn update_cargo_hash(file_path: &str, old_hash: &str, new_hash: &str) 
 }
 
 /// Update vendorHash attribute in Nix file
-pub async fn update_vendor_hash(file_path: &str, old_hash: &str, new_hash: &str) -> anyhow::Result<()> {
+pub async fn update_vendor_hash(
+    file_path: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> anyhow::Result<()> {
     debug!(
         "Updating vendorHash in {} using AST manipulation",
         file_path

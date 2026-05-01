@@ -2,13 +2,12 @@ use futures::{StreamExt, pin_mut};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::types::UpdateRequest;
 use crate::database::Database;
 use crate::nix;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
-
-use super::types::UpdateRequest;
 
 /// Service that monitors packages for new upstream releases
 pub async fn release_checker_service(

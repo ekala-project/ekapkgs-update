@@ -127,7 +127,10 @@ where
         )
     })?;
 
-    info!("Discovered correct {}: {}", config.hash_attr_name, correct_hash);
+    info!(
+        "Discovered correct {}: {}",
+        config.hash_attr_name, correct_hash
+    );
 
     // Step 4: Update with correct hash
     update_hash_fn(
@@ -137,10 +140,7 @@ where
     )
     .await?;
 
-    info!(
-        "Updated {} in {}",
-        config.hash_attr_name, config.file_path
-    );
+    info!("Updated {} in {}", config.hash_attr_name, config.file_path);
 
     // Step 5: Verify build succeeds
     let verify_result = Command::new("nix-build")
@@ -195,7 +195,10 @@ error: hash mismatch in fixed-output derivation '/nix/store/...':
 "#;
 
         let hash = extract_hash_from_error(stderr);
-        assert_eq!(hash, Some("sha256-abcdef1234567890ABCDEF1234567890ABCDEF12=".to_string()));
+        assert_eq!(
+            hash,
+            Some("sha256-abcdef1234567890ABCDEF1234567890ABCDEF12=".to_string())
+        );
     }
 
     #[test]

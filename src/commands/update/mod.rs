@@ -4,26 +4,27 @@ mod git;
 mod script;
 mod variants;
 
+use std::process::Stdio;
+
+use anyhow::Context;
 pub use build::*;
 pub use file_update::*;
 pub use git::*;
 pub use script::*;
-pub use variants::*;
-
-use std::process::Stdio;
-
-use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
+pub use variants::*;
 
 use crate::git::get_pr_config_from_git;
-use crate::github;
-use crate::hash_discovery;
-use crate::nix::{eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package, normalize_entry_point};
+use crate::nix::{
+    eval_nix_expr, get_variants_list, has_passthru_tests, is_many_variants_package,
+    normalize_entry_point,
+};
 use crate::package::PackageMetadata;
 use crate::rewrite::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
 use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
+use crate::{github, hash_discovery};
 
 /// Main update entry point
 pub async fn update(

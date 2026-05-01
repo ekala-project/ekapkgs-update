@@ -2,13 +2,12 @@ mod checker;
 mod types;
 mod updater;
 
+use checker::release_checker_service;
 use tokio::sync::mpsc;
 use tracing::info;
+use updater::updater_service;
 
 use crate::database::Database;
-
-use checker::release_checker_service;
-use updater::updater_service;
 
 /// Run the automated update process
 pub async fn run(

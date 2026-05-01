@@ -4,13 +4,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
+use super::types::{UpdateRequest, UpdateResult};
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::SemverStrategy;
-
-use super::types::{UpdateRequest, UpdateResult};
 
 /// Service that performs package updates
 pub async fn updater_service(
