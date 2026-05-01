@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 use crate::nix::{eval_nix_expr, get_variants_list, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::rewrite::update_variant_attr;
+use crate::variant_strategy::extract_version_prefix;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
 
 /// Get the default variant name for a mkManyVariants package
@@ -97,9 +98,19 @@ pub async fn update_single_variant(
 
     info!("Upstream source: {:?}", upstream_source);
 
+    // Extract version prefix from variant name (e.g., "v1_2" -> "1.2")
+    // This ensures we only consider releases matching the variant's version series
+    let version_prefix = extract_version_prefix(variant_name);
+    if let Some(ref prefix) = version_prefix {
+        info!(
+            "Filtering releases to version prefix: {} (from variant '{}')",
+            prefix, variant_name
+        );
+    }
+
     // Fetch new version based on strategy
     let release = upstream_source
-        .get_compatible_release(&metadata.version, strategy)
+        .get_compatible_release(&metadata.version, strategy, version_prefix.as_deref())
         .await?;
 
     // Normalize version from release tag (removes "v" prefix, etc.)

@@ -209,7 +209,7 @@ pub async fn update_from_file_path(
 
     // Step 3: Fetch best compatible release
     let best_release = upstream_source
-        .get_compatible_release(&metadata.version, strategy)
+        .get_compatible_release(&metadata.version, strategy, None)
         .await?;
 
     let new_version = UpstreamSource::get_version(&best_release);
