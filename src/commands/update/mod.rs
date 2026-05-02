@@ -8,6 +8,8 @@ mod pr;
 mod script;
 mod variants;
 
+use std::path::Path;
+
 use anyhow::Context;
 pub use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
 pub use file_update::{
@@ -281,10 +283,10 @@ pub async fn update_from_file_path(
     );
 
     // Step 4: Update source hash
-    let actual_file_location = update_source_hash(
+    let actual_file_location: std::path::PathBuf = update_source_hash(
         &eval_entry_point,
         &attr_path,
-        &file_location,
+        Path::new(&file_location),
         &metadata.version,
         &new_version,
         metadata.output_hash.as_deref(),
@@ -356,7 +358,10 @@ pub async fn update_from_file_path(
 
     // Step 9: Format the file if requested
     if format {
-        format_nix_file(&actual_file_location).await?;
+        let file_path_str = actual_file_location
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        format_nix_file(file_path_str).await?;
     }
 
     info!(
