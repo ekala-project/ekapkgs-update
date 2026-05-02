@@ -96,7 +96,7 @@ impl RunConfig {
             concurrency,
         };
         let updater_handle = tokio::spawn(async move {
-            super::updater::updater_service(rx, db_updater, updater_config).await
+            updater_config.run_service(rx, db_updater).await
         });
 
         // Wait for both services to complete
@@ -145,4 +145,119 @@ pub struct UpdaterServiceConfig {
 
     /// Number of concurrent update workers
     pub concurrency: usize,
+}
+
+impl UpdaterServiceConfig {
+    /// Run the updater service that processes package update requests
+    pub async fn run_service(
+        self,
+        mut rx: mpsc::UnboundedReceiver<super::types::UpdateRequest>,
+        db: Database,
+    ) -> (usize, usize) {
+        use tokio::task::JoinSet;
+        use tracing::warn;
+
+        let UpdaterServiceConfig {
+            eval_entry_point,
+            pr_config,
+            fork,
+            run_passthru_tests,
+            dry_run,
+            concurrency,
+        } = self;
+
+        let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
+            JoinSet::new();
+        let mut updated_count = 0;
+        let mut failed_count = 0;
+
+        // Helper function to process a completed task result
+        let mut process_result =
+            |result: anyhow::Result<super::types::UpdateResult>, attr_path: &str| {
+                match result {
+                    Ok(super::types::UpdateResult::Updated { .. })
+                    | Ok(super::types::UpdateResult::DryRun { .. }) => updated_count += 1,
+                    Err(_) => failed_count += 1,
+                    _ => {},
+                }
+                super::updater::handle_result(result, attr_path);
+            };
+
+        loop {
+            tokio::select! {
+                // Receive update requests from release checker
+                update_req = rx.recv() => {
+                    match update_req {
+                        Some(req) => {
+                            // Wait if we've reached the concurrency limit
+                            while join_set.len() >= concurrency {
+                                if let Some(task_result) = join_set.join_next().await {
+                                    match task_result {
+                                        Ok((result, task_attr_path)) => {
+                                            process_result(result, &task_attr_path);
+                                        },
+                                        Err(e) => {
+                                            warn!("Task panicked: {}", e);
+                                        },
+                                    }
+                                }
+                            }
+
+                            // Clone data needed for the async task
+                            let db_clone = db.clone();
+                            let eval_entry_point_clone = eval_entry_point.clone();
+                            let pr_config_clone = pr_config.clone();
+                            let fork_clone = fork.clone();
+                            let attr_path_clone = req.attr_path.clone();
+
+                            // Spawn the update task
+                            join_set.spawn(async move {
+                                let result = super::updater::perform_update(
+                                    &db_clone,
+                                    &eval_entry_point_clone,
+                                    &req,
+                                    pr_config_clone.as_ref(),
+                                    &fork_clone,
+                                    run_passthru_tests,
+                                    dry_run,
+                                )
+                                .await;
+                                (result, attr_path_clone)
+                            });
+                        },
+                        None => {
+                            // Channel closed - no more updates coming
+                            break;
+                        }
+                    }
+                },
+                // Also drain completed tasks while waiting for new requests
+                Some(task_result) = join_set.join_next(), if !join_set.is_empty() => {
+                    match task_result {
+                        Ok((result, attr_path)) => {
+                            process_result(result, &attr_path);
+                        },
+                        Err(e) => {
+                            warn!("Task panicked: {}", e);
+                        },
+                    }
+                },
+            }
+        }
+
+        // Wait for all remaining tasks to complete
+        while let Some(task_result) = join_set.join_next().await {
+            match task_result {
+                Ok((result, attr_path)) => {
+                    process_result(result, &attr_path);
+                },
+                Err(e) => {
+                    warn!("Task panicked: {}", e);
+                },
+            }
+        }
+
+        info!("Updater service complete");
+        (updated_count, failed_count)
+    }
 }
