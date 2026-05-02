@@ -1,5 +1,6 @@
 mod build;
 mod file_update;
+mod flake;
 mod git;
 mod hash_workflows;
 mod pr;
@@ -9,6 +10,7 @@ mod variants;
 use anyhow::Context;
 pub use build::*;
 pub use file_update::*;
+pub use flake::*;
 pub use git::*;
 pub use hash_workflows::*;
 pub use pr::*;
@@ -36,10 +38,29 @@ pub async fn update(
     run_passthru_tests: bool,
     variant: Option<String>,
     all_variants: bool,
+    flake: bool,
+    flake_output: Option<String>,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
     info!("Using semver strategy: {:?}", strategy);
+
+    // Handle flake mode
+    if flake {
+        info!("Flake mode enabled");
+        return update_flake_package(
+            file,
+            attr_path,
+            flake_output,
+            strategy,
+            commit,
+            create_pr,
+            upstream,
+            fork,
+            run_passthru_tests,
+        )
+        .await;
+    }
 
     // Check if this is a mkManyVariants package
     let is_many_variants = is_many_variants_package(&file, &attr_path).await?;
@@ -152,7 +173,7 @@ pub async fn update(
         Ok(file_path.to_string())
     })?;
 
-    update_from_file_path(
+    let _removed_patches = update_from_file_path(
         file,
         attr_path,
         expr_file_path,
@@ -170,6 +191,7 @@ pub async fn update(
 }
 
 /// Update a package from a specific file path
+/// Returns a list of patches that were removed during the update
 pub async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
@@ -181,7 +203,7 @@ pub async fn update_from_file_path(
     fork: String,
     run_passthru_tests: bool,
     fail_on_test_failure: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     info!(
         "Starting generic update for {} at {}",
         attr_path, file_location
@@ -248,7 +270,8 @@ pub async fn update_from_file_path(
     .await?;
 
     // Step 7: Build with patch recovery
-    build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
+    let removed_patches =
+        build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
 
     // Step 8: Run passthru.tests if requested
     let tests_passed = run_package_tests(
@@ -277,5 +300,5 @@ pub async fn update_from_file_path(
     )
     .await?;
 
-    Ok(())
+    Ok(removed_patches)
 }

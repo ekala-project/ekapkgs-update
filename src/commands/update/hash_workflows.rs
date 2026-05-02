@@ -160,15 +160,18 @@ pub async fn update_vendor_hash_if_needed(
 }
 
 /// Build package with automatic recovery from reversed patches
+/// Returns a list of patch names that were removed during the build process
 pub async fn build_with_patch_recovery(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     use super::{build_nix_expr, detect_reversed_patch};
     use crate::rewrite::{
         is_patches_array_empty, remove_patch_from_array, remove_patches_attribute,
     };
+
+    let mut removed_patches = Vec::new();
 
     loop {
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -180,7 +183,7 @@ pub async fn build_with_patch_recovery(
                 match remove_patches_attribute(&content) {
                     Ok(updated_content) => {
                         tokio::fs::write(file_location, updated_content).await?;
-                        debug!("Removed empty patches attribute");
+                        info!("Removed empty patches attribute");
                     },
                     Err(e) => {
                         debug!("Could not remove empty patches attribute: {}", e);
@@ -193,7 +196,7 @@ pub async fn build_with_patch_recovery(
 
         // Build failed - check for reversed patch errors
         if let Some(patch_name) = detect_reversed_patch(&stderr) {
-            debug!("Detected reversed patch: {}", patch_name);
+            info!("Detected reversed/already-applied patch: {}", patch_name);
 
             // Read the file
             let content = tokio::fs::read_to_string(file_location).await?;
@@ -203,15 +206,18 @@ pub async fn build_with_patch_recovery(
                 Ok(updated_content) => {
                     // Write the updated content back
                     tokio::fs::write(file_location, updated_content).await?;
-                    debug!("Removed obsolete patch: {}", patch_name);
+                    info!("Removed obsolete patch: {}", patch_name);
+                    removed_patches.push(patch_name.clone());
                     // Continue loop to retry the build
                 },
                 Err(e) => {
                     warn!("Failed to remove patch {}: {}", patch_name, e);
                     // Can't remove the patch, return the original error
                     anyhow::bail!(
-                        "Package build failed after update. Detected reversed patch but couldn't \
-                         remove it: {}\n{}",
+                        "Package build failed after update. Detected reversed/already-applied \
+                         patch '{}' but couldn't remove it from the patches array: {}\n\nBuild \
+                         error:\n{}",
+                        patch_name,
                         e,
                         stderr
                     );
@@ -221,12 +227,14 @@ pub async fn build_with_patch_recovery(
             // No reversed patch detected - this is a real build failure
             warn!("Full package build failed:\n{}", stderr);
             anyhow::bail!(
-                "Package build failed after update. You may need to manually fix build issues."
+                "Package build failed after update with no reversed patches detected. This \
+                 indicates a real build issue that needs manual intervention.\n\nBuild error:\n{}",
+                stderr
             );
         }
     }
 
-    Ok(())
+    Ok(removed_patches)
 }
 
 /// Run passthru.tests if they exist and return whether tests passed

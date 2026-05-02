@@ -182,9 +182,19 @@ async fn perform_update(
     .await;
 
     match update_result {
-        Ok(()) => {
+        Ok(removed_patches) => {
             // Update succeeded
             info!("{}: Successfully updated to {}", attr_path, new_version);
+
+            // Log removed patches if any
+            if !removed_patches.is_empty() {
+                info!(
+                    "{}: Removed {} obsolete patch(es): {}",
+                    attr_path,
+                    removed_patches.len(),
+                    removed_patches.join(", ")
+                );
+            }
 
             // Record successful update first
             if let Err(e) = db
