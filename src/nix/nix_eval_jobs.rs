@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(untagged)]
 pub enum NixEvalItem {
     Error(NixEvalError),
-    Drv(NixEvalDrv),
+    Drv(Box<NixEvalDrv>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

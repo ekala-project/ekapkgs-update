@@ -89,9 +89,8 @@ pub async fn update_nix_file(
                 .find_map(|&attr_name| {
                     find_and_update_attr(&updated_content, attr_name, new_h, Some(old_h))
                         .ok()
-                        .map(|new_content| {
+                        .inspect(|_| {
                             debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
-                            new_content
                         })
                 })
                 .unwrap_or_else(|| {
