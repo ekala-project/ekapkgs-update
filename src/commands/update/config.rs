@@ -47,6 +47,60 @@ impl Default for UpdateConfig {
     }
 }
 
+impl UpdateConfig {
+    /// Update a single variant in a mkManyVariants package
+    pub async fn update_single_variant(
+        self,
+        file: &str,
+        attr_path: &str,
+        variant_name: &str,
+        strategy: SemverStrategy,
+    ) -> anyhow::Result<()> {
+        super::update_single_variant(file, attr_path, variant_name, strategy, self).await
+    }
+
+    /// Update a package from a specific file path
+    /// Returns a list of patches that were removed during the update
+    pub async fn update_from_file_path(
+        self,
+        eval_entry_point: String,
+        attr_path: String,
+        file_location: String,
+        version_config: VersionConfig,
+        fail_on_test_failure: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        super::update_from_file_path(
+            eval_entry_point,
+            attr_path,
+            file_location,
+            version_config,
+            self,
+            fail_on_test_failure,
+        )
+        .await
+    }
+
+    /// Update a package exposed by a flake
+    pub async fn update_flake_package(
+        self,
+        flake_ref: String,
+        attr_path: String,
+        flake_output: Option<String>,
+        version_config: VersionConfig,
+        override_filename: Option<String>,
+    ) -> anyhow::Result<()> {
+        super::update_flake_package(
+            flake_ref,
+            attr_path,
+            flake_output,
+            version_config,
+            self,
+            override_filename,
+        )
+        .await
+    }
+}
+
 /// Version selection configuration
 #[derive(Debug, Clone)]
 pub struct VersionConfig {
@@ -154,15 +208,15 @@ impl UpdateParams {
         // Handle flake mode
         if flake_config.enabled {
             info!("Flake mode enabled");
-            return super::update_flake_package(
-                file,
-                attr_path,
-                flake_config.output,
-                version_config,
-                update_config,
-                override_filename,
-            )
-            .await;
+            return update_config
+                .update_flake_package(
+                    file,
+                    attr_path,
+                    flake_config.output,
+                    version_config,
+                    override_filename,
+                )
+                .await;
         }
 
         // Check if this is a mkManyVariants package
@@ -221,14 +275,10 @@ impl UpdateParams {
                     "Updating variant '{}' with strategy {:?}",
                     variant_name, variant_strategy
                 );
-                match super::update_single_variant(
-                    &file,
-                    &attr_path,
-                    &variant_name,
-                    variant_strategy,
-                    update_config.clone(),
-                )
-                .await
+                match update_config
+                    .clone()
+                    .update_single_variant(&file, &attr_path, &variant_name, variant_strategy)
+                    .await
                 {
                     Ok(()) => info!("Successfully updated variant '{}'", variant_name),
                     Err(e) => {
@@ -277,15 +327,15 @@ impl UpdateParams {
             })?
         };
 
-        let _removed_patches = super::update_from_file_path(
-            file,
-            attr_path,
-            expr_file_path,
-            version_config,
-            update_config,
-            false, // Don't fail on test errors for update command
-        )
-        .await?;
+        let _removed_patches = update_config
+            .update_from_file_path(
+                file,
+                attr_path,
+                expr_file_path,
+                version_config,
+                false, // Don't fail on test errors for update command
+            )
+            .await?;
 
         Ok(())
     }

@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use super::types::{UpdateRequest, UpdateResult};
@@ -11,116 +9,9 @@ use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::SemverStrategy;
 
-/// Service that performs package updates
-pub async fn updater_service(
-    mut rx: mpsc::UnboundedReceiver<UpdateRequest>,
-    db: Database,
-    config: super::UpdaterServiceConfig,
-) -> (usize, usize) {
-    let super::UpdaterServiceConfig {
-        eval_entry_point,
-        pr_config,
-        fork,
-        run_passthru_tests,
-        dry_run,
-        concurrency,
-    } = config;
-    let mut join_set: JoinSet<(anyhow::Result<UpdateResult>, String)> = JoinSet::new();
-    let mut updated_count = 0;
-    let mut failed_count = 0;
-
-    // Helper function to process a completed task result
-    let mut process_result = |result: anyhow::Result<UpdateResult>, attr_path: &str| {
-        match result {
-            Ok(UpdateResult::Updated { .. }) | Ok(UpdateResult::DryRun { .. }) => {
-                updated_count += 1
-            },
-            Err(_) => failed_count += 1,
-            _ => {},
-        }
-        handle_result(result, attr_path);
-    };
-
-    loop {
-        tokio::select! {
-            // Receive update requests from release checker
-            update_req = rx.recv() => {
-                match update_req {
-                    Some(req) => {
-                        // Wait if we've reached the concurrency limit
-                        while join_set.len() >= concurrency {
-                            if let Some(task_result) = join_set.join_next().await {
-                                match task_result {
-                                    Ok((result, task_attr_path)) => {
-                                        process_result(result, &task_attr_path);
-                                    },
-                                    Err(e) => {
-                                        warn!("Task panicked: {}", e);
-                                    },
-                                }
-                            }
-                        }
-
-                        // Clone data needed for the async task
-                        let db_clone = db.clone();
-                        let eval_entry_point_clone = eval_entry_point.clone();
-                        let pr_config_clone = pr_config.clone();
-                        let fork_clone = fork.clone();
-                        let attr_path_clone = req.attr_path.clone();
-
-                        // Spawn the update task
-                        join_set.spawn(async move {
-                            let result = perform_update(
-                                &db_clone,
-                                &eval_entry_point_clone,
-                                &req,
-                                pr_config_clone.as_ref(),
-                                &fork_clone,
-                                run_passthru_tests,
-                                dry_run,
-                            )
-                            .await;
-                            (result, attr_path_clone)
-                        });
-                    },
-                    None => {
-                        // Channel closed - no more updates coming
-                        break;
-                    }
-                }
-            },
-            // Also drain completed tasks while waiting for new requests
-            Some(task_result) = join_set.join_next(), if !join_set.is_empty() => {
-                match task_result {
-                    Ok((result, attr_path)) => {
-                        process_result(result, &attr_path);
-                    },
-                    Err(e) => {
-                        warn!("Task panicked: {}", e);
-                    },
-                }
-            },
-        }
-    }
-
-    // Wait for all remaining tasks to complete
-    while let Some(task_result) = join_set.join_next().await {
-        match task_result {
-            Ok((result, attr_path)) => {
-                process_result(result, &attr_path);
-            },
-            Err(e) => {
-                warn!("Task panicked: {}", e);
-            },
-        }
-    }
-
-    info!("Updater service complete");
-    (updated_count, failed_count)
-}
 
 /// Perform a package update
-async fn perform_update(
+pub(super) async fn perform_update(
     db: &Database,
     eval_entry_point: &str,
     req: &UpdateRequest,
@@ -181,15 +72,15 @@ async fn perform_update(
         format: false,   // No formatting in run mode (worktree cleanup would lose it)
     };
 
-    let update_result = crate::commands::update::update_from_file_path(
-        eval_entry_point.to_string(),
-        attr_path.to_string(),
-        worktree_file_str,
-        version_config,
-        update_config,
-        run_passthru_tests, // Fail on test errors in run mode
-    )
-    .await;
+    let update_result = update_config
+        .update_from_file_path(
+            eval_entry_point.to_string(),
+            attr_path.to_string(),
+            worktree_file_str,
+            version_config,
+            run_passthru_tests, // Fail on test errors in run mode
+        )
+        .await;
 
     match update_result {
         Ok(removed_patches) => {
@@ -280,7 +171,7 @@ async fn perform_update(
 }
 
 /// Do additional processing depending on the result of the update
-fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &str) {
+pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &str) {
     match result {
         Ok(UpdateResult::Updated {
             old_version,
