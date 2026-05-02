@@ -2,6 +2,7 @@
 
 use std::env;
 
+use anyhow::Context;
 use regex::Regex;
 use semver::Version;
 use tracing::{debug, warn};
@@ -160,6 +161,8 @@ impl UpstreamSource {
         current_version: &str,
         strategy: SemverStrategy,
         version_prefix: Option<&str>,
+        explicit_version: Option<&str>,
+        version_regex: Option<&str>,
     ) -> anyhow::Result<Release> {
         match self {
             UpstreamSource::GitHub { owner, repo } => {
@@ -200,7 +203,14 @@ impl UpstreamSource {
                 };
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy, version_prefix)
+                find_best_release(
+                    &releases,
+                    current_version,
+                    strategy,
+                    version_prefix,
+                    explicit_version,
+                    version_regex,
+                )
             },
             UpstreamSource::GitLab { owner, project } => {
                 let token = env::var("GITLAB_TOKEN").ok();
@@ -240,7 +250,14 @@ impl UpstreamSource {
                 };
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy, version_prefix)
+                find_best_release(
+                    &releases,
+                    current_version,
+                    strategy,
+                    version_prefix,
+                    explicit_version,
+                    version_regex,
+                )
             },
             UpstreamSource::PyPI { pname } => {
                 // PyPI doesn't require authentication tokens
@@ -262,7 +279,14 @@ impl UpstreamSource {
                 }
 
                 // Filter and find best match
-                find_best_release(&releases, current_version, strategy, version_prefix)
+                find_best_release(
+                    &releases,
+                    current_version,
+                    strategy,
+                    version_prefix,
+                    explicit_version,
+                    version_regex,
+                )
             },
         }
     }
@@ -316,13 +340,45 @@ fn find_best_release(
     current_version: &str,
     strategy: SemverStrategy,
     version_prefix: Option<&str>,
+    explicit_version: Option<&str>,
+    version_regex: Option<&str>,
 ) -> anyhow::Result<Release> {
+    // If explicit version is specified, find and return that exact version
+    if let Some(target_version) = explicit_version {
+        for release in releases {
+            let version = if let Some(regex) = version_regex {
+                extract_version_with_regex(&release.tag_name, regex)?
+            } else {
+                extract_version_from_tag(&release.tag_name).to_string()
+            };
+
+            // Match either the tag directly or the extracted version
+            if release.tag_name == target_version || version == target_version {
+                return Ok(Release {
+                    tag_name: release.tag_name.clone(),
+                    is_prerelease: release.is_prerelease,
+                });
+            }
+        }
+
+        anyhow::bail!(
+            "Explicit version '{}' not found in available releases",
+            target_version
+        );
+    }
     // Filter out prereleases and find compatible versions
     let mut compatible_releases: Vec<&Release> = releases
         .iter()
         .filter(|r| !r.is_prerelease)
         .filter(|r| {
-            let version = extract_version_from_tag(&r.tag_name);
+            let version = if let Some(regex) = version_regex {
+                match extract_version_with_regex(&r.tag_name, regex) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                }
+            } else {
+                extract_version_from_tag(&r.tag_name).to_string()
+            };
 
             // If version_prefix is specified, only consider releases that start with that prefix
             if let Some(prefix) = version_prefix {
@@ -335,7 +391,7 @@ fn find_best_release(
                 }
             }
 
-            is_version_acceptable(current_version, version, strategy).unwrap_or(false)
+            is_version_acceptable(current_version, &version, strategy).unwrap_or(false)
         })
         .collect();
 
@@ -413,6 +469,61 @@ pub fn extract_version_from_tag(tag: &str) -> &str {
     } else {
         version
     }
+}
+
+/// Extract version from tag name using a custom regex pattern
+///
+/// Uses a provided regular expression to extract the version from a tag name.
+/// The regex should contain exactly one capture group that captures the version.
+///
+/// # Arguments
+/// * `tag` - The tag name to extract version from
+/// * `regex_pattern` - The regex pattern with one capture group for the version
+///
+/// # Returns
+/// The extracted version string from the first capture group
+///
+/// # Errors
+/// Returns an error if the regex pattern is invalid or doesn't match the tag
+///
+/// # Example
+/// ```
+/// # use ekapkgs_update::vcs_sources::extract_version_with_regex;
+/// assert_eq!(
+///     extract_version_with_regex("jq-1.6", r"jq-(.*)").unwrap(),
+///     "1.6"
+/// );
+/// assert_eq!(
+///     extract_version_with_regex("release/v2.3.4", r"release/v(.*)").unwrap(),
+///     "2.3.4"
+/// );
+/// ```
+pub fn extract_version_with_regex(tag: &str, regex_pattern: &str) -> anyhow::Result<String> {
+    use regex::Regex;
+
+    let re = Regex::new(regex_pattern)
+        .with_context(|| format!("Invalid version regex pattern: {}", regex_pattern))?;
+
+    let captures = re.captures(tag).with_context(|| {
+        format!(
+            "Version regex '{}' did not match tag '{}'",
+            regex_pattern, tag
+        )
+    })?;
+
+    // Get the first capture group (index 1, since 0 is the whole match)
+    let version = captures
+        .get(1)
+        .with_context(|| {
+            format!(
+                "Version regex '{}' must have exactly one capture group",
+                regex_pattern
+            )
+        })?
+        .as_str()
+        .to_string();
+
+    Ok(version)
 }
 
 /// Normalize a version string to ensure it has at least 3 components for semver parsing
