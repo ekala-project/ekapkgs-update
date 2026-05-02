@@ -1,5 +1,7 @@
 //! Configuration structures for run mode operations
 
+use std::sync::Arc;
+
 use crate::database::Database;
 use crate::git::PrConfig;
 use tokio::sync::mpsc;
@@ -88,9 +90,9 @@ impl RunConfig {
 
         // Spawn updater service
         let updater_config = UpdaterServiceConfig {
-            eval_entry_point: file_updater,
+            eval_entry_point: Arc::from(file_updater), // Convert String to Arc<str>
             pr_config,
-            fork,
+            fork: Arc::from(fork), // Convert String to Arc<str>
             run_passthru_tests,
             dry_run,
             concurrency,
@@ -128,14 +130,14 @@ impl RunConfig {
 /// Configuration for the updater service
 #[derive(Debug, Clone)]
 pub struct UpdaterServiceConfig {
-    /// Nix file entry point
-    pub eval_entry_point: String,
+    /// Nix file entry point (Arc for cheap cloning in async tasks)
+    pub eval_entry_point: Arc<str>,
 
     /// Pull request configuration (if enabled)
     pub pr_config: Option<PrConfig>,
 
-    /// Fork git remote
-    pub fork: String,
+    /// Fork git remote (Arc for cheap cloning in async tasks)
+    pub fork: Arc<str>,
 
     /// Whether to run passthru.tests
     pub run_passthru_tests: bool,
@@ -205,19 +207,19 @@ impl UpdaterServiceConfig {
 
                             // Clone data needed for the async task
                             let db_clone = db.clone();
-                            let eval_entry_point_clone = eval_entry_point.clone();
+                            let eval_entry_point_clone = Arc::clone(&eval_entry_point); // O(1) clone
                             let pr_config_clone = pr_config.clone();
-                            let fork_clone = fork.clone();
+                            let fork_clone = Arc::clone(&fork); // O(1) clone
                             let attr_path_clone = req.attr_path.clone();
 
                             // Spawn the update task
                             join_set.spawn(async move {
                                 let result = super::updater::perform_update(
                                     &db_clone,
-                                    &eval_entry_point_clone,
+                                    &eval_entry_point_clone, // Arc<str> derefs to &str
                                     &req,
                                     pr_config_clone.as_ref(),
-                                    &fork_clone,
+                                    &fork_clone, // Arc<str> derefs to &str
                                     run_passthru_tests,
                                     dry_run,
                                 )
