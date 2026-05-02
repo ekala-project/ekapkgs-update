@@ -108,6 +108,12 @@ enum Commands {
         /// For mkManyVariants packages: explicitly update all variants (this is the default)
         #[arg(long)]
         all_variants: bool,
+        /// Enable flake mode: update a package exposed by a flake
+        #[arg(long)]
+        flake: bool,
+        /// Flake output prefix (e.g., 'packages.x86_64-linux'). Auto-detected if not specified.
+        #[arg(long)]
+        flake_output: Option<String>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -193,6 +199,8 @@ async fn main() -> anyhow::Result<()> {
             run_passthru_tests,
             variant,
             all_variants,
+            flake,
+            flake_output,
         } => {
             commands::update::update(
                 file,
@@ -206,6 +214,8 @@ async fn main() -> anyhow::Result<()> {
                 run_passthru_tests,
                 variant,
                 all_variants,
+                flake,
+                flake_output,
             )
             .await?
         },

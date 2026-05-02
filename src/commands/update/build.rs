@@ -31,6 +31,42 @@ pub async fn build_nix_expr(
     Ok((output.status.success(), stdout, stderr))
 }
 
+/// Build a flake package and return stdout/stderr
+///
+/// Uses `nix build <installable>` to build flake packages.
+///
+/// # Arguments
+/// * `installable` - The flake installable path (e.g., ".#hello" or
+///   ".#packages.x86_64-linux.hello")
+/// * `attr_suffix` - Optional suffix to append (e.g., "passthru.tests")
+///
+/// # Returns
+/// A tuple of (success, stdout, stderr)
+pub async fn build_flake_package(
+    installable: &str,
+    attr_suffix: Option<&str>,
+) -> anyhow::Result<(bool, String, String)> {
+    let full_installable = if let Some(suffix) = attr_suffix {
+        format!("{}.{}", installable, suffix)
+    } else {
+        installable.to_string()
+    };
+
+    debug!("Building flake package: {}", full_installable);
+
+    let output = Command::new("nix")
+        .arg("build")
+        .arg(&full_installable)
+        .arg("--no-link") // Don't create result symlink
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Ok((output.status.success(), stdout, stderr))
+}
+
 /// Detect reversed patch errors and extract the patch filename
 ///
 /// Looks for "Reversed (or previously applied) patch detected!" in the last 20 lines
