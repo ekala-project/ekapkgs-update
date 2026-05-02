@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use crate::database::Database;
-use crate::git::PrConfig;
 use tokio::sync::mpsc;
 use tracing::info;
+
+use crate::database::Database;
+use crate::git::PrConfig;
 
 /// Configuration for automated run mode
 #[derive(Debug, Clone)]
@@ -85,7 +86,8 @@ impl RunConfig {
 
         // Spawn release checker service
         let checker_handle = tokio::spawn(async move {
-            super::checker::release_checker_service(file_checker, db_checker, tx, skip_unstable).await
+            super::checker::release_checker_service(file_checker, db_checker, tx, skip_unstable)
+                .await
         });
 
         // Spawn updater service
@@ -97,9 +99,8 @@ impl RunConfig {
             dry_run,
             concurrency,
         };
-        let updater_handle = tokio::spawn(async move {
-            updater_config.run_service(rx, db_updater).await
-        });
+        let updater_handle =
+            tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
 
         // Wait for both services to complete
         let (checker_result, updater_result) = tokio::join!(checker_handle, updater_handle);
@@ -174,16 +175,16 @@ impl UpdaterServiceConfig {
         let mut failed_count = 0;
 
         // Helper function to process a completed task result
-        let mut process_result =
-            |result: anyhow::Result<super::types::UpdateResult>, attr_path: &str| {
-                match result {
-                    Ok(super::types::UpdateResult::Updated { .. })
-                    | Ok(super::types::UpdateResult::DryRun { .. }) => updated_count += 1,
-                    Err(_) => failed_count += 1,
-                    _ => {},
-                }
-                super::updater::handle_result(result, attr_path);
-            };
+        let mut process_result = |result: anyhow::Result<super::types::UpdateResult>,
+                                  attr_path: &str| {
+            match result {
+                Ok(super::types::UpdateResult::Updated { .. })
+                | Ok(super::types::UpdateResult::DryRun { .. }) => updated_count += 1,
+                Err(_) => failed_count += 1,
+                _ => {},
+            }
+            super::updater::handle_result(result, attr_path);
+        };
 
         loop {
             tokio::select! {

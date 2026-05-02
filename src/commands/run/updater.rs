@@ -9,7 +9,6 @@ use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::SemverStrategy;
 
-
 /// Perform a package update
 pub(super) async fn perform_update(
     db: &Database,

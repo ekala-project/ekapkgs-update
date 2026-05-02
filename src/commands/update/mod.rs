@@ -33,7 +33,6 @@ pub use variants::{get_default_variant, update_single_variant};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::UpstreamSource;
 
-
 /// Update a package from a specific file path
 /// Returns a list of patches that were removed during the update
 pub async fn update_from_file_path(

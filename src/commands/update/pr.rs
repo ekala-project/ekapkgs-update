@@ -171,7 +171,6 @@ pub async fn create_pr_for_update(
     Ok(())
 }
 
-
 /// Create commit message with optional test status
 fn create_commit_message(
     attr_path: &str,
