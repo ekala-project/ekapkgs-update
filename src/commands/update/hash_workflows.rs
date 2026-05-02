@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tracing::{debug, info, warn};
 
 use super::{
@@ -10,11 +12,11 @@ use crate::hash_discovery;
 pub async fn update_source_hash(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_version: &str,
     new_version: &str,
     old_hash: Option<&str>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<PathBuf> {
     // Step 1: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let actual_file_location = update_nix_file(
@@ -30,7 +32,7 @@ pub async fn update_source_hash(
 
     info!(
         "Updated version and set invalid hash in {}",
-        actual_file_location
+        actual_file_location.display()
     );
 
     // Step 2: Build source to get correct hash
@@ -63,7 +65,7 @@ pub async fn update_source_hash(
     )
     .await?;
 
-    info!("Updated hash in {}", actual_file_location);
+    info!("Updated hash in {}", actual_file_location.display());
 
     // Step 4: Build source again to verify
     let (success, _stdout, stderr) =
@@ -82,7 +84,7 @@ pub async fn update_source_hash(
 pub async fn update_cargo_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_cargo_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(old_hash) = old_cargo_hash {
@@ -92,7 +94,7 @@ pub async fn update_cargo_hash_if_needed(
         let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_cargo_hash(file_location, old_hash, invalid_cargo_hash).await?;
 
-        info!("Set invalid cargoHash in {}", file_location);
+        info!("Set invalid cargoHash in {}", file_location.display());
 
         // Build full package to get correct cargo hash
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -114,7 +116,7 @@ pub async fn update_cargo_hash_if_needed(
         // Update cargoHash with correct value
         update_cargo_hash(file_location, invalid_cargo_hash, &correct_cargo_hash).await?;
 
-        info!("Updated cargoHash in {}", file_location);
+        info!("Updated cargoHash in {}", file_location.display());
     }
 
     Ok(())
@@ -124,7 +126,7 @@ pub async fn update_cargo_hash_if_needed(
 pub async fn update_vendor_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_vendor_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(old_hash) = old_vendor_hash {
@@ -134,7 +136,7 @@ pub async fn update_vendor_hash_if_needed(
         let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_vendor_hash(file_location, old_hash, invalid_vendor_hash).await?;
 
-        info!("Set invalid vendorHash in {}", file_location);
+        info!("Set invalid vendorHash in {}", file_location.display());
 
         // Build full package to get correct vendor hash
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -156,7 +158,7 @@ pub async fn update_vendor_hash_if_needed(
         // Update vendorHash with correct value
         update_vendor_hash(file_location, invalid_vendor_hash, &correct_vendor_hash).await?;
 
-        info!("Updated vendorHash in {}", file_location);
+        info!("Updated vendorHash in {}", file_location.display());
     }
 
     Ok(())
@@ -167,7 +169,7 @@ pub async fn update_vendor_hash_if_needed(
 pub async fn build_with_patch_recovery(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
 ) -> anyhow::Result<Vec<String>> {
     use super::{build_nix_expr, detect_reversed_patch};
     use crate::rewrite::{
@@ -285,7 +287,7 @@ pub async fn run_package_tests(
 pub async fn update_npm_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_npm_deps_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(old_hash) = old_npm_deps_hash {
@@ -295,7 +297,7 @@ pub async fn update_npm_deps_hash_if_needed(
         let invalid_npm_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_npm_deps_hash(file_location, old_hash, invalid_npm_deps_hash).await?;
 
-        info!("Set invalid npmDepsHash in {}", file_location);
+        info!("Set invalid npmDepsHash in {}", file_location.display());
 
         // Build full package to get correct npm deps hash
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -317,7 +319,7 @@ pub async fn update_npm_deps_hash_if_needed(
         // Update npmDepsHash with correct value
         update_npm_deps_hash(file_location, invalid_npm_deps_hash, &correct_npm_deps_hash).await?;
 
-        info!("Updated npmDepsHash in {}", file_location);
+        info!("Updated npmDepsHash in {}", file_location.display());
     }
 
     Ok(())
@@ -327,7 +329,7 @@ pub async fn update_npm_deps_hash_if_needed(
 pub async fn update_nuget_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_nuget_deps_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(old_hash) = old_nuget_deps_hash {
@@ -337,7 +339,7 @@ pub async fn update_nuget_deps_hash_if_needed(
         let invalid_nuget_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_nuget_deps_hash(file_location, old_hash, invalid_nuget_deps_hash).await?;
 
-        info!("Set invalid nugetDeps hash in {}", file_location);
+        info!("Set invalid nugetDeps hash in {}", file_location.display());
 
         // Build full package to get correct nuget deps hash
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -367,7 +369,7 @@ pub async fn update_nuget_deps_hash_if_needed(
         )
         .await?;
 
-        info!("Updated nugetDeps hash in {}", file_location);
+        info!("Updated nugetDeps hash in {}", file_location.display());
     }
 
     Ok(())
@@ -377,7 +379,7 @@ pub async fn update_nuget_deps_hash_if_needed(
 pub async fn update_composer_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
-    file_location: &str,
+    file_location: &Path,
     old_composer_deps_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(old_hash) = old_composer_deps_hash {
@@ -387,7 +389,10 @@ pub async fn update_composer_deps_hash_if_needed(
         let invalid_composer_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         update_composer_deps_hash(file_location, old_hash, invalid_composer_deps_hash).await?;
 
-        info!("Set invalid composerDepsHash in {}", file_location);
+        info!(
+            "Set invalid composerDepsHash in {}",
+            file_location.display()
+        );
 
         // Build full package to get correct composer deps hash
         let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
@@ -418,7 +423,7 @@ pub async fn update_composer_deps_hash_if_needed(
         )
         .await?;
 
-        info!("Updated composerDepsHash in {}", file_location);
+        info!("Updated composerDepsHash in {}", file_location.display());
     }
 
     Ok(())
