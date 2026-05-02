@@ -331,16 +331,16 @@ pub async fn update_from_file_path(
     );
 
     // Step 10: Handle commit and PR creation
-    handle_commit_or_pr(
-        &attr_path,
-        &metadata,
-        &new_version,
-        update_config.commit,
-        update_config.create_pr,
-        update_config.upstream,
-        &update_config.fork,
+    handle_commit_or_pr(pr::PostUpdateParams {
+        attr_path: &attr_path,
+        metadata: &metadata,
+        new_version: &new_version,
+        commit: update_config.commit,
+        create_pr: update_config.create_pr,
+        upstream: update_config.upstream,
+        fork: &update_config.fork,
         tests_passed,
-    )
+    })
     .await?;
 
     Ok(removed_patches)

@@ -9,6 +9,18 @@ use crate::git::get_pr_config_from_git;
 use crate::github;
 use crate::package::PackageMetadata;
 
+/// Parameters for post-update commit/PR operations
+pub struct PostUpdateParams<'a> {
+    pub attr_path: &'a str,
+    pub metadata: &'a PackageMetadata,
+    pub new_version: &'a str,
+    pub commit: bool,
+    pub create_pr: bool,
+    pub upstream: Option<String>,
+    pub fork: &'a str,
+    pub tests_passed: bool,
+}
+
 /// Create a pull request for the package update
 pub async fn create_pr_for_update(
     attr_path: &str,
@@ -127,16 +139,18 @@ pub async fn create_pr_for_update(
 }
 
 /// Handle commit or PR creation after successful update
-pub async fn handle_commit_or_pr(
-    attr_path: &str,
-    metadata: &PackageMetadata,
-    new_version: &str,
-    commit: bool,
-    create_pr: bool,
-    upstream: Option<String>,
-    fork: &str,
-    tests_passed: bool,
-) -> anyhow::Result<()> {
+pub async fn handle_commit_or_pr(params: PostUpdateParams<'_>) -> anyhow::Result<()> {
+    let PostUpdateParams {
+        attr_path,
+        metadata,
+        new_version,
+        commit,
+        create_pr,
+        upstream,
+        fork,
+        tests_passed,
+    } = params;
+
     if create_pr {
         create_pr_for_update(
             attr_path,
