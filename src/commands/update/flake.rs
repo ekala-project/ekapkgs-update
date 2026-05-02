@@ -6,7 +6,7 @@
 use anyhow::Context;
 use tracing::{debug, info, warn};
 
-use super::{build_flake_package, handle_commit_or_pr};
+use super::build_flake_package;
 use crate::nix::flake::{
     build_installable, detect_system, eval_flake_attr, get_flake_package_metadata,
     get_flake_package_position,
@@ -215,7 +215,7 @@ pub async fn update_flake_package(
 
     // Step 11: Commit or create PR
     if update_config.commit || update_config.create_pr {
-        handle_commit_or_pr(super::pr::PostUpdateParams {
+        super::pr::PostUpdateParams {
             attr_path: &attr_path,
             metadata: &metadata,
             new_version: &best_release.tag_name,
@@ -224,7 +224,8 @@ pub async fn update_flake_package(
             upstream: update_config.upstream,
             fork: &update_config.fork,
             tests_passed: update_config.run_passthru_tests,
-        })
+        }
+        .execute()
         .await?;
     }
 
