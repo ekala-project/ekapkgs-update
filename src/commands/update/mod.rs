@@ -9,16 +9,23 @@ mod script;
 mod variants;
 
 use anyhow::Context;
-pub use build::*;
-pub use file_update::*;
-pub use flake::*;
-pub use format::*;
-pub use git::*;
-pub use hash_workflows::*;
-pub use pr::*;
-pub use script::*;
+pub use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
+pub use file_update::{
+    update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
+    update_nuget_deps_hash, update_vendor_hash,
+};
+pub use flake::update_flake_package;
+pub use format::format_nix_file;
+pub use git::create_git_commit;
+pub use hash_workflows::{
+    build_with_patch_recovery, run_package_tests, update_cargo_hash_if_needed,
+    update_composer_deps_hash_if_needed, update_npm_deps_hash_if_needed,
+    update_nuget_deps_hash_if_needed, update_source_hash, update_vendor_hash_if_needed,
+};
+pub use pr::handle_commit_or_pr;
+pub use script::run_update_script;
 use tracing::{debug, info, warn};
-pub use variants::*;
+pub use variants::{get_default_variant, update_single_variant};
 
 use crate::nix::{
     eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point,
