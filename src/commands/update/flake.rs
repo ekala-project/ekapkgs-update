@@ -29,6 +29,8 @@ use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 /// * `fork` - Fork git remote
 /// * `run_passthru_tests` - Whether to run passthru.tests
 /// * `src_only` - Skip dependency hash updates
+/// * `explicit_version` - Explicit version to update to (overrides strategy)
+/// * `version_regex` - Custom regex for version extraction
 ///
 /// # Returns
 /// Ok(()) on success
@@ -43,6 +45,8 @@ pub async fn update_flake_package(
     fork: String,
     run_passthru_tests: bool,
     src_only: bool,
+    explicit_version: Option<String>,
+    version_regex: Option<String>,
 ) -> anyhow::Result<()> {
     info!("Updating flake package: {}", attr_path);
 
@@ -85,7 +89,13 @@ pub async fn update_flake_package(
     // Step 3: Find best release according to strategy
     info!("Fetching compatible release with strategy: {:?}", strategy);
     let best_release = upstream_source
-        .get_compatible_release(&metadata.version, strategy, None)
+        .get_compatible_release(
+            &metadata.version,
+            strategy,
+            None,
+            explicit_version.as_deref(),
+            version_regex.as_deref(),
+        )
         .await
         .context("Failed to find compatible release")?;
 

@@ -110,7 +110,13 @@ pub async fn update_single_variant(
 
     // Fetch new version based on strategy
     let release = upstream_source
-        .get_compatible_release(&metadata.version, strategy, version_prefix.as_deref())
+        .get_compatible_release(
+            &metadata.version,
+            strategy,
+            version_prefix.as_deref(),
+            None, // No explicit version for variants
+            None, // No version regex for variants
+        )
         .await?;
 
     // Normalize version from release tag (removes "v" prefix, etc.)

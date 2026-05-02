@@ -41,6 +41,8 @@ pub async fn update(
     flake: bool,
     flake_output: Option<String>,
     src_only: bool,
+    explicit_version: Option<String>,
+    version_regex: Option<String>,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
@@ -60,6 +62,8 @@ pub async fn update(
             fork,
             run_passthru_tests,
             src_only,
+            explicit_version,
+            version_regex,
         )
         .await;
     }
@@ -187,6 +191,8 @@ pub async fn update(
         run_passthru_tests,
         false, // Don't fail on test errors for update command
         src_only,
+        explicit_version,
+        version_regex,
     )
     .await?;
 
@@ -207,6 +213,8 @@ pub async fn update_from_file_path(
     run_passthru_tests: bool,
     fail_on_test_failure: bool,
     src_only: bool,
+    explicit_version: Option<String>,
+    version_regex: Option<String>,
 ) -> anyhow::Result<Vec<String>> {
     info!(
         "Starting generic update for {} at {}",
@@ -235,7 +243,13 @@ pub async fn update_from_file_path(
 
     // Step 3: Fetch best compatible release
     let best_release = upstream_source
-        .get_compatible_release(&metadata.version, strategy, None)
+        .get_compatible_release(
+            &metadata.version,
+            strategy,
+            None,
+            explicit_version.as_deref(),
+            version_regex.as_deref(),
+        )
         .await?;
 
     let new_version = UpstreamSource::get_version(&best_release);

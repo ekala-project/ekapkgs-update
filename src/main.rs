@@ -118,6 +118,14 @@ enum Commands {
         /// etc.)
         #[arg(long)]
         src_only: bool,
+        /// Explicit version to update to (overrides --semver). Can be a specific version like
+        /// "2.5.1" or a tag name.
+        #[arg(long)]
+        version: Option<String>,
+        /// Custom regex to extract version from tags (e.g., 'jq-(.*)' to extract version from
+        /// 'jq-1.6' tags)
+        #[arg(long)]
+        version_regex: Option<String>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -206,6 +214,8 @@ async fn main() -> anyhow::Result<()> {
             flake,
             flake_output,
             src_only,
+            version,
+            version_regex,
         } => {
             commands::update::update(
                 file,
@@ -222,6 +232,8 @@ async fn main() -> anyhow::Result<()> {
                 flake,
                 flake_output,
                 src_only,
+                version,
+                version_regex,
             )
             .await?
         },
