@@ -3,10 +3,13 @@
 //! This module contains configuration structs that group related parameters
 //! to reduce function argument counts and improve code organization.
 
-use crate::nix::{eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point};
+use tracing::{debug, info, warn};
+
+use crate::nix::{
+    eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point,
+};
 use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
 use crate::vcs_sources::SemverStrategy;
-use tracing::{debug, info, warn};
 
 /// Common update configuration shared across all update operations
 #[derive(Debug, Clone)]
