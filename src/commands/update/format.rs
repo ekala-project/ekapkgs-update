@@ -15,12 +15,12 @@ use tracing::{debug, info, warn};
 ///
 /// # Returns
 /// Ok(()) on success, error if nixfmt fails
-pub async fn format_nix_file(file_path: &str) -> anyhow::Result<()> {
-    info!("Formatting {} with nixfmt...", file_path);
+pub async fn format_nix_file(file_path: &Path) -> anyhow::Result<()> {
+    info!("Formatting {} with nixfmt...", file_path.display());
 
     // Check if file exists
-    if !Path::new(file_path).exists() {
-        anyhow::bail!("File does not exist: {}", file_path);
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist: {}", file_path.display());
     }
 
     // Run nixfmt
@@ -44,6 +44,6 @@ pub async fn format_nix_file(file_path: &str) -> anyhow::Result<()> {
         anyhow::bail!("nixfmt formatting failed: {}", stderr);
     }
 
-    debug!("Successfully formatted {}", file_path);
+    debug!("Successfully formatted {}", file_path.display());
     Ok(())
 }

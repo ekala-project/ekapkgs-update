@@ -358,10 +358,7 @@ pub async fn update_from_file_path(
 
     // Step 9: Format the file if requested
     if format {
-        let file_path_str = actual_file_location
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
-        format_nix_file(file_path_str).await?;
+        format_nix_file(&actual_file_location).await?;
     }
 
     info!(

@@ -212,8 +212,10 @@ pub async fn update_flake_package(
 
     // Step 10: Format the file if requested
     if format {
+        use std::path::Path;
+
         use super::format_nix_file;
-        format_nix_file(&file_path).await?;
+        format_nix_file(Path::new(&file_path)).await?;
     }
 
     // Step 11: Commit or create PR
