@@ -368,18 +368,17 @@ async fn create_pr_for_update(
 
     // Add optional metadata fields if available
     if let Some(meta) = metadata.as_ref() {
-        if let Some(description) = meta.description.as_ref() {
-            body.push_str(&format!(
-                "\n\n## Package Information\n\n**Description:** {}",
-                description
-            ));
-        } else {
-            body.push_str("\n\n## Package Information");
+        body.push_str("\n\n## Package Information");
+
+        if let Some(description) = &meta.description {
+            body.push_str(&format!("\n\n**Description:** {}", description));
         }
-        if let Some(homepage) = meta.homepage.as_ref() {
+
+        if let Some(homepage) = &meta.homepage {
             body.push_str(&format!("\n\n**Homepage:** {}", homepage));
         }
-        if let Some(changelog) = meta.changelog.as_ref() {
+
+        if let Some(changelog) = &meta.changelog {
             body.push_str(&format!("\n\n**Changelog:** {}", changelog));
         }
     }

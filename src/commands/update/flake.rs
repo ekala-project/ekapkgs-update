@@ -267,13 +267,16 @@ async fn update_source_hash_flake(
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
     // Try to find current hash attribute name (hash, sha256, outputHash)
-    let hash_attr = if let Ok(_) = eval_flake_attr(installable, "src.hash").await {
-        "hash"
-    } else if let Ok(_) = eval_flake_attr(installable, "src.sha256").await {
-        "sha256"
-    } else {
-        "outputHash"
-    };
+    let hash_attr_candidates = ["hash", "sha256", "outputHash"];
+    let mut hash_attr = "outputHash"; // Default fallback
+
+    for &attr in &hash_attr_candidates {
+        let check_attr = format!("src.{}", attr);
+        if eval_flake_attr(installable, &check_attr).await.is_ok() {
+            hash_attr = attr;
+            break;
+        }
+    }
 
     // Get current hash value to use as old value
     let current_hash = eval_flake_attr(installable, &format!("src.{}", hash_attr))
@@ -355,14 +358,17 @@ async fn update_vendor_hash_flake(installable: &str, file_path: &str) -> anyhow:
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
     // Try vendorHash first, fall back to vendorSha256
-    let (hash_attr, current_hash) =
-        if let Ok(hash) = eval_flake_attr(installable, "vendorHash").await {
-            ("vendorHash", Some(hash))
-        } else if let Ok(hash) = eval_flake_attr(installable, "vendorSha256").await {
-            ("vendorSha256", Some(hash))
-        } else {
-            ("vendorHash", None)
-        };
+    let hash_attr_candidates = ["vendorHash", "vendorSha256"];
+    let mut hash_attr = "vendorHash"; // Default fallback
+    let mut current_hash = None;
+
+    for &attr in &hash_attr_candidates {
+        if let Ok(hash) = eval_flake_attr(installable, attr).await {
+            hash_attr = attr;
+            current_hash = Some(hash);
+            break;
+        }
+    }
 
     // Update to invalid hash
     update_flake_file_attr(file_path, hash_attr, current_hash.as_deref(), invalid_hash).await?;
