@@ -11,6 +11,9 @@ pub struct PackageMetadata {
     pub output_hash: Option<String>,
     pub cargo_hash: Option<String>,
     pub vendor_hash: Option<String>,
+    pub npm_deps_hash: Option<String>,
+    pub nuget_deps_hash: Option<String>,
+    pub composer_deps_hash: Option<String>,
     pub pname: Option<String>,
     pub description: Option<String>,
     pub homepage: Option<String>,
@@ -79,6 +82,9 @@ impl PackageMetadata {
         let output_hash = package.get_attr("src.outputHash").await;
         let cargo_hash = package.get_attr("cargoHash").await;
         let vendor_hash = package.get_attr("vendorHash").await;
+        let npm_deps_hash = package.get_attr("npmDepsHash").await;
+        let nuget_deps_hash = package.get_attr("nugetDeps").await;
+        let composer_deps_hash = package.get_attr("composerDepsHash").await;
         let pname = package.get_attr("pname").await;
         let description = package.get_attr("meta.description").await;
         let homepage = package.get_attr("meta.homepage").await;
@@ -90,6 +96,9 @@ impl PackageMetadata {
             output_hash,
             cargo_hash,
             vendor_hash,
+            npm_deps_hash,
+            nuget_deps_hash,
+            composer_deps_hash,
             pname,
             description,
             homepage,

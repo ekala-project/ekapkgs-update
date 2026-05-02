@@ -139,3 +139,68 @@ pub async fn update_vendor_hash(
     tokio::fs::write(file_path, updated_content).await?;
     Ok(())
 }
+
+/// Update npmDepsHash attribute in Nix file
+pub async fn update_npm_deps_hash(
+    file_path: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "Updating npmDepsHash in {} using AST manipulation",
+        file_path
+    );
+    let content = tokio::fs::read_to_string(file_path).await?;
+
+    let updated_content = find_and_update_attr(&content, "npmDepsHash", new_hash, Some(old_hash))?;
+    debug!(
+        "Updated npmDepsHash attribute: {} -> {}",
+        old_hash, new_hash
+    );
+
+    tokio::fs::write(file_path, updated_content).await?;
+    Ok(())
+}
+
+/// Update nugetDeps attribute hash in Nix file
+pub async fn update_nuget_deps_hash(
+    file_path: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "Updating nugetDeps hash in {} using AST manipulation",
+        file_path
+    );
+    let content = tokio::fs::read_to_string(file_path).await?;
+
+    // nugetDeps typically has an outputHash attribute
+    let updated_content = find_and_update_attr(&content, "nugetDeps", new_hash, Some(old_hash))?;
+    debug!("Updated nugetDeps attribute: {} -> {}", old_hash, new_hash);
+
+    tokio::fs::write(file_path, updated_content).await?;
+    Ok(())
+}
+
+/// Update composerDepsHash attribute in Nix file
+pub async fn update_composer_deps_hash(
+    file_path: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "Updating composerDepsHash in {} using AST manipulation",
+        file_path
+    );
+    let content = tokio::fs::read_to_string(file_path).await?;
+
+    let updated_content =
+        find_and_update_attr(&content, "composerDepsHash", new_hash, Some(old_hash))?;
+    debug!(
+        "Updated composerDepsHash attribute: {} -> {}",
+        old_hash, new_hash
+    );
+
+    tokio::fs::write(file_path, updated_content).await?;
+    Ok(())
+}

@@ -1,6 +1,9 @@
 use tracing::{debug, info, warn};
 
-use super::{build_nix_expr, update_cargo_hash, update_nix_file, update_vendor_hash};
+use super::{
+    build_nix_expr, update_cargo_hash, update_composer_deps_hash, update_nix_file,
+    update_npm_deps_hash, update_nuget_deps_hash, update_vendor_hash,
+};
 use crate::hash_discovery;
 
 /// Update source hash using the invalid hash discovery pattern
@@ -276,4 +279,147 @@ pub async fn run_package_tests(
     }
 
     Ok(tests_passed)
+}
+
+/// Update npmDepsHash for Node.js packages using the invalid hash discovery pattern
+pub async fn update_npm_deps_hash_if_needed(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &str,
+    old_npm_deps_hash: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(old_hash) = old_npm_deps_hash {
+        info!("Detected Node.js package, updating npmDepsHash");
+
+        // Set invalid npm deps hash
+        let invalid_npm_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        update_npm_deps_hash(file_location, old_hash, invalid_npm_deps_hash).await?;
+
+        info!("Set invalid npmDepsHash in {}", file_location);
+
+        // Build full package to get correct npm deps hash
+        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
+
+        if success {
+            warn!("Build succeeded with invalid npmDepsHash - this shouldn't happen");
+            anyhow::bail!("Expected npmDepsHash mismatch error but build succeeded");
+        }
+
+        let correct_npm_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not extract correct npmDepsHash from build error:\n{}",
+                stderr
+            )
+        })?;
+
+        info!("Extracted correct npmDepsHash: {}", correct_npm_deps_hash);
+
+        // Update npmDepsHash with correct value
+        update_npm_deps_hash(file_location, invalid_npm_deps_hash, &correct_npm_deps_hash).await?;
+
+        info!("Updated npmDepsHash in {}", file_location);
+    }
+
+    Ok(())
+}
+
+/// Update nugetDeps hash for .NET packages using the invalid hash discovery pattern
+pub async fn update_nuget_deps_hash_if_needed(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &str,
+    old_nuget_deps_hash: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(old_hash) = old_nuget_deps_hash {
+        info!("Detected .NET package, updating nugetDeps hash");
+
+        // Set invalid nuget deps hash
+        let invalid_nuget_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        update_nuget_deps_hash(file_location, old_hash, invalid_nuget_deps_hash).await?;
+
+        info!("Set invalid nugetDeps hash in {}", file_location);
+
+        // Build full package to get correct nuget deps hash
+        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
+
+        if success {
+            warn!("Build succeeded with invalid nugetDeps hash - this shouldn't happen");
+            anyhow::bail!("Expected nugetDeps hash mismatch error but build succeeded");
+        }
+
+        let correct_nuget_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not extract correct nugetDeps hash from build error:\n{}",
+                stderr
+            )
+        })?;
+
+        info!(
+            "Extracted correct nugetDeps hash: {}",
+            correct_nuget_deps_hash
+        );
+
+        // Update nugetDeps hash with correct value
+        update_nuget_deps_hash(
+            file_location,
+            invalid_nuget_deps_hash,
+            &correct_nuget_deps_hash,
+        )
+        .await?;
+
+        info!("Updated nugetDeps hash in {}", file_location);
+    }
+
+    Ok(())
+}
+
+/// Update composerDepsHash for PHP packages using the invalid hash discovery pattern
+pub async fn update_composer_deps_hash_if_needed(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &str,
+    old_composer_deps_hash: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(old_hash) = old_composer_deps_hash {
+        info!("Detected PHP package, updating composerDepsHash");
+
+        // Set invalid composer deps hash
+        let invalid_composer_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        update_composer_deps_hash(file_location, old_hash, invalid_composer_deps_hash).await?;
+
+        info!("Set invalid composerDepsHash in {}", file_location);
+
+        // Build full package to get correct composer deps hash
+        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
+
+        if success {
+            warn!("Build succeeded with invalid composerDepsHash - this shouldn't happen");
+            anyhow::bail!("Expected composerDepsHash mismatch error but build succeeded");
+        }
+
+        let correct_composer_deps_hash =
+            hash_discovery::extract_hash(&stderr).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not extract correct composerDepsHash from build error:\n{}",
+                    stderr
+                )
+            })?;
+
+        info!(
+            "Extracted correct composerDepsHash: {}",
+            correct_composer_deps_hash
+        );
+
+        // Update composerDepsHash with correct value
+        update_composer_deps_hash(
+            file_location,
+            invalid_composer_deps_hash,
+            &correct_composer_deps_hash,
+        )
+        .await?;
+
+        info!("Updated composerDepsHash in {}", file_location);
+    }
+
+    Ok(())
 }

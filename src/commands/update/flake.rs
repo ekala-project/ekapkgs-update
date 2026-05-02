@@ -28,6 +28,7 @@ use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 /// * `upstream` - Upstream git remote
 /// * `fork` - Fork git remote
 /// * `run_passthru_tests` - Whether to run passthru.tests
+/// * `src_only` - Skip dependency hash updates
 ///
 /// # Returns
 /// Ok(()) on success
@@ -41,6 +42,7 @@ pub async fn update_flake_package(
     upstream: Option<String>,
     fork: String,
     run_passthru_tests: bool,
+    src_only: bool,
 ) -> anyhow::Result<()> {
     info!("Updating flake package: {}", attr_path);
 
@@ -121,23 +123,52 @@ pub async fn update_flake_package(
     .await
     .context("Failed to update source hash")?;
 
-    // Step 6: Update cargo hash if needed
-    if metadata.cargo_hash.is_some() {
-        info!("Updating cargoHash...");
-        update_cargo_hash_flake(&installable, &file_path)
-            .await
-            .context("Failed to update cargoHash")?;
+    // Step 6: Update dependency hashes (unless --src-only is set)
+    if !src_only {
+        // Update cargo hash if needed
+        if metadata.cargo_hash.is_some() {
+            info!("Updating cargoHash...");
+            update_cargo_hash_flake(&installable, &file_path)
+                .await
+                .context("Failed to update cargoHash")?;
+        }
+
+        // Update vendor hash if needed
+        if metadata.vendor_hash.is_some() {
+            info!("Updating vendorHash...");
+            update_vendor_hash_flake(&installable, &file_path)
+                .await
+                .context("Failed to update vendorHash")?;
+        }
+
+        // Update npm deps hash if needed
+        if metadata.npm_deps_hash.is_some() {
+            info!("Updating npmDepsHash...");
+            update_npm_deps_hash_flake(&installable, &file_path)
+                .await
+                .context("Failed to update npmDepsHash")?;
+        }
+
+        // Update nuget deps hash if needed
+        if metadata.nuget_deps_hash.is_some() {
+            info!("Updating nugetDeps hash...");
+            update_nuget_deps_hash_flake(&installable, &file_path)
+                .await
+                .context("Failed to update nugetDeps hash")?;
+        }
+
+        // Update composer deps hash if needed
+        if metadata.composer_deps_hash.is_some() {
+            info!("Updating composerDepsHash...");
+            update_composer_deps_hash_flake(&installable, &file_path)
+                .await
+                .context("Failed to update composerDepsHash")?;
+        }
+    } else {
+        info!("Skipping dependency hash updates (--src-only flag set)");
     }
 
-    // Step 7: Update vendor hash if needed
-    if metadata.vendor_hash.is_some() {
-        info!("Updating vendorHash...");
-        update_vendor_hash_flake(&installable, &file_path)
-            .await
-            .context("Failed to update vendorHash")?;
-    }
-
-    // Step 8: Build and verify
+    // Step 7: Build and verify
     info!("Building updated package...");
     let (success, _stdout, stderr) = build_flake_package(&installable, None).await?;
 
@@ -329,6 +360,126 @@ async fn update_vendor_hash_flake(installable: &str, file_path: &str) -> anyhow:
 
     // Update with correct hash
     update_flake_file_attr(file_path, hash_attr, Some(invalid_hash), &correct_hash).await?;
+
+    Ok(())
+}
+
+/// Update npm deps hash for a flake package
+async fn update_npm_deps_hash_flake(installable: &str, file_path: &str) -> anyhow::Result<()> {
+    use crate::hash_discovery::extract_hash;
+
+    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    // Try to get current npmDepsHash
+    let current_hash = eval_flake_attr(installable, "npmDepsHash").await.ok();
+
+    // Update to invalid hash
+    update_flake_file_attr(
+        file_path,
+        "npmDepsHash",
+        current_hash.as_deref(),
+        invalid_hash,
+    )
+    .await?;
+
+    // Build to discover correct hash
+    let (success, _stdout, stderr) = build_flake_package(installable, None).await?;
+
+    if success {
+        warn!("Build succeeded with invalid npmDepsHash - skipping npm deps hash update");
+        return Ok(());
+    }
+
+    // Extract correct hash
+    let correct_hash =
+        extract_hash(&stderr).context("Failed to extract npm deps hash from error")?;
+
+    info!("Discovered correct npmDepsHash: {}", correct_hash);
+
+    // Update with correct hash
+    update_flake_file_attr(file_path, "npmDepsHash", Some(invalid_hash), &correct_hash).await?;
+
+    Ok(())
+}
+
+/// Update nuget deps hash for a flake package
+async fn update_nuget_deps_hash_flake(installable: &str, file_path: &str) -> anyhow::Result<()> {
+    use crate::hash_discovery::extract_hash;
+
+    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    // Try to get current nugetDeps hash
+    let current_hash = eval_flake_attr(installable, "nugetDeps").await.ok();
+
+    // Update to invalid hash
+    update_flake_file_attr(
+        file_path,
+        "nugetDeps",
+        current_hash.as_deref(),
+        invalid_hash,
+    )
+    .await?;
+
+    // Build to discover correct hash
+    let (success, _stdout, stderr) = build_flake_package(installable, None).await?;
+
+    if success {
+        warn!("Build succeeded with invalid nugetDeps hash - skipping nuget deps hash update");
+        return Ok(());
+    }
+
+    // Extract correct hash
+    let correct_hash =
+        extract_hash(&stderr).context("Failed to extract nuget deps hash from error")?;
+
+    info!("Discovered correct nugetDeps hash: {}", correct_hash);
+
+    // Update with correct hash
+    update_flake_file_attr(file_path, "nugetDeps", Some(invalid_hash), &correct_hash).await?;
+
+    Ok(())
+}
+
+/// Update composer deps hash for a flake package
+async fn update_composer_deps_hash_flake(installable: &str, file_path: &str) -> anyhow::Result<()> {
+    use crate::hash_discovery::extract_hash;
+
+    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    // Try to get current composerDepsHash
+    let current_hash = eval_flake_attr(installable, "composerDepsHash").await.ok();
+
+    // Update to invalid hash
+    update_flake_file_attr(
+        file_path,
+        "composerDepsHash",
+        current_hash.as_deref(),
+        invalid_hash,
+    )
+    .await?;
+
+    // Build to discover correct hash
+    let (success, _stdout, stderr) = build_flake_package(installable, None).await?;
+
+    if success {
+        warn!("Build succeeded with invalid composerDepsHash - skipping composer deps hash update");
+        return Ok(());
+    }
+
+    // Extract correct hash
+    let correct_hash =
+        extract_hash(&stderr).context("Failed to extract composer deps hash from error")?;
+
+    info!("Discovered correct composerDepsHash: {}", correct_hash);
+
+    // Update with correct hash
+    update_flake_file_attr(
+        file_path,
+        "composerDepsHash",
+        Some(invalid_hash),
+        &correct_hash,
+    )
+    .await?;
 
     Ok(())
 }
