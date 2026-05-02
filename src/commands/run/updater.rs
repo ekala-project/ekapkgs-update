@@ -167,21 +167,24 @@ async fn perform_update(
     let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
 
     // Attempt the update in the worktree
+    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
+    let update_config = crate::commands::update::UpdateConfig {
+        commit: false,              // Don't auto-commit in run mode
+        create_pr: false,           // Don't create PR here (handled separately)
+        upstream: None,             // upstream - not needed in run mode
+        fork: "origin".to_string(), // fork - not used since create_pr is false
+        run_passthru_tests,
+        src_only: false, // Update all dependencies (not src-only)
+        format: false,   // No formatting in run mode (worktree cleanup would lose it)
+    };
+
     let update_result = crate::commands::update::update_from_file_path(
         eval_entry_point.to_string(),
         attr_path.to_string(),
         worktree_file_str,
-        SemverStrategy::Latest,
-        false,                // Don't auto-commit in run mode
-        false,                // Don't create PR here (handled separately by create_pr_for_update)
-        None,                 // upstream - not needed in run mode, PR handled separately
-        "origin".to_string(), // fork - not used since create_pr is false
-        run_passthru_tests,
+        version_config,
+        update_config,
         run_passthru_tests, // Fail on test errors in run mode
-        false,              // Update all dependencies (not src-only)
-        None,               // No explicit version in run mode
-        None,               // No version regex in run mode
-        false,              // No formatting in run mode (worktree cleanup would lose it)
     )
     .await;
 

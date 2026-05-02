@@ -72,11 +72,7 @@ pub async fn update_single_variant(
     attr_path: &str,
     variant_name: &str,
     strategy: SemverStrategy,
-    _commit: bool,
-    _create_pr: bool,
-    _upstream: Option<String>,
-    _fork: String,
-    _run_passthru_tests: bool,
+    _update_config: super::UpdateConfig,
 ) -> anyhow::Result<()> {
     // Get metadata for this specific variant
     let variant_attr_path = format!("{}.variants.{}", attr_path, variant_name);

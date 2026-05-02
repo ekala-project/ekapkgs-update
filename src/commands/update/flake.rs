@@ -12,7 +12,7 @@ use crate::nix::flake::{
     get_flake_package_position,
 };
 use crate::rewrite::find_and_update_attr;
-use crate::vcs_sources::{SemverStrategy, UpstreamSource};
+use crate::vcs_sources::UpstreamSource;
 
 /// Update a flake package
 ///
@@ -40,16 +40,8 @@ pub async fn update_flake_package(
     flake_ref: String,
     attr_path: String,
     flake_output: Option<String>,
-    strategy: SemverStrategy,
-    commit: bool,
-    create_pr: bool,
-    upstream: Option<String>,
-    fork: String,
-    run_passthru_tests: bool,
-    src_only: bool,
-    explicit_version: Option<String>,
-    version_regex: Option<String>,
-    format: bool,
+    version_config: super::VersionConfig,
+    update_config: super::UpdateConfig,
     override_filename: Option<String>,
 ) -> anyhow::Result<()> {
     info!("Updating flake package: {}", attr_path);
@@ -91,14 +83,17 @@ pub async fn update_flake_package(
     info!("Upstream source: {:?}", upstream_source);
 
     // Step 3: Find best release according to strategy
-    info!("Fetching compatible release with strategy: {:?}", strategy);
+    info!(
+        "Fetching compatible release with strategy: {:?}",
+        version_config.strategy
+    );
     let best_release = upstream_source
         .get_compatible_release(
             &metadata.version,
-            strategy,
+            version_config.strategy,
             None,
-            explicit_version.as_deref(),
-            version_regex.as_deref(),
+            version_config.explicit_version.as_deref(),
+            version_config.version_regex.as_deref(),
         )
         .await
         .context("Failed to find compatible release")?;
@@ -143,7 +138,7 @@ pub async fn update_flake_package(
     .context("Failed to update source hash")?;
 
     // Step 6: Update dependency hashes (unless --src-only is set)
-    if !src_only {
+    if !update_config.src_only {
         // Update cargo hash if needed
         if metadata.cargo_hash.is_some() {
             info!("Updating cargoHash...");
@@ -199,7 +194,7 @@ pub async fn update_flake_package(
     info!("Build succeeded!");
 
     // Step 9: Run tests if requested
-    if run_passthru_tests {
+    if update_config.run_passthru_tests {
         let test_result = run_package_tests_flake(&installable).await;
         match test_result {
             Ok(_) => info!("Tests passed"),
@@ -211,7 +206,7 @@ pub async fn update_flake_package(
     }
 
     // Step 10: Format the file if requested
-    if format {
+    if update_config.format {
         use std::path::Path;
 
         use super::format_nix_file;
@@ -219,16 +214,16 @@ pub async fn update_flake_package(
     }
 
     // Step 11: Commit or create PR
-    if commit || create_pr {
+    if update_config.commit || update_config.create_pr {
         handle_commit_or_pr(
             &attr_path,
             &metadata,
             &best_release.tag_name,
-            commit,
-            create_pr,
-            upstream,
-            &fork,
-            run_passthru_tests,
+            update_config.commit,
+            update_config.create_pr,
+            update_config.upstream,
+            &update_config.fork,
+            update_config.run_passthru_tests,
         )
         .await?;
     }
