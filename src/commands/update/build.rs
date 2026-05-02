@@ -74,25 +74,22 @@ pub async fn build_flake_package(
 ///
 /// Returns the patch filename to be removed from the patches array.
 pub fn detect_reversed_patch(stderr: &str) -> Option<String> {
-    // Get last 20 lines of stderr
-    let lines: Vec<&str> = stderr.lines().collect();
-    let start = lines.len().saturating_sub(20);
-    let last_lines = &lines[start..];
     let patch_regex = Regex::new(r"applying patch /nix/store/[^-]+-(.+)").ok()?;
 
-    // Look for the reversed patch error message
-    for (i, line) in last_lines.iter().enumerate() {
-        if line.contains("Reversed (or previously applied) patch detected!") {
-            // Look backward for the "applying patch" line
-            for j in (0..i).rev() {
-                let prev_line = last_lines[j];
-                // Pattern: "applying patch /nix/store/${hash}-${name}"
-                if let Some(caps) = patch_regex.captures(prev_line) {
-                    return Some(caps.get(1)?.as_str().to_string());
-                }
-            }
-        }
-    }
+    // Take last 20 lines in reverse order
+    let last_lines: Vec<_> = stderr.lines().rev().take(20).collect();
 
-    None
+    // Find position of error message
+    last_lines
+        .iter()
+        .position(|line| line.contains("Reversed (or previously applied) patch detected!"))
+        .and_then(|error_pos| {
+            // From error position onward, find first patch name
+            last_lines[error_pos..].iter().find_map(|line| {
+                patch_regex
+                    .captures(line)
+                    .and_then(|caps| caps.get(1))
+                    .map(|m| m.as_str().to_string())
+            })
+        })
 }

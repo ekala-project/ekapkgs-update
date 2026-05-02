@@ -74,27 +74,22 @@ pub async fn update_nix_file(
             result
         } else {
             // Normal file - try AST-based replacement
-            let hash_attrs = vec!["hash", "sha256", "outputHash", "src-hash"];
-            let mut result = updated_content.clone();
-            let mut hash_updated = false;
+            let hash_attrs = ["hash", "sha256", "outputHash", "src-hash"];
 
-            for attr_name in hash_attrs {
-                match find_and_update_attr(&result, attr_name, new_h, Some(old_h)) {
-                    Ok(new_content) => {
-                        debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
-                        result = new_content;
-                        hash_updated = true;
-                        break;
-                    },
-                    Err(_) => continue, // Try next attribute name
-                }
-            }
-
-            if !hash_updated {
-                warn!("Could not find hash attribute to update in Nix file");
-            }
-
-            result
+            hash_attrs
+                .iter()
+                .find_map(|&attr_name| {
+                    find_and_update_attr(&updated_content, attr_name, new_h, Some(old_h))
+                        .ok()
+                        .map(|new_content| {
+                            debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
+                            new_content
+                        })
+                })
+                .unwrap_or_else(|| {
+                    warn!("Could not find hash attribute to update in Nix file");
+                    updated_content.clone()
+                })
         }
     } else {
         updated_content
