@@ -13,15 +13,18 @@ use crate::vcs_sources::SemverStrategy;
 
 /// Service that performs package updates
 pub async fn updater_service(
-    eval_entry_point: String,
     mut rx: mpsc::UnboundedReceiver<UpdateRequest>,
     db: Database,
-    pr_config: Option<PrConfig>,
-    fork: String,
-    run_passthru_tests: bool,
-    dry_run: bool,
-    concurrency: usize,
+    config: super::UpdaterServiceConfig,
 ) -> (usize, usize) {
+    let super::UpdaterServiceConfig {
+        eval_entry_point,
+        pr_config,
+        fork,
+        run_passthru_tests,
+        dry_run,
+        concurrency,
+    } = config;
     let mut join_set: JoinSet<(anyhow::Result<UpdateResult>, String)> = JoinSet::new();
     let mut updated_count = 0;
     let mut failed_count = 0;

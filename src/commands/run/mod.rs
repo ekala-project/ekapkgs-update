@@ -1,7 +1,9 @@
 mod checker;
+mod config;
 mod types;
 mod updater;
 
+pub use config::{RunConfig, UpdaterServiceConfig};
 use checker::release_checker_service;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -10,16 +12,18 @@ use updater::updater_service;
 use crate::database::Database;
 
 /// Run the automated update process
-pub async fn run(
-    file: String,
-    database_path: String,
-    upstream: Option<String>,
-    fork: String,
-    run_passthru_tests: bool,
-    dry_run: bool,
-    concurrent_updates: Option<usize>,
-    skip_unstable: bool,
-) -> anyhow::Result<()> {
+pub async fn run(config: RunConfig) -> anyhow::Result<()> {
+    let RunConfig {
+        file,
+        database_path,
+        upstream,
+        fork,
+        run_passthru_tests,
+        dry_run,
+        concurrent_updates,
+        skip_unstable,
+    } = config;
+
     info!("Running nix-eval-jobs on: {}", file);
 
     // Expand tilde in database path
@@ -60,18 +64,16 @@ pub async fn run(
     });
 
     // Spawn updater service
+    let updater_config = UpdaterServiceConfig {
+        eval_entry_point: file_updater,
+        pr_config,
+        fork,
+        run_passthru_tests,
+        dry_run,
+        concurrency,
+    };
     let updater_handle = tokio::spawn(async move {
-        updater_service(
-            file_updater,
-            rx,
-            db_updater,
-            pr_config,
-            fork,
-            run_passthru_tests,
-            dry_run,
-            concurrency,
-        )
-        .await
+        updater_service(rx, db_updater, updater_config).await
     });
 
     // Wait for both services to complete
