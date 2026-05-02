@@ -1,4 +1,5 @@
 mod build;
+mod config;
 mod file_update;
 mod flake;
 mod format;
@@ -12,6 +13,7 @@ use std::path::Path;
 
 use anyhow::Context;
 pub use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
+pub use config::{FlakeConfig, UpdateConfig, VariantConfig, VersionConfig};
 pub use file_update::{
     update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
     update_nuget_deps_hash, update_vendor_hash,
@@ -42,19 +44,10 @@ pub async fn update(
     attr_path: String,
     semver_strategy: String,
     ignore_update_script: bool,
-    commit: bool,
-    create_pr: bool,
-    upstream: Option<String>,
-    fork: String,
-    run_passthru_tests: bool,
-    variant: Option<String>,
-    all_variants: bool,
-    flake: bool,
-    flake_output: Option<String>,
-    src_only: bool,
-    explicit_version: Option<String>,
-    version_regex: Option<String>,
-    format: bool,
+    update_config: UpdateConfig,
+    variant_config: VariantConfig,
+    flake_config: FlakeConfig,
+    version_config: VersionConfig,
     override_filename: Option<String>,
     _system: Option<String>, /* TODO: Implement system parameter support for cross-platform
                               * evaluation */
@@ -64,22 +57,14 @@ pub async fn update(
     info!("Using semver strategy: {:?}", strategy);
 
     // Handle flake mode
-    if flake {
+    if flake_config.enabled {
         info!("Flake mode enabled");
         return update_flake_package(
             file,
             attr_path,
-            flake_output,
-            strategy,
-            commit,
-            create_pr,
-            upstream,
-            fork,
-            run_passthru_tests,
-            src_only,
-            explicit_version,
-            version_regex,
-            format,
+            flake_config.output,
+            version_config,
+            update_config,
             override_filename,
         )
         .await;
@@ -92,10 +77,10 @@ pub async fn update(
         info!("{} is a mkManyVariants package", attr_path);
 
         // Determine which variants to update
-        let variants_to_update = if let Some(ref specific_variant) = variant {
+        let variants_to_update = if let Some(ref specific_variant) = variant_config.variant {
             // Update only the specified variant
             vec![specific_variant.clone()]
-        } else if all_variants {
+        } else if variant_config.all_variants {
             // Update all variants (when --all-variants flag is set)
             get_variants_list(&file, &attr_path).await?
         } else {
@@ -146,11 +131,7 @@ pub async fn update(
                 &attr_path,
                 &variant_name,
                 variant_strategy,
-                commit,
-                create_pr,
-                upstream.clone(),
-                fork.clone(),
-                run_passthru_tests,
+                update_config.clone(),
             )
             .await
             {
@@ -205,17 +186,9 @@ pub async fn update(
         file,
         attr_path,
         expr_file_path,
-        strategy,
-        commit,
-        create_pr,
-        upstream,
-        fork,
-        run_passthru_tests,
+        version_config,
+        update_config,
         false, // Don't fail on test errors for update command
-        src_only,
-        explicit_version,
-        version_regex,
-        format,
     )
     .await?;
 
@@ -228,17 +201,9 @@ pub async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
     file_location: String,
-    strategy: SemverStrategy,
-    commit: bool,
-    create_pr: bool,
-    upstream: Option<String>,
-    fork: String,
-    run_passthru_tests: bool,
+    version_config: VersionConfig,
+    update_config: UpdateConfig,
     fail_on_test_failure: bool,
-    src_only: bool,
-    explicit_version: Option<String>,
-    version_regex: Option<String>,
-    format: bool,
 ) -> anyhow::Result<Vec<String>> {
     info!(
         "Starting generic update for {} at {}",
@@ -269,17 +234,17 @@ pub async fn update_from_file_path(
     let best_release = upstream_source
         .get_compatible_release(
             &metadata.version,
-            strategy,
+            version_config.strategy,
             None,
-            explicit_version.as_deref(),
-            version_regex.as_deref(),
+            version_config.explicit_version.as_deref(),
+            version_config.version_regex.as_deref(),
         )
         .await?;
 
     let new_version = UpstreamSource::get_version(&best_release);
     info!(
         "Found compatible version ({:?}): {} -> {}",
-        strategy, metadata.version, new_version
+        version_config.strategy, metadata.version, new_version
     );
 
     // Step 4: Update source hash
@@ -294,7 +259,7 @@ pub async fn update_from_file_path(
     .await?;
 
     // Step 5: Update dependency hashes (unless --src-only is set)
-    if !src_only {
+    if !update_config.src_only {
         // Update cargoHash for Rust packages
         update_cargo_hash_if_needed(
             &eval_entry_point,
@@ -351,13 +316,13 @@ pub async fn update_from_file_path(
     let tests_passed = run_package_tests(
         &eval_entry_point,
         &attr_path,
-        run_passthru_tests,
+        update_config.run_passthru_tests,
         fail_on_test_failure,
     )
     .await?;
 
     // Step 9: Format the file if requested
-    if format {
+    if update_config.format {
         format_nix_file(&actual_file_location).await?;
     }
 
@@ -371,10 +336,10 @@ pub async fn update_from_file_path(
         &attr_path,
         &metadata,
         &new_version,
-        commit,
-        create_pr,
-        upstream,
-        &fork,
+        update_config.commit,
+        update_config.create_pr,
+        update_config.upstream,
+        &update_config.fork,
         tests_passed,
     )
     .await?;

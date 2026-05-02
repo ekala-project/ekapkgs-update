@@ -181,24 +181,45 @@ impl Commands {
                 override_filename,
                 system,
             } => {
-                commands::update::update(
-                    file,
-                    attr_path,
-                    semver,
-                    ignore_update_script,
+                use commands::update::{FlakeConfig, UpdateConfig, VariantConfig, VersionConfig};
+
+                use crate::vcs_sources::SemverStrategy;
+
+                let update_config = UpdateConfig {
                     commit,
                     create_pr,
                     upstream,
                     fork,
                     run_passthru_tests,
+                    src_only,
+                    format,
+                };
+
+                let variant_config = VariantConfig {
                     variant,
                     all_variants,
-                    flake,
-                    flake_output,
-                    src_only,
-                    version,
+                };
+
+                let flake_config = FlakeConfig {
+                    enabled: flake,
+                    output: flake_output,
+                };
+
+                let version_config = VersionConfig {
+                    strategy: SemverStrategy::from_str(&semver)?,
+                    explicit_version: version,
                     version_regex,
-                    format,
+                };
+
+                commands::update::update(
+                    file,
+                    attr_path,
+                    semver,
+                    ignore_update_script,
+                    update_config,
+                    variant_config,
+                    flake_config,
+                    version_config,
                     override_filename,
                     system,
                 )
