@@ -98,3 +98,34 @@ pub struct FlakeConfig {
     /// Flake output prefix (e.g., "packages.x86_64-linux")
     pub output: Option<String>,
 }
+
+/// Complete parameters for package update operations
+#[derive(Debug, Clone)]
+pub struct UpdateParams {
+    /// Nix file entry point (e.g., "default.nix", "<nixpkgs>")
+    pub file: String,
+
+    /// Package attribute path (e.g., "pkgs.hello")
+    pub attr_path: String,
+
+    /// Whether to ignore update scripts (passthru.updateScript)
+    pub ignore_update_script: bool,
+
+    /// Override filename for package definition (ignores meta.position)
+    pub override_filename: Option<String>,
+
+    /// System parameter for cross-platform evaluation (TODO: implement)
+    pub system: Option<String>,
+
+    /// Common update configuration
+    pub update_config: UpdateConfig,
+
+    /// Version selection configuration
+    pub version_config: VersionConfig,
+
+    /// Variant configuration (for mkManyVariants packages)
+    pub variant_config: VariantConfig,
+
+    /// Flake configuration
+    pub flake_config: FlakeConfig,
+}
