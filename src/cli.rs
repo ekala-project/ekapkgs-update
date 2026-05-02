@@ -148,17 +148,20 @@ impl Commands {
                 concurrent_updates,
                 skip_unstable,
             } => {
-                commands::run::run(
+                use commands::run::RunConfig;
+
+                let config = RunConfig {
                     file,
-                    database,
+                    database_path: database,
                     upstream,
                     fork,
                     run_passthru_tests,
                     dry_run,
                     concurrent_updates,
                     skip_unstable,
-                )
-                .await
+                };
+
+                commands::run::run(config).await
             },
             Commands::Update {
                 file,
