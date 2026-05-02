@@ -40,6 +40,7 @@ pub async fn update(
     all_variants: bool,
     flake: bool,
     flake_output: Option<String>,
+    src_only: bool,
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
@@ -58,6 +59,7 @@ pub async fn update(
             upstream,
             fork,
             run_passthru_tests,
+            src_only,
         )
         .await;
     }
@@ -184,6 +186,7 @@ pub async fn update(
         fork,
         run_passthru_tests,
         false, // Don't fail on test errors for update command
+        src_only,
     )
     .await?;
 
@@ -203,6 +206,7 @@ pub async fn update_from_file_path(
     fork: String,
     run_passthru_tests: bool,
     fail_on_test_failure: bool,
+    src_only: bool,
 ) -> anyhow::Result<Vec<String>> {
     info!(
         "Starting generic update for {} at {}",
@@ -251,25 +255,57 @@ pub async fn update_from_file_path(
     )
     .await?;
 
-    // Step 5: Update cargoHash for Rust packages
-    update_cargo_hash_if_needed(
-        &eval_entry_point,
-        &attr_path,
-        &actual_file_location,
-        metadata.cargo_hash.as_deref(),
-    )
-    .await?;
+    // Step 5: Update dependency hashes (unless --src-only is set)
+    if !src_only {
+        // Update cargoHash for Rust packages
+        update_cargo_hash_if_needed(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            metadata.cargo_hash.as_deref(),
+        )
+        .await?;
 
-    // Step 6: Update vendorHash for Go packages
-    update_vendor_hash_if_needed(
-        &eval_entry_point,
-        &attr_path,
-        &actual_file_location,
-        metadata.vendor_hash.as_deref(),
-    )
-    .await?;
+        // Update vendorHash for Go packages
+        update_vendor_hash_if_needed(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            metadata.vendor_hash.as_deref(),
+        )
+        .await?;
 
-    // Step 7: Build with patch recovery
+        // Update npmDepsHash for Node.js packages
+        update_npm_deps_hash_if_needed(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            metadata.npm_deps_hash.as_deref(),
+        )
+        .await?;
+
+        // Update nugetDeps for .NET packages
+        update_nuget_deps_hash_if_needed(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            metadata.nuget_deps_hash.as_deref(),
+        )
+        .await?;
+
+        // Update composerDepsHash for PHP packages
+        update_composer_deps_hash_if_needed(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            metadata.composer_deps_hash.as_deref(),
+        )
+        .await?;
+    } else {
+        info!("Skipping dependency hash updates (--src-only flag set)");
+    }
+
+    // Step 6: Build with patch recovery
     let removed_patches =
         build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
 

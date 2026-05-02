@@ -114,6 +114,10 @@ enum Commands {
         /// Flake output prefix (e.g., 'packages.x86_64-linux'). Auto-detected if not specified.
         #[arg(long)]
         flake_output: Option<String>,
+        /// Only update source hash, skip dependency hashes (npmDeps, nugetDeps, composerDeps,
+        /// etc.)
+        #[arg(long)]
+        src_only: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -201,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
             all_variants,
             flake,
             flake_output,
+            src_only,
         } => {
             commands::update::update(
                 file,
@@ -216,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                 all_variants,
                 flake,
                 flake_output,
+                src_only,
             )
             .await?
         },

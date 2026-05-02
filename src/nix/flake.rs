@@ -178,6 +178,9 @@ pub async fn get_flake_package_metadata(
     let vendor_hash = try_eval_flake_attr(installable, "vendorHash")
         .await
         .or_else(|| try_eval_flake_attr_sync(installable, "vendorSha256"));
+    let npm_deps_hash = try_eval_flake_attr(installable, "npmDepsHash").await;
+    let nuget_deps_hash = try_eval_flake_attr(installable, "nugetDeps").await;
+    let composer_deps_hash = try_eval_flake_attr(installable, "composerDepsHash").await;
 
     Ok(PackageMetadata {
         version,
@@ -185,6 +188,9 @@ pub async fn get_flake_package_metadata(
         output_hash,
         cargo_hash,
         vendor_hash,
+        npm_deps_hash,
+        nuget_deps_hash,
+        composer_deps_hash,
         pname,
         description,
         homepage,

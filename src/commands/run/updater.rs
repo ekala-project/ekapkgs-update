@@ -178,6 +178,7 @@ async fn perform_update(
         "origin".to_string(), // fork - not used since create_pr is false
         run_passthru_tests,
         run_passthru_tests, // Fail on test errors in run mode
+        false,              // Update all dependencies (not src-only)
     )
     .await;
 
