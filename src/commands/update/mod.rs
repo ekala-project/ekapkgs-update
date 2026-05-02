@@ -1,6 +1,7 @@
 mod build;
 mod file_update;
 mod flake;
+mod format;
 mod git;
 mod hash_workflows;
 mod pr;
@@ -11,6 +12,7 @@ use anyhow::Context;
 pub use build::*;
 pub use file_update::*;
 pub use flake::*;
+pub use format::*;
 pub use git::*;
 pub use hash_workflows::*;
 pub use pr::*;
@@ -43,6 +45,10 @@ pub async fn update(
     src_only: bool,
     explicit_version: Option<String>,
     version_regex: Option<String>,
+    format: bool,
+    override_filename: Option<String>,
+    _system: Option<String>, /* TODO: Implement system parameter support for cross-platform
+                              * evaluation */
 ) -> anyhow::Result<()> {
     // Parse semver strategy
     let strategy = SemverStrategy::from_str(&semver_strategy)?;
@@ -64,6 +70,8 @@ pub async fn update(
             src_only,
             explicit_version,
             version_regex,
+            format,
+            override_filename,
         )
         .await;
     }
@@ -160,24 +168,29 @@ pub async fn update(
     }
 
     // No update script or ignoring it - use generic update method
-    // Try to find the package file location via meta.position
-    debug!("Attempting to locate package definition...");
-    let normalized_entry = normalize_entry_point(&file);
-    let position_expr = format!(
-        "with import {} {{ }}; {}.meta.position",
-        normalized_entry, attr_path
-    );
+    // Determine file location: use override if provided, otherwise get from meta.position
+    let expr_file_path = if let Some(ref override_file) = override_filename {
+        info!("Using override filename: {}", override_file);
+        override_file.clone()
+    } else {
+        debug!("Attempting to locate package definition...");
+        let normalized_entry = normalize_entry_point(&file);
+        let position_expr = format!(
+            "with import {} {{ }}; {}.meta.position",
+            normalized_entry, attr_path
+        );
 
-    let expr_file_path = eval_nix_expr(&position_expr).await.and_then(|position| {
-        if position.is_empty() {
-            anyhow::bail!("Empty position returned from meta.position");
-        }
-        // Parse position string (format: "file:line")
-        let (file_path, _line_str) = position
-            .rsplit_once(':')
-            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
-        Ok(file_path.to_string())
-    })?;
+        eval_nix_expr(&position_expr).await.and_then(|position| {
+            if position.is_empty() {
+                anyhow::bail!("Empty position returned from meta.position");
+            }
+            // Parse position string (format: "file:line")
+            let (file_path, _line_str) = position
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+            Ok(file_path.to_string())
+        })?
+    };
 
     let _removed_patches = update_from_file_path(
         file,
@@ -193,6 +206,7 @@ pub async fn update(
         src_only,
         explicit_version,
         version_regex,
+        format,
     )
     .await?;
 
@@ -215,6 +229,7 @@ pub async fn update_from_file_path(
     src_only: bool,
     explicit_version: Option<String>,
     version_regex: Option<String>,
+    format: bool,
 ) -> anyhow::Result<Vec<String>> {
     info!(
         "Starting generic update for {} at {}",
@@ -332,12 +347,17 @@ pub async fn update_from_file_path(
     )
     .await?;
 
+    // Step 9: Format the file if requested
+    if format {
+        format_nix_file(&actual_file_location).await?;
+    }
+
     info!(
         "✓ Successfully updated {} from {} to {}",
         attr_path, metadata.version, new_version
     );
 
-    // Step 9: Handle commit and PR creation
+    // Step 10: Handle commit and PR creation
     handle_commit_or_pr(
         &attr_path,
         &metadata,

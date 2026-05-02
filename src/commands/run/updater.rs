@@ -181,6 +181,7 @@ async fn perform_update(
         false,              // Update all dependencies (not src-only)
         None,               // No explicit version in run mode
         None,               // No version regex in run mode
+        false,              // No formatting in run mode (worktree cleanup would lose it)
     )
     .await;
 

@@ -126,6 +126,15 @@ enum Commands {
         /// 'jq-1.6' tags)
         #[arg(long)]
         version_regex: Option<String>,
+        /// Format updated files using nixfmt
+        #[arg(long)]
+        format: bool,
+        /// Override the filename to update (useful when meta.position points to the wrong file)
+        #[arg(long)]
+        override_filename: Option<String>,
+        /// System to use for evaluation (e.g., 'x86_64-linux', 'aarch64-darwin')
+        #[arg(long)]
+        system: Option<String>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -216,6 +225,9 @@ async fn main() -> anyhow::Result<()> {
             src_only,
             version,
             version_regex,
+            format,
+            override_filename,
+            system,
         } => {
             commands::update::update(
                 file,
@@ -234,6 +246,9 @@ async fn main() -> anyhow::Result<()> {
                 src_only,
                 version,
                 version_regex,
+                format,
+                override_filename,
+                system,
             )
             .await?
         },
