@@ -215,16 +215,16 @@ pub async fn update_flake_package(
 
     // Step 11: Commit or create PR
     if update_config.commit || update_config.create_pr {
-        handle_commit_or_pr(
-            &attr_path,
-            &metadata,
-            &best_release.tag_name,
-            update_config.commit,
-            update_config.create_pr,
-            update_config.upstream,
-            &update_config.fork,
-            update_config.run_passthru_tests,
-        )
+        handle_commit_or_pr(super::pr::PostUpdateParams {
+            attr_path: &attr_path,
+            metadata: &metadata,
+            new_version: &best_release.tag_name,
+            commit: update_config.commit,
+            create_pr: update_config.create_pr,
+            upstream: update_config.upstream,
+            fork: &update_config.fork,
+            tests_passed: update_config.run_passthru_tests,
+        })
         .await?;
     }
 
