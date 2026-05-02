@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::Context;
 pub use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
-pub use config::{FlakeConfig, UpdateConfig, VariantConfig, VersionConfig};
+pub use config::{FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig};
 pub use file_update::{
     update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
     update_nuget_deps_hash, update_vendor_hash,
@@ -36,24 +36,23 @@ use crate::nix::{
 };
 use crate::package::PackageMetadata;
 use crate::variant_strategy::{infer_strategy_from_variant, is_variant_pinned};
-use crate::vcs_sources::{SemverStrategy, UpstreamSource};
+use crate::vcs_sources::UpstreamSource;
 
 /// Main update entry point
-pub async fn update(
-    file: String,
-    attr_path: String,
-    semver_strategy: String,
-    ignore_update_script: bool,
-    update_config: UpdateConfig,
-    variant_config: VariantConfig,
-    flake_config: FlakeConfig,
-    version_config: VersionConfig,
-    override_filename: Option<String>,
-    _system: Option<String>, /* TODO: Implement system parameter support for cross-platform
-                              * evaluation */
-) -> anyhow::Result<()> {
-    // Parse semver strategy
-    let strategy = SemverStrategy::from_str(&semver_strategy)?;
+pub async fn update(params: UpdateParams) -> anyhow::Result<()> {
+    let UpdateParams {
+        file,
+        attr_path,
+        ignore_update_script,
+        override_filename,
+        system: _system,
+        update_config,
+        version_config,
+        variant_config,
+        flake_config,
+    } = params;
+
+    let strategy = version_config.strategy;
     info!("Using semver strategy: {:?}", strategy);
 
     // Handle flake mode

@@ -181,49 +181,43 @@ impl Commands {
                 override_filename,
                 system,
             } => {
-                use commands::update::{FlakeConfig, UpdateConfig, VariantConfig, VersionConfig};
+                use commands::update::{
+                    FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig,
+                };
 
                 use crate::vcs_sources::SemverStrategy;
 
-                let update_config = UpdateConfig {
-                    commit,
-                    create_pr,
-                    upstream,
-                    fork,
-                    run_passthru_tests,
-                    src_only,
-                    format,
-                };
-
-                let variant_config = VariantConfig {
-                    variant,
-                    all_variants,
-                };
-
-                let flake_config = FlakeConfig {
-                    enabled: flake,
-                    output: flake_output,
-                };
-
-                let version_config = VersionConfig {
-                    strategy: SemverStrategy::from_str(&semver)?,
-                    explicit_version: version,
-                    version_regex,
-                };
-
-                commands::update::update(
+                let params = UpdateParams {
                     file,
                     attr_path,
-                    semver,
                     ignore_update_script,
-                    update_config,
-                    variant_config,
-                    flake_config,
-                    version_config,
                     override_filename,
                     system,
-                )
-                .await
+                    update_config: UpdateConfig {
+                        commit,
+                        create_pr,
+                        upstream,
+                        fork,
+                        run_passthru_tests,
+                        src_only,
+                        format,
+                    },
+                    version_config: VersionConfig {
+                        strategy: SemverStrategy::from_str(&semver)?,
+                        explicit_version: version,
+                        version_regex,
+                    },
+                    variant_config: VariantConfig {
+                        variant,
+                        all_variants,
+                    },
+                    flake_config: FlakeConfig {
+                        enabled: flake,
+                        output: flake_output,
+                    },
+                };
+
+                commands::update::update(params).await
             },
             Commands::PruneMaintainers { directory, check } => {
                 commands::prune_maintainers::prune_maintainers(directory, check).await
