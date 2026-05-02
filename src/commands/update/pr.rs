@@ -21,6 +21,39 @@ pub struct PostUpdateParams<'a> {
     pub tests_passed: bool,
 }
 
+impl<'a> PostUpdateParams<'a> {
+    /// Execute post-update commit/PR operations
+    pub async fn execute(self) -> anyhow::Result<()> {
+        let PostUpdateParams {
+            attr_path,
+            metadata,
+            new_version,
+            commit,
+            create_pr,
+            upstream,
+            fork,
+            tests_passed,
+        } = self;
+
+        if create_pr {
+            create_pr_for_update(
+                attr_path,
+                metadata,
+                new_version,
+                upstream,
+                fork,
+                tests_passed,
+            )
+            .await?;
+        } else if commit {
+            // Just create a commit without PR
+            create_git_commit(attr_path, &metadata.version, new_version, tests_passed).await?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Create a pull request for the package update
 pub async fn create_pr_for_update(
     attr_path: &str,
@@ -138,36 +171,6 @@ pub async fn create_pr_for_update(
     Ok(())
 }
 
-/// Handle commit or PR creation after successful update
-pub async fn handle_commit_or_pr(params: PostUpdateParams<'_>) -> anyhow::Result<()> {
-    let PostUpdateParams {
-        attr_path,
-        metadata,
-        new_version,
-        commit,
-        create_pr,
-        upstream,
-        fork,
-        tests_passed,
-    } = params;
-
-    if create_pr {
-        create_pr_for_update(
-            attr_path,
-            metadata,
-            new_version,
-            upstream,
-            fork,
-            tests_passed,
-        )
-        .await?;
-    } else if commit {
-        // Just create a commit without PR
-        create_git_commit(attr_path, &metadata.version, new_version, tests_passed).await?;
-    }
-
-    Ok(())
-}
 
 /// Create commit message with optional test status
 fn create_commit_message(

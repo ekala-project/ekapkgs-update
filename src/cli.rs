@@ -161,7 +161,7 @@ impl Commands {
                     skip_unstable,
                 };
 
-                commands::run::run(config).await
+                config.execute().await
             },
             Commands::Update {
                 file,
@@ -220,7 +220,7 @@ impl Commands {
                     },
                 };
 
-                commands::update::update(params).await
+                params.execute().await
             },
             Commands::PruneMaintainers { directory, check } => {
                 commands::prune_maintainers::prune_maintainers(directory, check).await
