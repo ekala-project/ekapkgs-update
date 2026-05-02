@@ -31,6 +31,8 @@ use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 /// * `src_only` - Skip dependency hash updates
 /// * `explicit_version` - Explicit version to update to (overrides strategy)
 /// * `version_regex` - Custom regex for version extraction
+/// * `format` - Whether to format the file with nixfmt
+/// * `override_filename` - Override the filename to update (ignores meta.position)
 ///
 /// # Returns
 /// Ok(()) on success
@@ -47,6 +49,8 @@ pub async fn update_flake_package(
     src_only: bool,
     explicit_version: Option<String>,
     version_regex: Option<String>,
+    format: bool,
+    override_filename: Option<String>,
 ) -> anyhow::Result<()> {
     info!("Updating flake package: {}", attr_path);
 
@@ -111,10 +115,15 @@ pub async fn update_flake_package(
     }
 
     // Step 4: Get file location
-    info!("Finding package definition location...");
-    let file_path = get_flake_package_position(&installable)
-        .await
-        .context("Failed to get package file location")?;
+    let file_path = if let Some(ref override_file) = override_filename {
+        info!("Using override filename: {}", override_file);
+        override_file.clone()
+    } else {
+        info!("Finding package definition location...");
+        get_flake_package_position(&installable)
+            .await
+            .context("Failed to get package file location")?
+    };
 
     info!("Package defined in: {}", file_path);
 
@@ -201,7 +210,13 @@ pub async fn update_flake_package(
         }
     }
 
-    // Step 10: Commit or create PR
+    // Step 10: Format the file if requested
+    if format {
+        use super::format_nix_file;
+        format_nix_file(&file_path).await?;
+    }
+
+    // Step 11: Commit or create PR
     if commit || create_pr {
         handle_commit_or_pr(
             &attr_path,
