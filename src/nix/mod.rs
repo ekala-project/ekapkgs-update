@@ -2,6 +2,8 @@ pub mod flake;
 pub mod nix_eval_jobs;
 pub mod run_eval;
 
+use std::borrow::Cow;
+
 use tokio::process::Command;
 use tracing::debug;
 
@@ -26,11 +28,11 @@ use tracing::debug;
 ///     "/absolute/path.nix"
 /// );
 /// ```
-pub fn normalize_entry_point(entry_point: &str) -> String {
+pub fn normalize_entry_point(entry_point: &str) -> Cow<'_, str> {
     if entry_point.starts_with("./") || entry_point.starts_with('/') {
-        entry_point.to_string()
+        Cow::Borrowed(entry_point)
     } else {
-        format!("./{}", entry_point)
+        Cow::Owned(format!("./{}", entry_point))
     }
 }
 
