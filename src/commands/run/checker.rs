@@ -15,9 +15,13 @@ pub async fn release_checker_service(
     db: Database,
     tx: mpsc::UnboundedSender<UpdateRequest>,
     skip_unstable: bool,
+    skip_repology: bool,
 ) -> (usize, usize, usize) {
     let stream = nix::run_eval::run_nix_eval_jobs(file.clone());
     pin_mut!(stream);
+
+    // Create Repology client for cross-distribution version checking
+    let repology_client = crate::repology::RepologyClient::new();
 
     let mut error_count = 0;
     let mut skipped_count = 0;
@@ -56,6 +60,7 @@ pub async fn release_checker_service(
                 let attr_path_clone = attr_path.clone();
                 let file_clone = file.clone();
                 let tx_clone = tx.clone();
+                let repology_client_clone = repology_client.clone();
 
                 // Spawn task to check this package
                 tokio::spawn(async move {
@@ -66,6 +71,8 @@ pub async fn release_checker_service(
                         &attr_path_clone,
                         tx_clone,
                         skip_unstable,
+                        &repology_client_clone,
+                        skip_repology,
                     )
                     .await
                     {
@@ -96,6 +103,8 @@ async fn check_for_update(
     attr_path: &str,
     tx: mpsc::UnboundedSender<UpdateRequest>,
     skip_unstable: bool,
+    repology_client: &crate::repology::RepologyClient,
+    skip_repology: bool,
 ) -> anyhow::Result<()> {
     // Extract package metadata
     let metadata = match PackageMetadata::from_attr_path(eval_entry_point, attr_path).await {
@@ -144,6 +153,40 @@ async fn check_for_update(
         Ok(release) => release,
         Err(e) => {
             debug!("{}: Failed to fetch upstream release: {}", attr_path, e);
+
+            // Try Repology as fallback (if enabled and pname available)
+            if !skip_repology {
+                if let Some(pname) = metadata.pname.as_ref() {
+                    match crate::repology::check_repology_version(
+                        db.pool(),
+                        repology_client,
+                        pname,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(Some(repology_info)) => {
+                            if let Some(repology_version) = repology_info.get_newest_version() {
+                                if repology_version != *current_version {
+                                    info!(
+                                        "{}: Upstream check failed, but Repology suggests update to {}",
+                                        attr_path, repology_version
+                                    );
+                                    // Note: We still don't update since we can't verify the release
+                                    // This is just informational
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            debug!("{}: Package not found in Repology (fallback)", attr_path);
+                        }
+                        Err(rep_err) => {
+                            debug!("{}: Repology fallback also failed: {}", attr_path, rep_err);
+                        }
+                    }
+                }
+            }
+
             // Record no update available
             if let Err(db_err) = db
                 .record_no_update(attr_path, current_version, "unknown")
@@ -157,6 +200,42 @@ async fn check_for_update(
 
     let latest_version = UpstreamSource::get_version(&best_release);
     debug!("{}: Latest version: {}", attr_path, latest_version);
+
+    // Cross-check with Repology for validation (if enabled)
+    if !skip_repology {
+        if let Some(pname) = metadata.pname.as_ref() {
+            match crate::repology::check_repology_version(
+                db.pool(),
+                repology_client,
+                pname,
+                false,
+            )
+            .await
+            {
+                Ok(Some(repology_info)) => {
+                    if let Some(repology_newest) = repology_info.get_newest_version() {
+                        if repology_newest != latest_version {
+                            info!(
+                                "{}: Repology reports {} as newest (upstream says {})",
+                                attr_path, repology_newest, latest_version
+                            );
+                        } else {
+                            debug!(
+                                "{}: Repology confirms {} is newest across distributions",
+                                attr_path, latest_version
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    debug!("{}: Package not found in Repology", attr_path);
+                }
+                Err(e) => {
+                    debug!("{}: Repology check failed: {}", attr_path, e);
+                }
+            }
+        }
+    }
 
     // Check if update is needed
     if current_version == &latest_version {

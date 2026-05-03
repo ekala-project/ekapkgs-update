@@ -43,6 +43,9 @@ pub struct RunConfig {
 
     /// Disable CVE vulnerability checking
     pub no_cve: bool,
+
+    /// Disable Repology cross-distribution version checking
+    pub no_repology: bool,
 }
 
 impl RunConfig {
@@ -60,6 +63,7 @@ impl RunConfig {
             analyze_rebuilds,
             max_rebuilds,
             no_cve,
+            no_repology,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -98,8 +102,14 @@ impl RunConfig {
 
         // Spawn release checker service
         let checker_handle = tokio::spawn(async move {
-            super::checker::release_checker_service(file_checker, db_checker, tx, skip_unstable)
-                .await
+            super::checker::release_checker_service(
+                file_checker,
+                db_checker,
+                tx,
+                skip_unstable,
+                no_repology,
+            )
+            .await
         });
 
         // Spawn updater service

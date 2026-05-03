@@ -51,6 +51,11 @@ impl Database {
             debug!("Failed to cleanup CVE cache: {}", e);
         }
 
+        // Cleanup expired Repology cache entries
+        if let Err(e) = crate::repology::cleanup_cache(&pool).await {
+            debug!("Failed to cleanup Repology cache: {}", e);
+        }
+
         Ok(Self { pool })
     }
 

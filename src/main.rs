@@ -31,6 +31,7 @@ mod hash_discovery;
 mod nix;
 mod package;
 mod pypi;
+mod repology;
 mod rewrite;
 mod variant_strategy;
 mod vcs_sources;
