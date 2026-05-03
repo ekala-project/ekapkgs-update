@@ -24,6 +24,7 @@ mod commands;
 mod config;
 mod cve;
 mod database;
+mod directory_diff;
 mod git;
 mod github;
 mod gitlab;

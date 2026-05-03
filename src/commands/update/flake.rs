@@ -224,6 +224,8 @@ pub async fn update_flake_package(
             upstream: update_config.upstream,
             fork: &update_config.fork,
             tests_passed: update_config.run_passthru_tests,
+            eval_entry_point: None, // Flake updates don't have traditional eval entry points
+            directory_diff: update_config.directory_diff,
         }
         .execute()
         .await?;

@@ -54,6 +54,9 @@ pub enum Commands {
         /// Disable Repology cross-distribution version checking
         #[arg(long)]
         no_repology: bool,
+        /// Disable directory diff comparison in PR body
+        #[arg(long)]
+        no_directory_diff: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -118,6 +121,9 @@ pub enum Commands {
         /// System to use for evaluation (e.g., 'x86_64-linux', 'aarch64-darwin')
         #[arg(long)]
         system: Option<String>,
+        /// Disable directory diff comparison in PR body
+        #[arg(long)]
+        no_directory_diff: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -163,6 +169,7 @@ impl Commands {
                 max_rebuilds,
                 no_cve,
                 no_repology,
+                no_directory_diff,
             } => {
                 use commands::run::RunConfig;
 
@@ -179,6 +186,7 @@ impl Commands {
                     max_rebuilds,
                     no_cve,
                     no_repology,
+                    directory_diff: !no_directory_diff,
                 };
 
                 config.execute().await
@@ -203,6 +211,7 @@ impl Commands {
                 format,
                 override_filename,
                 system,
+                no_directory_diff,
             } => {
                 use commands::update::{
                     FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig,
@@ -224,6 +233,7 @@ impl Commands {
                         run_passthru_tests,
                         src_only,
                         format,
+                        directory_diff: !no_directory_diff,
                     },
                     version_config: VersionConfig {
                         strategy: SemverStrategy::from_str(&semver)?,

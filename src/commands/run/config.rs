@@ -46,6 +46,9 @@ pub struct RunConfig {
 
     /// Disable Repology cross-distribution version checking
     pub no_repology: bool,
+
+    /// Whether to include directory diff in PR body
+    pub directory_diff: bool,
 }
 
 impl RunConfig {
@@ -64,6 +67,7 @@ impl RunConfig {
             max_rebuilds,
             no_cve,
             no_repology,
+            directory_diff,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -123,6 +127,7 @@ impl RunConfig {
             analyze_rebuilds,
             max_rebuilds,
             no_cve,
+            directory_diff,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -182,6 +187,9 @@ pub struct UpdaterServiceConfig {
 
     /// Disable CVE vulnerability checking
     pub no_cve: bool,
+
+    /// Whether to include directory diff in PR body
+    pub directory_diff: bool,
 }
 
 impl UpdaterServiceConfig {
@@ -204,6 +212,7 @@ impl UpdaterServiceConfig {
             analyze_rebuilds,
             max_rebuilds,
             no_cve,
+            directory_diff,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -263,6 +272,7 @@ impl UpdaterServiceConfig {
                                     analyze_rebuilds,
                                     max_rebuilds,
                                     no_cve,
+                                    directory_diff,
                                 )
                                 .await;
                                 (result, attr_path_clone)
