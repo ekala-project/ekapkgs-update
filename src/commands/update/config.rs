@@ -34,6 +34,9 @@ pub struct UpdateConfig {
 
     /// Whether to format the file with nixfmt after update
     pub format: bool,
+
+    /// Whether to include directory diff in PR body
+    pub directory_diff: bool,
 }
 
 impl Default for UpdateConfig {
@@ -46,6 +49,7 @@ impl Default for UpdateConfig {
             run_passthru_tests: false,
             src_only: false,
             format: false,
+            directory_diff: true,
         }
     }
 }

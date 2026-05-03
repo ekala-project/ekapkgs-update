@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -92,4 +93,90 @@ pub fn detect_reversed_patch(stderr: &str) -> Option<String> {
                     .map(|m| m.as_str().to_string())
             })
         })
+}
+
+/// Build a Nix expression and return all output paths
+///
+/// Builds the package and returns a list of (output_name, store_path) tuples
+/// for all outputs (e.g., "out", "dev", "lib", etc.)
+///
+/// # Arguments
+/// * `eval_entry_point` - Path to the Nix file to evaluate
+/// * `attr_path` - Attribute path to build
+/// * `attr_suffix` - Optional suffix to append
+///
+/// # Returns
+/// A vector of (output_name, store_path) tuples, or an error if the build failed
+pub async fn build_and_get_outputs(
+    eval_entry_point: &str,
+    attr_path: &str,
+    attr_suffix: Option<&str>,
+) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let full_attr = if let Some(suffix) = attr_suffix {
+        format!("{}.{}", attr_path, suffix)
+    } else {
+        attr_path.to_string()
+    };
+
+    debug!("Building {} and extracting outputs", full_attr);
+
+    // Build with nix-build, creating result symlinks
+    let output = Command::new("nix-build")
+        .arg(eval_entry_point)
+        .arg("-A")
+        .arg(&full_attr)
+        .arg("-o")
+        .arg("result")
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Build failed for {}: {}", full_attr, stderr);
+    }
+
+    // Get all output paths by reading result symlinks
+    let mut outputs = Vec::new();
+
+    // Check for the main "result" symlink
+    if std::path::Path::new("result").exists() {
+        let store_path = std::fs::canonicalize("result")?;
+        outputs.push(("out".to_string(), store_path));
+    }
+
+    // Check for additional outputs (result-dev, result-lib, etc.)
+    let output_suffixes = ["dev", "lib", "debug", "doc", "man", "info", "bin"];
+    for suffix in &output_suffixes {
+        let link_name = format!("result-{}", suffix);
+        if std::path::Path::new(&link_name).exists() {
+            let store_path = std::fs::canonicalize(&link_name)?;
+            outputs.push((suffix.to_string(), store_path));
+        }
+    }
+
+    Ok(outputs)
+}
+
+/// Clean up result symlinks created by nix-build
+///
+/// Removes result, result-dev, result-lib, etc. symlinks from the current directory
+pub fn cleanup_result_symlinks() -> anyhow::Result<()> {
+    let symlinks = [
+        "result",
+        "result-dev",
+        "result-lib",
+        "result-debug",
+        "result-doc",
+        "result-man",
+        "result-info",
+        "result-bin",
+    ];
+
+    for link in &symlinks {
+        if std::path::Path::new(link).exists() {
+            std::fs::remove_file(link)?;
+        }
+    }
+
+    Ok(())
 }
