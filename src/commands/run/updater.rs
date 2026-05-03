@@ -20,6 +20,7 @@ pub(super) async fn perform_update(
     dry_run: bool,
     analyze_rebuilds: bool,
     max_rebuilds: Option<usize>,
+    skip_cve_check: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -165,6 +166,7 @@ pub(super) async fn perform_update(
                     config,
                     fork,
                     rebuild_analysis.as_ref(),
+                    skip_cve_check,
                 )
                 .await
                 {
@@ -282,6 +284,7 @@ async fn create_pr_for_update(
     config: &PrConfig,
     fork: &str,
     rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
+    skip_cve_check: bool,
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -302,6 +305,21 @@ async fn create_pr_for_update(
     let metadata = PackageMetadata::from_attr_path(&eval_entry_point, attr_path)
         .await
         .ok();
+
+    // Analyze CVE changes if metadata is available and CVE checking is enabled
+    let cve_analysis = if let Some(ref meta) = metadata {
+        crate::cve::analyze_cve_changes(
+            db.pool(),
+            meta,
+            old_version,
+            new_version,
+            skip_cve_check,
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
 
     // Create PR title and body
     let title = format!(
@@ -373,6 +391,14 @@ async fn create_pr_for_update(
                 body.push_str(&format!("- `{}`\n", pkg));
             }
             body.push_str("\n</details>\n");
+        }
+    }
+
+    // Add CVE analysis if available
+    if let Some(analysis) = cve_analysis {
+        if let Some(cve_section) = analysis.to_markdown() {
+            body.push_str("\n\n");
+            body.push_str(&cve_section);
         }
     }
 
