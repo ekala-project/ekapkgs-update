@@ -196,25 +196,47 @@ impl Database {
         old_version: &str,
         new_version: &str,
     ) -> Result<()> {
+        self.record_successful_update_with_rebuild_count(attr_path, old_version, new_version, None)
+            .await
+    }
+
+    /// Record a successful update with optional rebuild count
+    /// Resets backoff to 2 days
+    pub async fn record_successful_update_with_rebuild_count(
+        &self,
+        attr_path: &str,
+        old_version: &str,
+        new_version: &str,
+        rebuild_count: Option<usize>,
+    ) -> Result<()> {
         let now = Utc::now();
         let next_attempt = now + Duration::days(2);
 
-        info!(
-            "{}: Successful update from {} to {}, resetting next_attempt to 2 days",
-            attr_path, old_version, new_version
-        );
+        if let Some(count) = rebuild_count {
+            info!(
+                "{}: Successful update from {} to {} ({} rebuilds), resetting next_attempt to 2 \
+                 days",
+                attr_path, old_version, new_version, count
+            );
+        } else {
+            info!(
+                "{}: Successful update from {} to {}, resetting next_attempt to 2 days",
+                attr_path, old_version, new_version
+            );
+        }
 
         sqlx::query(
             r#"
             INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
-                                proposed_version, latest_upstream_version)
-            VALUES (?, ?, ?, ?, ?, ?)
+                                proposed_version, latest_upstream_version, rebuild_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(attr_path) DO UPDATE SET
                 last_attempted = excluded.last_attempted,
                 next_attempt = excluded.next_attempt,
                 current_version = excluded.current_version,
                 proposed_version = NULL,
-                latest_upstream_version = excluded.latest_upstream_version
+                latest_upstream_version = excluded.latest_upstream_version,
+                rebuild_count = excluded.rebuild_count
             "#,
         )
         .bind(attr_path)
@@ -222,6 +244,7 @@ impl Database {
         .bind(next_attempt.to_rfc3339())
         .bind(new_version)
         .bind(new_version)
+        .bind(rebuild_count.map(|c| c as i64))
         .execute(&self.pool)
         .await
         .context("Failed to record successful update")?;
@@ -429,5 +452,134 @@ impl Database {
         .await?;
 
         Ok(logs)
+    }
+
+    /// Get rebuild count for a specific package (most recent update)
+    pub async fn get_rebuild_count(&self, attr_path: &str) -> Result<Option<i64>> {
+        let count: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT rebuild_count
+            FROM updates
+            WHERE attr_path = ?
+            "#,
+        )
+        .bind(attr_path)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+
+        Ok(count)
+    }
+
+    /// Get packages with highest rebuild impact
+    ///
+    /// Returns packages sorted by rebuild count (descending), including only
+    /// those with non-null rebuild counts.
+    pub async fn get_high_impact_packages(&self, limit: i64) -> Result<Vec<(String, i64)>> {
+        let results: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT attr_path, rebuild_count
+            FROM updates
+            WHERE rebuild_count IS NOT NULL
+            ORDER BY rebuild_count DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
+    }
+
+    /// Get average rebuild count across all packages
+    pub async fn get_average_rebuild_count(&self) -> Result<Option<f64>> {
+        let avg: Option<f64> = sqlx::query_scalar(
+            r#"
+            SELECT AVG(rebuild_count)
+            FROM updates
+            WHERE rebuild_count IS NOT NULL
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+
+        Ok(avg)
+    }
+
+    /// Get rebuild count distribution (histogram buckets)
+    ///
+    /// Returns counts of packages in different rebuild impact ranges:
+    /// - 0-10 rebuilds
+    /// - 11-50 rebuilds
+    /// - 51-100 rebuilds
+    /// - 101+ rebuilds
+    pub async fn get_rebuild_distribution(&self) -> Result<Vec<(String, i64)>> {
+        let results: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT
+                CASE
+                    WHEN rebuild_count <= 10 THEN '0-10'
+                    WHEN rebuild_count <= 50 THEN '11-50'
+                    WHEN rebuild_count <= 100 THEN '51-100'
+                    ELSE '101+'
+                END as range,
+                COUNT(*) as count
+            FROM updates
+            WHERE rebuild_count IS NOT NULL
+            GROUP BY range
+            ORDER BY
+                CASE range
+                    WHEN '0-10' THEN 1
+                    WHEN '11-50' THEN 2
+                    WHEN '51-100' THEN 3
+                    ELSE 4
+                END
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
+    }
+
+    /// Get packages with rebuild counts in a specific range
+    pub async fn get_packages_by_rebuild_range(
+        &self,
+        min: i64,
+        max: i64,
+    ) -> Result<Vec<(String, i64, String)>> {
+        let results: Vec<(String, i64, String)> = sqlx::query_as(
+            r#"
+            SELECT attr_path, rebuild_count, current_version
+            FROM updates
+            WHERE rebuild_count IS NOT NULL
+                AND rebuild_count >= ?
+                AND rebuild_count <= ?
+            ORDER BY rebuild_count DESC
+            "#,
+        )
+        .bind(min)
+        .bind(max)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(results)
+    }
+
+    /// Get total number of packages with rebuild count data
+    pub async fn get_packages_with_rebuild_data_count(&self) -> Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM updates
+            WHERE rebuild_count IS NOT NULL
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count)
     }
 }

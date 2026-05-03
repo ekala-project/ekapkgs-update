@@ -1,5 +1,7 @@
+pub mod eval_cache;
 pub mod flake;
 pub mod nix_eval_jobs;
+pub mod rebuild_count;
 pub mod run_eval;
 
 use std::borrow::Cow;

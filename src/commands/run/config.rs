@@ -34,6 +34,12 @@ pub struct RunConfig {
 
     /// Skip packages marked as unstable
     pub skip_unstable: bool,
+
+    /// Analyze and report rebuild counts for each update
+    pub analyze_rebuilds: bool,
+
+    /// Skip updates that would cause more than N rebuilds
+    pub max_rebuilds: Option<usize>,
 }
 
 impl RunConfig {
@@ -48,6 +54,8 @@ impl RunConfig {
             dry_run,
             concurrent_updates,
             skip_unstable,
+            analyze_rebuilds,
+            max_rebuilds,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -98,6 +106,8 @@ impl RunConfig {
             run_passthru_tests,
             dry_run,
             concurrency,
+            analyze_rebuilds,
+            max_rebuilds,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -148,6 +158,12 @@ pub struct UpdaterServiceConfig {
 
     /// Number of concurrent update workers
     pub concurrency: usize,
+
+    /// Analyze and report rebuild counts for each update
+    pub analyze_rebuilds: bool,
+
+    /// Skip updates that would cause more than N rebuilds
+    pub max_rebuilds: Option<usize>,
 }
 
 impl UpdaterServiceConfig {
@@ -167,6 +183,8 @@ impl UpdaterServiceConfig {
             run_passthru_tests,
             dry_run,
             concurrency,
+            analyze_rebuilds,
+            max_rebuilds,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -223,6 +241,8 @@ impl UpdaterServiceConfig {
                                     &fork_clone, // Arc<str> derefs to &str
                                     run_passthru_tests,
                                     dry_run,
+                                    analyze_rebuilds,
+                                    max_rebuilds,
                                 )
                                 .await;
                                 (result, attr_path_clone)

@@ -42,6 +42,12 @@ pub enum Commands {
         /// Skip packages with 'unstable' in their version
         #[arg(long)]
         skip_unstable: bool,
+        /// Analyze and report rebuild counts for each update
+        #[arg(long)]
+        analyze_rebuilds: bool,
+        /// Skip updates that would cause more than N rebuilds
+        #[arg(long)]
+        max_rebuilds: Option<usize>,
     },
     /// Update a package in a Nix file
     Update {
@@ -147,6 +153,8 @@ impl Commands {
                 dry_run,
                 concurrent_updates,
                 skip_unstable,
+                analyze_rebuilds,
+                max_rebuilds,
             } => {
                 use commands::run::RunConfig;
 
@@ -159,6 +167,8 @@ impl Commands {
                     dry_run,
                     concurrent_updates,
                     skip_unstable,
+                    analyze_rebuilds,
+                    max_rebuilds,
                 };
 
                 config.execute().await

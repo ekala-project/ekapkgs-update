@@ -18,6 +18,8 @@ pub(super) async fn perform_update(
     fork: &str,
     run_passthru_tests: bool,
     dry_run: bool,
+    analyze_rebuilds: bool,
+    max_rebuilds: Option<usize>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -96,9 +98,57 @@ pub(super) async fn perform_update(
                 );
             }
 
-            // Record successful update first
+            // Analyze rebuild impact if requested
+            let rebuild_analysis = if analyze_rebuilds {
+                match crate::nix::rebuild_count::calculate_rebuild_count(
+                    eval_entry_point,
+                    &worktree_path,
+                )
+                .await
+                {
+                    Ok(analysis) => {
+                        info!("{}: {}", attr_path, analysis.summary());
+
+                        // Check if rebuild count exceeds threshold
+                        if let Some(threshold) = max_rebuilds {
+                            if analysis.exceeds_threshold(threshold) {
+                                info!(
+                                    "{}: Skipping update - rebuild count {} exceeds threshold {}",
+                                    attr_path, analysis.rebuild_count, threshold
+                                );
+
+                                // Clean up the worktree
+                                if let Err(e) = cleanup_worktree(&worktree_path).await {
+                                    warn!("{}: Failed to clean up worktree: {}", attr_path, e);
+                                }
+
+                                return Ok(UpdateResult::Skipped(format!(
+                                    "Rebuild count {} exceeds threshold {}",
+                                    analysis.rebuild_count, threshold
+                                )));
+                            }
+                        }
+
+                        Some(analysis)
+                    },
+                    Err(e) => {
+                        warn!("{}: Failed to calculate rebuild count: {}", attr_path, e);
+                        None
+                    },
+                }
+            } else {
+                None
+            };
+
+            // Record successful update first (with rebuild count if available)
+            let db_rebuild_count = rebuild_analysis.as_ref().map(|a| a.rebuild_count);
             if let Err(e) = db
-                .record_successful_update(attr_path, current_version, new_version)
+                .record_successful_update_with_rebuild_count(
+                    attr_path,
+                    current_version,
+                    new_version,
+                    db_rebuild_count,
+                )
                 .await
             {
                 warn!("{}: Failed to record successful update: {}", attr_path, e);
@@ -114,6 +164,7 @@ pub(super) async fn perform_update(
                     new_version,
                     config,
                     fork,
+                    rebuild_analysis.as_ref(),
                 )
                 .await
                 {
@@ -230,6 +281,7 @@ async fn create_pr_for_update(
     new_version: &str,
     config: &PrConfig,
     fork: &str,
+    rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -276,6 +328,51 @@ async fn create_pr_for_update(
 
         if let Some(changelog) = &meta.changelog {
             body.push_str(&format!("\n\n**Changelog:** {}", changelog));
+        }
+    }
+
+    // Add rebuild impact analysis if available
+    if let Some(analysis) = rebuild_analysis {
+        body.push_str("\n\n## Rebuild Impact\n\n");
+        body.push_str(&format!(
+            "- **Packages affected:** {}\n",
+            analysis.rebuild_count
+        ));
+        body.push_str(&format!(
+            "- **Impact:** {:.1}% of {} total packages\n",
+            analysis.rebuild_percentage(),
+            analysis.total_packages
+        ));
+
+        if !analysis.new_packages.is_empty() {
+            body.push_str(&format!(
+                "- **New packages:** {}\n",
+                analysis.new_packages.len()
+            ));
+        }
+
+        if !analysis.removed_packages.is_empty() {
+            body.push_str(&format!(
+                "- **Removed packages:** {}\n",
+                analysis.removed_packages.len()
+            ));
+        }
+
+        // List affected packages if the count is reasonable
+        if analysis.rebuild_count > 0 && analysis.rebuild_count <= 20 {
+            body.push_str("\n### Affected packages:\n");
+            for pkg in &analysis.rebuilt_packages {
+                body.push_str(&format!("- `{}`\n", pkg));
+            }
+        } else if analysis.rebuild_count > 20 {
+            body.push_str(&format!(
+                "\n<details>\n<summary>Show all {} affected packages</summary>\n\n",
+                analysis.rebuild_count
+            ));
+            for pkg in &analysis.rebuilt_packages {
+                body.push_str(&format!("- `{}`\n", pkg));
+            }
+            body.push_str("\n</details>\n");
         }
     }
 
