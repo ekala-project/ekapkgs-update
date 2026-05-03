@@ -51,6 +51,9 @@ pub enum Commands {
         /// Disable CVE vulnerability checking
         #[arg(long)]
         no_cve: bool,
+        /// Disable Repology cross-distribution version checking
+        #[arg(long)]
+        no_repology: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -159,6 +162,7 @@ impl Commands {
                 analyze_rebuilds,
                 max_rebuilds,
                 no_cve,
+                no_repology,
             } => {
                 use commands::run::RunConfig;
 
@@ -174,6 +178,7 @@ impl Commands {
                     analyze_rebuilds,
                     max_rebuilds,
                     no_cve,
+                    no_repology,
                 };
 
                 config.execute().await
