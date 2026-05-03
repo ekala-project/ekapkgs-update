@@ -48,6 +48,9 @@ pub enum Commands {
         /// Skip updates that would cause more than N rebuilds
         #[arg(long)]
         max_rebuilds: Option<usize>,
+        /// Disable CVE vulnerability checking
+        #[arg(long)]
+        no_cve: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -155,6 +158,7 @@ impl Commands {
                 skip_unstable,
                 analyze_rebuilds,
                 max_rebuilds,
+                no_cve,
             } => {
                 use commands::run::RunConfig;
 
@@ -169,6 +173,7 @@ impl Commands {
                     skip_unstable,
                     analyze_rebuilds,
                     max_rebuilds,
+                    no_cve,
                 };
 
                 config.execute().await

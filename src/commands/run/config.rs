@@ -40,6 +40,9 @@ pub struct RunConfig {
 
     /// Skip updates that would cause more than N rebuilds
     pub max_rebuilds: Option<usize>,
+
+    /// Disable CVE vulnerability checking
+    pub no_cve: bool,
 }
 
 impl RunConfig {
@@ -56,6 +59,7 @@ impl RunConfig {
             skip_unstable,
             analyze_rebuilds,
             max_rebuilds,
+            no_cve,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -108,6 +112,7 @@ impl RunConfig {
             concurrency,
             analyze_rebuilds,
             max_rebuilds,
+            no_cve,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -164,6 +169,9 @@ pub struct UpdaterServiceConfig {
 
     /// Skip updates that would cause more than N rebuilds
     pub max_rebuilds: Option<usize>,
+
+    /// Disable CVE vulnerability checking
+    pub no_cve: bool,
 }
 
 impl UpdaterServiceConfig {
@@ -185,6 +193,7 @@ impl UpdaterServiceConfig {
             concurrency,
             analyze_rebuilds,
             max_rebuilds,
+            no_cve,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -243,6 +252,7 @@ impl UpdaterServiceConfig {
                                     dry_run,
                                     analyze_rebuilds,
                                     max_rebuilds,
+                                    no_cve,
                                 )
                                 .await;
                                 (result, attr_path_clone)

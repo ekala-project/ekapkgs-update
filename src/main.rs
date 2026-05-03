@@ -22,6 +22,7 @@ fn increase_fd_limit() -> anyhow::Result<()> {
 
 mod commands;
 mod config;
+mod cve;
 mod database;
 mod git;
 mod github;

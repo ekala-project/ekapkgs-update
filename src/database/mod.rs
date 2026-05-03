@@ -46,7 +46,19 @@ impl Database {
 
         debug!("Database migrations completed");
 
+        // Cleanup expired CVE cache entries
+        if let Err(e) = crate::cve::cleanup_cache(&pool).await {
+            debug!("Failed to cleanup CVE cache: {}", e);
+        }
+
         Ok(Self { pool })
+    }
+
+    /// Get a reference to the database connection pool
+    ///
+    /// This is used by other modules (like CVE) that need direct database access
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Get an update record for a specific package
