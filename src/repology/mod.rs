@@ -2,12 +2,11 @@ mod api;
 mod cache;
 mod types;
 
-pub use api::RepologyClient;
-pub use types::RepologyInfo;
-
 use anyhow::Result;
+pub use api::RepologyClient;
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
+pub use types::RepologyInfo;
 
 /// Check Repology for the latest version of a package
 ///
@@ -72,11 +71,11 @@ pub async fn check_repology_version(
                     return Ok(Some(info));
                 }
                 // Empty result, try next candidate
-            }
+            },
             Err(e) => {
                 warn!("Failed to fetch Repology data for {}: {}", candidate, e);
                 // Continue to next candidate on error
-            }
+            },
         }
     }
 
@@ -187,9 +186,6 @@ mod tests {
         assert!(result2.is_some());
 
         // Results should be the same
-        assert_eq!(
-            result1.unwrap().project_name,
-            result2.unwrap().project_name
-        );
+        assert_eq!(result1.unwrap().project_name, result2.unwrap().project_name);
     }
 }

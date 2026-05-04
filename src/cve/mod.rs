@@ -3,12 +3,12 @@ mod ecosystem;
 mod osv;
 mod types;
 
-pub use types::{CveAnalysis, Vulnerability};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
 use tracing::{debug, info, warn};
+pub use types::{CveAnalysis, Vulnerability};
 
 use crate::package::PackageMetadata;
 
@@ -53,7 +53,7 @@ pub async fn analyze_cve_changes(
                 metadata.src_url
             );
             return Ok(CveAnalysis::default());
-        }
+        },
     };
 
     // Get package name
@@ -62,7 +62,7 @@ pub async fn analyze_cve_changes(
         None => {
             debug!("No package name available, skipping CVE check");
             return Ok(CveAnalysis::default());
-        }
+        },
     };
 
     info!(
@@ -71,29 +71,19 @@ pub async fn analyze_cve_changes(
     );
 
     // Fetch CVE data for both versions
-    let old_vulns = fetch_vulnerabilities_with_cache(
-        pool,
-        &ecosystem,
-        &package_name,
-        old_version,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        warn!("Failed to fetch CVEs for old version: {}", e);
-        Vec::new()
-    });
+    let old_vulns = fetch_vulnerabilities_with_cache(pool, &ecosystem, &package_name, old_version)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to fetch CVEs for old version: {}", e);
+            Vec::new()
+        });
 
-    let new_vulns = fetch_vulnerabilities_with_cache(
-        pool,
-        &ecosystem,
-        &package_name,
-        new_version,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        warn!("Failed to fetch CVEs for new version: {}", e);
-        Vec::new()
-    });
+    let new_vulns = fetch_vulnerabilities_with_cache(pool, &ecosystem, &package_name, new_version)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to fetch CVEs for new version: {}", e);
+            Vec::new()
+        });
 
     // Categorize vulnerabilities
     let old_ids: HashSet<String> = old_vulns.iter().map(|v| v.id.clone()).collect();
@@ -192,9 +182,9 @@ mod tests {
             "python" => {
                 metadata.src_url =
                     Some("https://files.pythonhosted.org/packages/test.tar.gz".to_string())
-            }
+            },
             "npm" => metadata.npm_deps_hash = Some("sha256-test".to_string()),
-            _ => {}
+            _ => {},
         }
 
         metadata

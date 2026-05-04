@@ -13,13 +13,27 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
         if !diff.added_outputs.is_empty() {
             output.push_str("- **Added outputs:** ");
-            output.push_str(&diff.added_outputs.iter().map(|o| format!("`{}`", o)).collect::<Vec<_>>().join(", "));
+            output.push_str(
+                &diff
+                    .added_outputs
+                    .iter()
+                    .map(|o| format!("`{}`", o))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
             output.push('\n');
         }
 
         if !diff.removed_outputs.is_empty() {
             output.push_str("- **Removed outputs:** ");
-            output.push_str(&diff.removed_outputs.iter().map(|o| format!("`{}`", o)).collect::<Vec<_>>().join(", "));
+            output.push_str(
+                &diff
+                    .removed_outputs
+                    .iter()
+                    .map(|o| format!("`{}`", o))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
             output.push('\n');
         }
 
@@ -72,9 +86,15 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
         if !other_changes.is_empty() {
             let has_warnings = other_changes.iter().any(|c| c.percentage_change >= 20.0);
             let summary = if has_warnings {
-                format!("Closure Size Warnings (≥20% increase, {} outputs)", other_changes.len())
+                format!(
+                    "Closure Size Warnings (≥20% increase, {} outputs)",
+                    other_changes.len()
+                )
             } else {
-                format!("Closure Size Changes (≥20%, {} outputs)", other_changes.len())
+                format!(
+                    "Closure Size Changes (≥20%, {} outputs)",
+                    other_changes.len()
+                )
             };
 
             output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
@@ -86,7 +106,11 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                     "decreased"
                 };
 
-                let prefix = if change.percentage_change >= 20.0 { "⚠️ " } else { "" };
+                let prefix = if change.percentage_change >= 20.0 {
+                    "⚠️ "
+                } else {
+                    ""
+                };
 
                 output.push_str(&format!(
                     "- {}Output `{}` closure {} by **{:.1}%** ({} → {})\n",
@@ -148,7 +172,10 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
         // Show other file changes in collapsible section
         if !other_file_changes.is_empty() {
-            let summary = format!("Significant File Size Changes (>10%, {} files)", other_file_changes.len());
+            let summary = format!(
+                "Significant File Size Changes (>10%, {} files)",
+                other_file_changes.len()
+            );
             output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
 
             for change in &other_file_changes {
@@ -219,7 +246,11 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
             if !changes.added_files.is_empty() {
                 output.push_str("**Added:**\n");
                 for file in &changes.added_files {
-                    let executable = if file.is_executable { ", executable" } else { "" };
+                    let executable = if file.is_executable {
+                        ", executable"
+                    } else {
+                        ""
+                    };
                     output.push_str(&format!(
                         "- `{}` ({}{})\n",
                         file.filename(),
@@ -234,7 +265,11 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
             if !changes.removed_files.is_empty() {
                 output.push_str("**Removed:**\n");
                 for file in &changes.removed_files {
-                    let executable = if file.is_executable { ", executable" } else { "" };
+                    let executable = if file.is_executable {
+                        ", executable"
+                    } else {
+                        ""
+                    };
                     output.push_str(&format!(
                         "- `{}` ({}{})\n",
                         file.filename(),

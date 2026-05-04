@@ -58,7 +58,10 @@ impl Vulnerability {
     pub fn to_markdown(&self) -> String {
         format!(
             "- [{}]({}) - {}: {}",
-            self.id, self.details_url, self.severity.as_str(), self.summary
+            self.id,
+            self.details_url,
+            self.severity.as_str(),
+            self.summary
         )
     }
 }

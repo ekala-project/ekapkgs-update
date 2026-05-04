@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
+use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::database::Database;
 use crate::git::PrConfig;
 
@@ -35,20 +36,8 @@ pub struct RunConfig {
     /// Skip packages marked as unstable
     pub skip_unstable: bool,
 
-    /// Analyze and report rebuild counts for each update
-    pub analyze_rebuilds: bool,
-
-    /// Skip updates that would cause more than N rebuilds
-    pub max_rebuilds: Option<usize>,
-
-    /// Disable CVE vulnerability checking
-    pub no_cve: bool,
-
-    /// Disable Repology cross-distribution version checking
-    pub no_repology: bool,
-
-    /// Whether to include directory diff in PR body
-    pub directory_diff: bool,
+    /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
+    pub pr_enhancements: PrEnhancementsConfig,
 }
 
 impl RunConfig {
@@ -63,11 +52,7 @@ impl RunConfig {
             dry_run,
             concurrent_updates,
             skip_unstable,
-            analyze_rebuilds,
-            max_rebuilds,
-            no_cve,
-            no_repology,
-            directory_diff,
+            pr_enhancements,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -105,13 +90,14 @@ impl RunConfig {
         let file_updater = file.clone();
 
         // Spawn release checker service
+        let skip_repology = pr_enhancements.skip_repology;
         let checker_handle = tokio::spawn(async move {
             super::checker::release_checker_service(
                 file_checker,
                 db_checker,
                 tx,
                 skip_unstable,
-                no_repology,
+                skip_repology,
             )
             .await
         });
@@ -124,10 +110,7 @@ impl RunConfig {
             run_passthru_tests,
             dry_run,
             concurrency,
-            analyze_rebuilds,
-            max_rebuilds,
-            no_cve,
-            directory_diff,
+            pr_enhancements,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -179,17 +162,8 @@ pub struct UpdaterServiceConfig {
     /// Number of concurrent update workers
     pub concurrency: usize,
 
-    /// Analyze and report rebuild counts for each update
-    pub analyze_rebuilds: bool,
-
-    /// Skip updates that would cause more than N rebuilds
-    pub max_rebuilds: Option<usize>,
-
-    /// Disable CVE vulnerability checking
-    pub no_cve: bool,
-
-    /// Whether to include directory diff in PR body
-    pub directory_diff: bool,
+    /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
+    pub pr_enhancements: PrEnhancementsConfig,
 }
 
 impl UpdaterServiceConfig {
@@ -209,10 +183,7 @@ impl UpdaterServiceConfig {
             run_passthru_tests,
             dry_run,
             concurrency,
-            analyze_rebuilds,
-            max_rebuilds,
-            no_cve,
-            directory_diff,
+            pr_enhancements,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -257,6 +228,7 @@ impl UpdaterServiceConfig {
                             let eval_entry_point_clone = Arc::clone(&eval_entry_point); // O(1) clone
                             let pr_config_clone = pr_config.clone();
                             let fork_clone = Arc::clone(&fork); // O(1) clone
+                            let pr_enhancements_clone = pr_enhancements.clone();
                             let attr_path_clone = req.attr_path.clone();
 
                             // Spawn the update task
@@ -269,10 +241,7 @@ impl UpdaterServiceConfig {
                                     &fork_clone, // Arc<str> derefs to &str
                                     run_passthru_tests,
                                     dry_run,
-                                    analyze_rebuilds,
-                                    max_rebuilds,
-                                    no_cve,
-                                    directory_diff,
+                                    &pr_enhancements_clone,
                                 )
                                 .await;
                                 (result, attr_path_clone)

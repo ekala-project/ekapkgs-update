@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::types::{UpdateRequest, UpdateResult};
+use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
@@ -19,10 +19,7 @@ pub(super) async fn perform_update(
     fork: &str,
     run_passthru_tests: bool,
     dry_run: bool,
-    analyze_rebuilds: bool,
-    max_rebuilds: Option<usize>,
-    skip_cve_check: bool,
-    directory_diff: bool,
+    pr_enhancements: &PrEnhancementsConfig,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -72,9 +69,10 @@ pub(super) async fn perform_update(
         upstream: None,             // upstream - not needed in run mode
         fork: "origin".to_string(), // fork - not used since create_pr is false
         run_passthru_tests,
-        src_only: false,     // Update all dependencies (not src-only)
-        format: false,       // No formatting in run mode (worktree cleanup would lose it)
-        directory_diff: false, // Directory diff handled separately in run mode
+        src_only: false, // Update all dependencies (not src-only)
+        format: false,   // No formatting in run mode (worktree cleanup would lose it)
+        // Directory diff is handled separately in run mode using the worktree-aware method.
+        pr_enhancements: PrEnhancementsConfig::default(),
     };
 
     let update_result = update_config
@@ -103,7 +101,7 @@ pub(super) async fn perform_update(
             }
 
             // Analyze rebuild impact if requested
-            let rebuild_analysis = if analyze_rebuilds {
+            let rebuild_analysis = if pr_enhancements.analyze_rebuilds {
                 match crate::nix::rebuild_count::calculate_rebuild_count(
                     eval_entry_point,
                     &worktree_path,
@@ -114,23 +112,22 @@ pub(super) async fn perform_update(
                         info!("{}: {}", attr_path, analysis.summary());
 
                         // Check if rebuild count exceeds threshold
-                        if let Some(threshold) = max_rebuilds {
-                            if analysis.exceeds_threshold(threshold) {
-                                info!(
-                                    "{}: Skipping update - rebuild count {} exceeds threshold {}",
-                                    attr_path, analysis.rebuild_count, threshold
-                                );
+                        if pr_enhancements.should_skip_for_rebuilds(analysis.rebuild_count) {
+                            let threshold = pr_enhancements.max_rebuilds.unwrap_or_default();
+                            info!(
+                                "{}: Skipping update - rebuild count {} exceeds threshold {}",
+                                attr_path, analysis.rebuild_count, threshold
+                            );
 
-                                // Clean up the worktree
-                                if let Err(e) = cleanup_worktree(&worktree_path).await {
-                                    warn!("{}: Failed to clean up worktree: {}", attr_path, e);
-                                }
-
-                                return Ok(UpdateResult::Skipped(format!(
-                                    "Rebuild count {} exceeds threshold {}",
-                                    analysis.rebuild_count, threshold
-                                )));
+                            // Clean up the worktree
+                            if let Err(e) = cleanup_worktree(&worktree_path).await {
+                                warn!("{}: Failed to clean up worktree: {}", attr_path, e);
                             }
+
+                            return Ok(UpdateResult::Skipped(format!(
+                                "Rebuild count {} exceeds threshold {}",
+                                analysis.rebuild_count, threshold
+                            )));
                         }
 
                         Some(analysis)
@@ -169,9 +166,7 @@ pub(super) async fn perform_update(
                     config,
                     fork,
                     rebuild_analysis.as_ref(),
-                    skip_cve_check,
-                    directory_diff,
-                    eval_entry_point,
+                    pr_enhancements,
                 )
                 .await
                 {
@@ -280,7 +275,6 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
 }
 
 /// Create a pull request for a successful update
-#[allow(unused_variables)] // eval_entry_point is used conditionally based on directory_diff
 async fn create_pr_for_update(
     db: &Database,
     worktree_path: &Path,
@@ -290,9 +284,7 @@ async fn create_pr_for_update(
     config: &PrConfig,
     fork: &str,
     rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
-    skip_cve_check: bool,
-    directory_diff: bool,
-    eval_entry_point: &str,
+    pr_enhancements: &PrEnhancementsConfig,
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -321,7 +313,7 @@ async fn create_pr_for_update(
             meta,
             old_version,
             new_version,
-            skip_cve_check,
+            pr_enhancements.skip_cve_check,
         )
         .await
         .ok()
@@ -330,11 +322,11 @@ async fn create_pr_for_update(
     };
 
     // Perform directory diff if requested
-    let diff_markdown = if directory_diff {
-        perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path).await.ok()
-    } else {
-        None
-    };
+    let diff_markdown = pr_enhancements
+        .perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path)
+        .await
+        .ok()
+        .flatten();
 
     // Create PR title and body
     let title = format!(
@@ -442,83 +434,4 @@ async fn create_pr_for_update(
         .await?;
 
     Ok((pr.html_url, pr.number))
-}
-
-/// Perform directory diff in a worktree context
-///
-/// This function:
-/// 1. Builds the new version (current HEAD in worktree)
-/// 2. Checks out the previous commit (HEAD~1)
-/// 3. Builds the old version
-/// 4. Checks back to the new version
-/// 5. Compares the build outputs
-async fn perform_worktree_directory_diff(
-    worktree_path: &Path,
-    eval_entry_point: &str,
-    attr_path: &str,
-) -> anyhow::Result<String> {
-    use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
-    use crate::directory_diff::{compare_build_outputs, format_for_pr_body, DiffConfig};
-    use tokio::process::Command;
-
-    info!("{}: Performing directory diff in worktree", attr_path);
-
-    // Change to worktree directory for all git operations
-    std::env::set_current_dir(worktree_path)?;
-
-    // Step 1: Build new version (current HEAD)
-    debug!("{}: Building new version", attr_path);
-    let new_outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
-        .await
-        .with_context(|| format!("Failed to build new version of {} for directory diff", attr_path))?;
-
-    cleanup_result_symlinks()?;
-
-    // Step 2: Check out previous commit
-    debug!("{}: Checking out previous commit (HEAD~1)", attr_path);
-    let checkout_output = Command::new("git")
-        .args(["checkout", "HEAD~1"])
-        .current_dir(worktree_path)
-        .output()
-        .await?;
-
-    if !checkout_output.status.success() {
-        let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-        anyhow::bail!("Failed to checkout previous commit: {}", stderr);
-    }
-
-    // Step 3: Build old version
-    debug!("{}: Building old version", attr_path);
-    let old_outputs_result = build_and_get_outputs(eval_entry_point, attr_path, None).await;
-
-    cleanup_result_symlinks().ok();
-
-    // Step 4: Check back to new version (return to branch HEAD)
-    debug!("{}: Restoring to current commit", attr_path);
-    let restore_output = Command::new("git")
-        .args(["checkout", "-"])
-        .current_dir(worktree_path)
-        .output()
-        .await?;
-
-    if !restore_output.status.success() {
-        let stderr = String::from_utf8_lossy(&restore_output.stderr);
-        anyhow::bail!("Failed to restore to current commit: {}", stderr);
-    }
-
-    // Check if old build succeeded
-    let old_outputs = old_outputs_result
-        .with_context(|| format!("Failed to build old version of {} for directory diff", attr_path))?;
-
-    // Step 5: Compare outputs
-    debug!("{}: Comparing build outputs", attr_path);
-    let config = DiffConfig::default();
-    let diff = compare_build_outputs(&old_outputs, &new_outputs, &config)
-        .with_context(|| format!("Failed to compare directory outputs for {}", attr_path))?;
-
-    // Step 6: Format as markdown
-    let markdown = format_for_pr_body(&diff);
-
-    info!("{}: Directory diff completed successfully", attr_path);
-    Ok(markdown)
 }

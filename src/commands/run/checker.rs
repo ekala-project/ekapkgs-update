@@ -169,20 +169,21 @@ async fn check_for_update(
                             if let Some(repology_version) = repology_info.get_newest_version() {
                                 if repology_version != *current_version {
                                     info!(
-                                        "{}: Upstream check failed, but Repology suggests update to {}",
+                                        "{}: Upstream check failed, but Repology suggests update \
+                                         to {}",
                                         attr_path, repology_version
                                     );
                                     // Note: We still don't update since we can't verify the release
                                     // This is just informational
                                 }
                             }
-                        }
+                        },
                         Ok(None) => {
                             debug!("{}: Package not found in Repology (fallback)", attr_path);
-                        }
+                        },
                         Err(rep_err) => {
                             debug!("{}: Repology fallback also failed: {}", attr_path, rep_err);
-                        }
+                        },
                     }
                 }
             }
@@ -204,13 +205,8 @@ async fn check_for_update(
     // Cross-check with Repology for validation (if enabled)
     if !skip_repology {
         if let Some(pname) = metadata.pname.as_ref() {
-            match crate::repology::check_repology_version(
-                db.pool(),
-                repology_client,
-                pname,
-                false,
-            )
-            .await
+            match crate::repology::check_repology_version(db.pool(), repology_client, pname, false)
+                .await
             {
                 Ok(Some(repology_info)) => {
                     if let Some(repology_newest) = repology_info.get_newest_version() {
@@ -226,13 +222,13 @@ async fn check_for_update(
                             );
                         }
                     }
-                }
+                },
                 Ok(None) => {
                     debug!("{}: Package not found in Repology", attr_path);
-                }
+                },
                 Err(e) => {
                     debug!("{}: Repology check failed: {}", attr_path, e);
-                }
+                },
             }
         }
     }
