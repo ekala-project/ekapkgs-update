@@ -1,0 +1,22 @@
+# Clippy lint configuration. See `refinements.md` §3.4.
+#
+# Lint *selection* lives in `Cargo.toml [lints.clippy]`; this file tunes
+# thresholds and behavior for individual lints.
+
+# Match the project's MSRV. Bump together with rust-toolchain when raising it.
+msrv = "1.83.0"
+
+# Allow longer literals than the default (5) -- this codebase has many
+# version strings, hashes, and SQL fragments that are deliberately long.
+literal-representation-threshold = 8
+
+# Allow longer enum variant name overlap before warning.
+enum-variant-name-threshold = 4
+
+# Allow up to 8 args before too_many_arguments fires (we already `allow` that
+# lint in Cargo.toml, but configure for future tightening).
+too-many-arguments-threshold = 8
+
+# Allow large enum variants up to this size before warning. The default is
+# 200 bytes; nix-eval-jobs JSON variants legitimately exceed that.
+enum-variant-size-threshold = 400

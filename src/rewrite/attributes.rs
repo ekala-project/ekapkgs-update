@@ -64,7 +64,7 @@ pub fn find_and_update_attr(
     }
 
     // Replace the attribute value
-    let result = re.replace_all(content, |caps: &regex::Captures| {
+    let result = re.replace_all(content, |caps: &regex::Captures<'_>| {
         format!("{}{}{}", &caps[1], new_value, &caps[caps.len() - 1])
     });
 

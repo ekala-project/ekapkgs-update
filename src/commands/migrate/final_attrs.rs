@@ -6,7 +6,7 @@ pub fn convert_to_final_attrs_pattern(content: &str) -> anyhow::Result<String> {
     // or: stdenv.mkDerivation {
     let pattern = Regex::new(r"(stdenv\.mkDerivation\s+)(rec\s+)?(\{)")?;
 
-    let result = pattern.replace(content, |caps: &regex::Captures| {
+    let result = pattern.replace(content, |caps: &regex::Captures<'_>| {
         let prefix = &caps[1];
         let has_rec = caps.get(2).is_some();
 
