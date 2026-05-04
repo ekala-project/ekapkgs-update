@@ -28,6 +28,25 @@ pub fn compare_build_outputs(
         .map(|(name, path)| (name.as_str(), path))
         .collect();
 
+    // Detect added and removed outputs
+    let mut added_outputs = Vec::new();
+    let mut removed_outputs = Vec::new();
+
+    for name in new_map.keys() {
+        if !old_map.contains_key(name) {
+            added_outputs.push(name.to_string());
+        }
+    }
+
+    for name in old_map.keys() {
+        if !new_map.contains_key(name) {
+            removed_outputs.push(name.to_string());
+        }
+    }
+
+    added_outputs.sort();
+    removed_outputs.sort();
+
     // Get all unique output names
     let mut all_output_names: Vec<&str> = old_map.keys().copied().collect();
     for name in new_map.keys() {
@@ -81,6 +100,8 @@ pub fn compare_build_outputs(
 
     Ok(DirectoryDiff {
         outputs: output_diffs,
+        added_outputs,
+        removed_outputs,
         total_added,
         total_removed,
         total_size_change,

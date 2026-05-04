@@ -6,6 +6,10 @@ use std::path::PathBuf;
 pub struct DirectoryDiff {
     /// Per-output diffs (e.g., "out", "dev", "lib")
     pub outputs: Vec<OutputDiff>,
+    /// Outputs that were added in the new version
+    pub added_outputs: Vec<String>,
+    /// Outputs that were removed in the new version
+    pub removed_outputs: Vec<String>,
     /// Total files added across all outputs
     pub total_added: usize,
     /// Total files removed across all outputs
