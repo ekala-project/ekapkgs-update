@@ -3,12 +3,9 @@ use chrono::{DateTime, Utc};
 /// Represents a package update record in the database
 #[derive(Debug, Clone)]
 pub struct UpdateRecord {
-    pub _attr_path: String,
     pub last_attempted: Option<DateTime<Utc>>,
     pub next_attempt: Option<DateTime<Utc>>,
-    pub _current_version: Option<String>,
     pub proposed_version: Option<String>,
-    pub _latest_upstream_version: Option<String>,
 }
 
 /// Represents a failed update log entry in the database
@@ -32,10 +29,3 @@ impl UpdateLog {
     }
 }
 
-/// Database statistics
-#[derive(Debug)]
-pub struct _DatabaseStatistics {
-    pub total_packages: i64,
-    pub packages_with_proposed_updates: i64,
-    pub packages_in_backoff: i64,
-}

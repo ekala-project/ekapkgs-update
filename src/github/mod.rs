@@ -8,7 +8,6 @@ use tracing::debug;
 #[derive(Debug, Deserialize)]
 pub struct GithubRelease {
     pub tag_name: String,
-    pub _name: Option<String>,
     pub prerelease: bool,
 }
 

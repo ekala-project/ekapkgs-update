@@ -8,7 +8,6 @@ use tracing::debug;
 #[derive(Debug, Deserialize)]
 pub struct GitlabRelease {
     pub tag_name: String,
-    pub _name: Option<String>,
     #[serde(default)]
     pub upcoming_release: bool,
 }
