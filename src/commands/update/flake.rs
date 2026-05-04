@@ -221,11 +221,11 @@ pub async fn update_flake_package(
             new_version: &best_release.tag_name,
             commit: update_config.commit,
             create_pr: update_config.create_pr,
-            upstream: update_config.upstream,
+            upstream: update_config.upstream.clone(),
             fork: &update_config.fork,
             tests_passed: update_config.run_passthru_tests,
             eval_entry_point: None, // Flake updates don't have traditional eval entry points
-            directory_diff: update_config.directory_diff,
+            pr_enhancements: &update_config.pr_enhancements,
         }
         .execute()
         .await?;

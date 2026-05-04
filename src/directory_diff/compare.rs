@@ -1,10 +1,12 @@
-use super::types::*;
-use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use anyhow::{Context, Result};
 use walkdir::WalkDir;
+
+use super::types::*;
 
 /// Compare two sets of build outputs
 pub fn compare_build_outputs(
@@ -80,7 +82,11 @@ pub fn compare_build_outputs(
             .values()
             .map(|d| d.total_added())
             .sum::<usize>();
-        total_added += output_diff.summary_dirs.iter().map(|s| s.files_added).sum::<usize>();
+        total_added += output_diff
+            .summary_dirs
+            .iter()
+            .map(|s| s.files_added)
+            .sum::<usize>();
 
         total_removed += output_diff
             .directories
@@ -98,14 +104,21 @@ pub fn compare_build_outputs(
             .values()
             .map(|d| d.size_change())
             .sum::<i64>();
-        total_size_change += output_diff.summary_dirs.iter().map(|s| s.size_change).sum::<i64>();
+        total_size_change += output_diff
+            .summary_dirs
+            .iter()
+            .map(|s| s.size_change)
+            .sum::<i64>();
 
         output_diffs.push(output_diff);
     }
 
     // Sort size changes by absolute percentage change (largest first)
     significant_size_changes.sort_by(|a, b| {
-        b.percentage_change.abs().partial_cmp(&a.percentage_change.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        b.percentage_change
+            .abs()
+            .partial_cmp(&a.percentage_change.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Calculate closure size changes
@@ -271,7 +284,8 @@ fn collect_files(root: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
     let mut files = HashMap::new();
 
     for entry in WalkDir::new(root).follow_links(true) {
-        let entry = entry.with_context(|| format!("Failed to walk directory {}", root.display()))?;
+        let entry =
+            entry.with_context(|| format!("Failed to walk directory {}", root.display()))?;
         let path = entry.path();
 
         // Skip directories, only process files
@@ -282,7 +296,13 @@ fn collect_files(root: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
         let metadata = entry.metadata()?;
         let relative_path = path
             .strip_prefix(root)
-            .with_context(|| format!("Failed to strip prefix {} from {}", root.display(), path.display()))?
+            .with_context(|| {
+                format!(
+                    "Failed to strip prefix {} from {}",
+                    root.display(),
+                    path.display()
+                )
+            })?
             .to_path_buf();
 
         let is_executable = metadata.permissions().mode() & 0o111 != 0;
@@ -315,7 +335,10 @@ fn get_summary_dir(path: &Path) -> PathBuf {
     }
 
     // Fallback: return the top-level directory
-    components.first().map(|c| PathBuf::from(c.as_os_str())).unwrap_or_else(|| PathBuf::from(""))
+    components
+        .first()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .unwrap_or_else(|| PathBuf::from(""))
 }
 
 /// Calculate closure size for a store path using nix path-info
@@ -363,7 +386,9 @@ fn calculate_closure_size_changes(
     for (output_name, new_path) in new_outputs {
         if let Some(old_path) = old_map.get(output_name.as_str()) {
             // Get closure sizes
-            if let (Some(old_size), Some(new_size)) = (get_closure_size(old_path), get_closure_size(new_path)) {
+            if let (Some(old_size), Some(new_size)) =
+                (get_closure_size(old_path), get_closure_size(new_path))
+            {
                 if old_size > 0 {
                     let size_diff = new_size as i64 - old_size as i64;
                     let percentage_change = (size_diff as f64 / old_size as f64) * 100.0;
@@ -384,7 +409,10 @@ fn calculate_closure_size_changes(
 
     // Sort by absolute percentage change (largest first)
     changes.sort_by(|a, b| {
-        b.percentage_change.abs().partial_cmp(&a.percentage_change.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        b.percentage_change
+            .abs()
+            .partial_cmp(&a.percentage_change.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     changes

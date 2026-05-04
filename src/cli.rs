@@ -171,6 +171,7 @@ impl Commands {
                 no_repology,
                 no_directory_diff,
             } => {
+                use commands::pr_enhancements::PrEnhancementsConfig;
                 use commands::run::RunConfig;
 
                 let config = RunConfig {
@@ -182,11 +183,13 @@ impl Commands {
                     dry_run,
                     concurrent_updates,
                     skip_unstable,
-                    analyze_rebuilds,
-                    max_rebuilds,
-                    no_cve,
-                    no_repology,
-                    directory_diff: !no_directory_diff,
+                    pr_enhancements: PrEnhancementsConfig {
+                        directory_diff: !no_directory_diff,
+                        skip_cve_check: no_cve,
+                        skip_repology: no_repology,
+                        analyze_rebuilds,
+                        max_rebuilds,
+                    },
                 };
 
                 config.execute().await
@@ -213,6 +216,7 @@ impl Commands {
                 system,
                 no_directory_diff,
             } => {
+                use commands::pr_enhancements::PrEnhancementsConfig;
                 use commands::update::{
                     FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig,
                 };
@@ -233,7 +237,10 @@ impl Commands {
                         run_passthru_tests,
                         src_only,
                         format,
-                        directory_diff: !no_directory_diff,
+                        pr_enhancements: PrEnhancementsConfig {
+                            directory_diff: !no_directory_diff,
+                            ..PrEnhancementsConfig::default()
+                        },
                     },
                     version_config: VersionConfig {
                         strategy: SemverStrategy::from_str(&semver)?,

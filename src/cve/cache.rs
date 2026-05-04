@@ -65,11 +65,11 @@ pub async fn get_cached_cve_data(
                 vulnerabilities.len()
             );
             Ok(Some(vulnerabilities))
-        }
+        },
         None => {
             debug!("CVE cache miss for {}", key);
             Ok(None)
-        }
+        },
     }
 }
 

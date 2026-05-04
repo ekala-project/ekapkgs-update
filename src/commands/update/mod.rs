@@ -12,7 +12,10 @@ mod variants;
 use std::path::Path;
 
 use anyhow::Context;
-pub use build::{build_and_get_outputs, build_flake_package, build_nix_expr, cleanup_result_symlinks, detect_reversed_patch};
+pub use build::{
+    build_and_get_outputs, build_flake_package, build_nix_expr, cleanup_result_symlinks,
+    detect_reversed_patch,
+};
 pub use config::{FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig};
 pub use file_update::{
     update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
@@ -176,11 +179,11 @@ pub async fn update_from_file_path(
         new_version: &new_version,
         commit: update_config.commit,
         create_pr: update_config.create_pr,
-        upstream: update_config.upstream,
+        upstream: update_config.upstream.clone(),
         fork: &update_config.fork,
         tests_passed,
         eval_entry_point: Some(&eval_entry_point),
-        directory_diff: update_config.directory_diff,
+        pr_enhancements: &update_config.pr_enhancements,
     }
     .execute()
     .await?;

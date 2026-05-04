@@ -148,7 +148,8 @@ mod tests {
     #[test]
     fn test_detect_pypi_from_url() {
         let mut metadata = create_test_metadata();
-        metadata.src_url = Some("https://files.pythonhosted.org/packages/test/test-1.0.0.tar.gz".to_string());
+        metadata.src_url =
+            Some("https://files.pythonhosted.org/packages/test/test-1.0.0.tar.gz".to_string());
 
         assert_eq!(detect_ecosystem(&metadata), Some("PyPI".to_string()));
     }

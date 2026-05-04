@@ -52,11 +52,11 @@ pub async fn get_cached_repology_data(
 
             debug!("Repology cache hit for {}", project_name);
             Ok(Some(info))
-        }
+        },
         None => {
             debug!("Repology cache miss for {}", project_name);
             Ok(None)
-        }
+        },
     }
 }
 

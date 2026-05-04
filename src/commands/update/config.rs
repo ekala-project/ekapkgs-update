@@ -5,6 +5,7 @@
 
 use tracing::{debug, info, warn};
 
+use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::nix::{
     eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point,
 };
@@ -35,8 +36,8 @@ pub struct UpdateConfig {
     /// Whether to format the file with nixfmt after update
     pub format: bool,
 
-    /// Whether to include directory diff in PR body
-    pub directory_diff: bool,
+    /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
+    pub pr_enhancements: PrEnhancementsConfig,
 }
 
 impl Default for UpdateConfig {
@@ -49,7 +50,10 @@ impl Default for UpdateConfig {
             run_passthru_tests: false,
             src_only: false,
             format: false,
-            directory_diff: true,
+            pr_enhancements: PrEnhancementsConfig {
+                directory_diff: true,
+                ..PrEnhancementsConfig::default()
+            },
         }
     }
 }

@@ -123,10 +123,7 @@ impl RepologyInfo {
     /// Get all distributions that have this package
     #[allow(dead_code)]
     pub fn get_distributions(&self) -> Vec<String> {
-        self.packages
-            .iter()
-            .map(|pkg| pkg.repo.clone())
-            .collect()
+        self.packages.iter().map(|pkg| pkg.repo.clone()).collect()
     }
 
     /// Check if a specific version is considered newest by any distribution
