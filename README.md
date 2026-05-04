@@ -67,7 +67,7 @@ ekapkgs-update automatically checks for known security vulnerabilities when runn
 
 **Disabling CVE checks:**
 ```bash
-$ ekapkgs-update run --no-cve
+$ ekapkgs-update run --skip-cve
 ```
 
 ### Repology Integration
@@ -94,7 +94,7 @@ DEBUG firefox: Repology confirms 125.0.1 is newest across distributions
 
 **Disabling Repology checks:**
 ```bash
-$ ekapkgs-update run --no-repology
+$ ekapkgs-update run --skip-repology
 ```
 
 # Roadmap
@@ -113,12 +113,12 @@ Daemon and web features
   - Automatically checks for security vulnerabilities using OSV.dev
   - Displays CVEs fixed, introduced, or present in PR descriptions
   - 24-hour caching to minimize API calls
-  - Use `--no-cve` flag to disable if needed
+  - Use `--skip-cve` flag to disable if needed
 - [x] Repology Integration
   - Cross-distribution version validation via Repology.org
   - Helps confirm version numbers are stable and widely adopted
   - 72-hour caching with 1 req/sec rate limiting
-  - Use `--no-repology` flag to disable if needed
+  - Use `--skip-repology` flag to disable if needed
 - [ ] Batch evaluation
 - [ ] Website for exploring failing updates
 
