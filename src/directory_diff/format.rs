@@ -26,6 +26,153 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
         output.push('\n');
     }
 
+    // Closure size changes (≥20%) - show this prominently as it affects runtime dependencies
+    if !diff.closure_size_changes.is_empty() {
+        // Separate critical from non-critical changes
+        let mut critical_changes = Vec::new();
+        let mut other_changes = Vec::new();
+
+        const TEN_MB: u64 = 10 * 1024 * 1024;
+
+        for change in &diff.closure_size_changes {
+            // Critical if >50% change AND the closure size itself is >10MB
+            let is_large = change.new_closure_size > TEN_MB || change.old_closure_size > TEN_MB;
+            if change.percentage_change.abs() > 50.0 && is_large {
+                critical_changes.push(change);
+            } else {
+                other_changes.push(change);
+            }
+        }
+
+        // Show critical changes without collapsing
+        if !critical_changes.is_empty() {
+            output.push_str("⚠️ **Critical Closure Size Changes (>50% and >10MB):**\n\n");
+
+            for change in &critical_changes {
+                let direction = if change.percentage_change > 0.0 {
+                    "increased"
+                } else {
+                    "decreased"
+                };
+
+                output.push_str(&format!(
+                    "- ⚠️ Output `{}` closure {} by **{:.1}%** ({} → {})\n",
+                    change.output_name,
+                    direction,
+                    change.percentage_change.abs(),
+                    format_size(change.old_closure_size),
+                    format_size(change.new_closure_size)
+                ));
+            }
+
+            output.push('\n');
+        }
+
+        // Show other changes in collapsible section
+        if !other_changes.is_empty() {
+            let has_warnings = other_changes.iter().any(|c| c.percentage_change >= 20.0);
+            let summary = if has_warnings {
+                format!("Closure Size Warnings (≥20% increase, {} outputs)", other_changes.len())
+            } else {
+                format!("Closure Size Changes (≥20%, {} outputs)", other_changes.len())
+            };
+
+            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+
+            for change in &other_changes {
+                let direction = if change.percentage_change > 0.0 {
+                    "increased"
+                } else {
+                    "decreased"
+                };
+
+                let prefix = if change.percentage_change >= 20.0 { "⚠️ " } else { "" };
+
+                output.push_str(&format!(
+                    "- {}Output `{}` closure {} by **{:.1}%** ({} → {})\n",
+                    prefix,
+                    change.output_name,
+                    direction,
+                    change.percentage_change.abs(),
+                    format_size(change.old_closure_size),
+                    format_size(change.new_closure_size)
+                ));
+            }
+
+            output.push_str("\n</details>\n\n");
+        }
+    }
+
+    // Significant size changes (>10%)
+    if !diff.significant_size_changes.is_empty() {
+        // Separate critical from non-critical file changes
+        let mut critical_file_changes = Vec::new();
+        let mut other_file_changes = Vec::new();
+
+        const TEN_MB: u64 = 10 * 1024 * 1024;
+
+        for change in &diff.significant_size_changes {
+            // Critical if >50% change AND the file size itself is >10MB
+            let is_large = change.new_size > TEN_MB || change.old_size > TEN_MB;
+            if change.percentage_change.abs() > 50.0 && is_large {
+                critical_file_changes.push(change);
+            } else {
+                other_file_changes.push(change);
+            }
+        }
+
+        // Show critical file changes without collapsing
+        if !critical_file_changes.is_empty() {
+            output.push_str("⚠️ **Critical File Size Changes (>50% and >10MB):**\n\n");
+
+            for change in &critical_file_changes {
+                let direction = if change.percentage_change > 0.0 {
+                    "grew"
+                } else {
+                    "shrank"
+                };
+
+                output.push_str(&format!(
+                    "- ⚠️ `{}` in output `{}` {} by **{:.1}%** ({} → {})\n",
+                    change.file_path.display(),
+                    change.output_name,
+                    direction,
+                    change.percentage_change.abs(),
+                    format_size(change.old_size),
+                    format_size(change.new_size)
+                ));
+            }
+
+            output.push('\n');
+        }
+
+        // Show other file changes in collapsible section
+        if !other_file_changes.is_empty() {
+            let summary = format!("Significant File Size Changes (>10%, {} files)", other_file_changes.len());
+            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+
+            for change in &other_file_changes {
+                let direction = if change.percentage_change > 0.0 {
+                    "grew"
+                } else {
+                    "shrank"
+                };
+
+                output.push_str(&format!(
+                    "- `{}` in output `{}` {} by **{:.1}%** ({} → {})\n",
+                    change.file_path.display(),
+                    change.output_name,
+                    direction,
+                    change.percentage_change.abs(),
+                    format_size(change.old_size),
+                    format_size(change.new_size)
+                ));
+            }
+
+            output.push_str("\n</details>\n\n");
+        }
+    }
+
     // Overall summary
     output.push_str("**Summary:**\n");
     output.push_str(&format!("- Files added: {}\n", diff.total_added));
