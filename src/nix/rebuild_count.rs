@@ -40,11 +40,6 @@ impl RebuildAnalysis {
         }
     }
 
-    /// Check if rebuild count exceeds a threshold
-    pub fn exceeds_threshold(&self, threshold: usize) -> bool {
-        self.rebuild_count > threshold
-    }
-
     /// Get a summary string for logging or PR descriptions
     pub fn summary(&self) -> String {
         format!(
@@ -53,24 +48,6 @@ impl RebuildAnalysis {
             self.rebuild_percentage(),
             self.total_packages
         )
-    }
-
-    /// Export as JSON string
-    pub fn to_json(&self) -> anyhow::Result<String> {
-        serde_json::to_string_pretty(self).map_err(Into::into)
-    }
-
-    /// Export to JSON file
-    pub async fn to_json_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
-        let json = self.to_json()?;
-        tokio::fs::write(path, json).await?;
-        Ok(())
-    }
-
-    /// Load from JSON file
-    pub async fn from_json_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        let contents = tokio::fs::read_to_string(path).await?;
-        serde_json::from_str(&contents).map_err(Into::into)
     }
 }
 
@@ -225,86 +202,6 @@ async fn get_current_commit() -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Quick estimation of rebuild impact using reverse dependency graph
-///
-/// This provides a lower-bound estimate much faster than full evaluation,
-/// useful for quick checks before committing to a full update.
-///
-/// # Arguments
-/// * `eval_file` - Path to the Nix file to evaluate
-/// * `target_attr` - The attribute that would be updated
-///
-/// # Returns
-/// Estimated minimum number of rebuilds
-pub async fn estimate_rebuild_count(eval_file: &str, target_attr: &str) -> anyhow::Result<usize> {
-    info!("Estimating rebuild count for {} (fast mode)", target_attr);
-
-    // Get current evaluation
-    let current_commit = get_current_commit().await?;
-    let eval_data = CachedEvaluation::load_or_create(&current_commit, eval_file).await?;
-
-    // Build reverse dependency graph
-    let reverse_deps = build_reverse_dependency_graph(&eval_data).await?;
-
-    // Find target package's drv_path
-    let target_drv = match eval_data.get(target_attr) {
-        Some(info) => &info.drv_path,
-        None => {
-            anyhow::bail!("Target attribute {} not found in evaluation", target_attr);
-        },
-    };
-
-    // Traverse reverse dependencies
-    let affected = find_all_reverse_deps(target_drv, &reverse_deps);
-
-    info!(
-        "Estimated rebuild count for {}: ≥ {} packages (lower bound)",
-        target_attr,
-        affected.len()
-    );
-
-    Ok(affected.len())
-}
-
-/// Build a reverse dependency graph from evaluation data
-///
-/// Note: This only captures direct drv-to-drv dependencies and will undercount
-/// actual rebuilds. Use for estimation only.
-async fn build_reverse_dependency_graph(
-    _eval_data: &HashMap<String, DrvInfo>,
-) -> anyhow::Result<HashMap<String, Vec<String>>> {
-    // This would require input_drvs information from the full evaluation
-    // For now, return an empty graph as a placeholder
-    // TODO: Store input_drvs in DrvInfo for proper graph construction
-    warn!("Reverse dependency graph not yet implemented - returning empty graph");
-    Ok(HashMap::new())
-}
-
-/// Find all packages that transitively depend on a target
-fn find_all_reverse_deps(
-    target_drv: &str,
-    reverse_deps: &HashMap<String, Vec<String>>,
-) -> Vec<String> {
-    let mut affected = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut queue = vec![target_drv.to_string()];
-
-    while let Some(drv) = queue.pop() {
-        if !visited.insert(drv.clone()) {
-            continue;
-        }
-
-        if let Some(dependents) = reverse_deps.get(&drv) {
-            for dependent in dependents {
-                affected.push(dependent.clone());
-                queue.push(dependent.clone());
-            }
-        }
-    }
-
-    affected
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,20 +217,6 @@ mod tests {
         };
 
         assert_eq!(analysis.rebuild_percentage(), 25.0);
-    }
-
-    #[test]
-    fn test_rebuild_analysis_exceeds_threshold() {
-        let analysis = RebuildAnalysis {
-            total_packages: 100,
-            rebuild_count: 150,
-            rebuilt_packages: vec![],
-            new_packages: vec![],
-            removed_packages: vec![],
-        };
-
-        assert!(analysis.exceeds_threshold(100));
-        assert!(!analysis.exceeds_threshold(200));
     }
 
     #[test]

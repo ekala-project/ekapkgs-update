@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};
-pub use types::{_DatabaseStatistics, UpdateLog, UpdateRecord};
+pub use types::{UpdateLog, UpdateRecord};
 
 /// Database connection wrapper for tracking package updates
 #[derive(Clone)]
@@ -86,16 +86,13 @@ impl Database {
                 let next_attempt: Option<String> = row.try_get("next_attempt")?;
 
                 Ok(Some(UpdateRecord {
-                    _attr_path: row.try_get("attr_path")?,
                     last_attempted: last_attempted
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                         .map(|dt| dt.with_timezone(&Utc)),
                     next_attempt: next_attempt
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                         .map(|dt| dt.with_timezone(&Utc)),
-                    _current_version: row.try_get("current_version")?,
                     proposed_version: row.try_get("proposed_version")?,
-                    _latest_upstream_version: row.try_get("latest_upstream_version")?,
                 }))
             },
             None => Ok(None),
@@ -207,6 +204,10 @@ impl Database {
 
     /// Record a successful update
     /// Resets backoff to 2 days
+    ///
+    /// Convenience wrapper around [`Self::record_successful_update_with_rebuild_count`]
+    /// for callers that do not have a rebuild-impact figure to record.
+    #[allow(dead_code)] // public API; retained for callers that don't need rebuild count
     pub async fn record_successful_update(
         &self,
         attr_path: &str,
@@ -295,71 +296,6 @@ impl Database {
         Ok(())
     }
 
-    /// Record a proposed update (update was made but not yet merged)
-    pub async fn _record_proposed_update(
-        &self,
-        attr_path: &str,
-        current_version: &str,
-        proposed_version: &str,
-        latest_upstream_version: &str,
-    ) -> Result<()> {
-        let now = Utc::now();
-        let next_attempt = now + Duration::days(2);
-
-        debug!(
-            "{}: Recording proposed update from {} to {}",
-            attr_path, current_version, proposed_version
-        );
-
-        sqlx::query(
-            r#"
-            INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
-                                proposed_version, latest_upstream_version)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(attr_path) DO UPDATE SET
-                last_attempted = excluded.last_attempted,
-                next_attempt = excluded.next_attempt,
-                current_version = excluded.current_version,
-                proposed_version = excluded.proposed_version,
-                latest_upstream_version = excluded.latest_upstream_version
-            "#,
-        )
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(next_attempt.to_rfc3339())
-        .bind(current_version)
-        .bind(proposed_version)
-        .bind(latest_upstream_version)
-        .execute(&self.pool)
-        .await
-        .context("Failed to record proposed update")?;
-
-        Ok(())
-    }
-
-    /// Get statistics about tracked packages
-    pub async fn _get_statistics(&self) -> Result<_DatabaseStatistics> {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM updates")
-            .fetch_one(&self.pool)
-            .await?;
-
-        let with_proposed: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM updates WHERE proposed_version IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
-
-        let in_backoff: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM updates WHERE next_attempt > datetime('now')")
-                .fetch_one(&self.pool)
-                .await?;
-
-        Ok(_DatabaseStatistics {
-            total_packages: total,
-            packages_with_proposed_updates: with_proposed,
-            packages_in_backoff: in_backoff,
-        })
-    }
-
     /// Record a failed update attempt with error log
     pub async fn record_failed_update(
         &self,
@@ -433,27 +369,6 @@ impl Database {
         Ok(log)
     }
 
-    /// Get the most recent failed log for an attr_path
-    pub async fn _get_latest_failed_log_by_attr(
-        &self,
-        attr_path: &str,
-    ) -> Result<Option<UpdateLog>> {
-        let log = sqlx::query_as::<_, UpdateLog>(
-            r#"
-            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
-            FROM update_logs
-            WHERE attr_path = ?
-            ORDER BY timestamp DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(attr_path)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(log)
-    }
-
     /// Get all failed logs for an attr_path, ordered by most recent
     pub async fn get_all_failed_logs_by_attr(&self, attr_path: &str) -> Result<Vec<UpdateLog>> {
         let logs = sqlx::query_as::<_, UpdateLog>(
@@ -472,6 +387,7 @@ impl Database {
     }
 
     /// Get rebuild count for a specific package (most recent update)
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_rebuild_count(&self, attr_path: &str) -> Result<Option<i64>> {
         let count: Option<i64> = sqlx::query_scalar(
             r#"
@@ -492,6 +408,7 @@ impl Database {
     ///
     /// Returns packages sorted by rebuild count (descending), including only
     /// those with non-null rebuild counts.
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_high_impact_packages(&self, limit: i64) -> Result<Vec<(String, i64)>> {
         let results: Vec<(String, i64)> = sqlx::query_as(
             r#"
@@ -510,6 +427,7 @@ impl Database {
     }
 
     /// Get average rebuild count across all packages
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_average_rebuild_count(&self) -> Result<Option<f64>> {
         let avg: Option<f64> = sqlx::query_scalar(
             r#"
@@ -532,6 +450,7 @@ impl Database {
     /// - 11-50 rebuilds
     /// - 51-100 rebuilds
     /// - 101+ rebuilds
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_rebuild_distribution(&self) -> Result<Vec<(String, i64)>> {
         let results: Vec<(String, i64)> = sqlx::query_as(
             r#"
@@ -562,6 +481,7 @@ impl Database {
     }
 
     /// Get packages with rebuild counts in a specific range
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_packages_by_rebuild_range(
         &self,
         min: i64,
@@ -586,6 +506,7 @@ impl Database {
     }
 
     /// Get total number of packages with rebuild count data
+    #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_packages_with_rebuild_data_count(&self) -> Result<i64> {
         let count: i64 = sqlx::query_scalar(
             r#"

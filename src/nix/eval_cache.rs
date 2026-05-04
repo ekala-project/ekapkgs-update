@@ -143,52 +143,6 @@ impl CachedEvaluation {
             .join(format!("{}-{}.json", commit, file_hash)))
     }
 
-    /// Clean up old cache files (keep only the last N commits)
-    pub async fn cleanup_old_caches(keep_count: usize) -> anyhow::Result<()> {
-        let cache_dir = directories::ProjectDirs::from("", "", "ekapkgs-update")
-            .ok_or_else(|| anyhow::anyhow!("Failed to determine cache directory"))?
-            .cache_dir()
-            .to_path_buf()
-            .join("eval-cache");
-
-        if !cache_dir.exists() {
-            return Ok(());
-        }
-
-        // Read all cache files
-        let mut entries: Vec<_> = std::fs::read_dir(&cache_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "json"))
-            .collect();
-
-        if entries.len() <= keep_count {
-            return Ok(());
-        }
-
-        // Sort by modification time (newest first)
-        entries.sort_by_key(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        entries.reverse();
-
-        // Remove old files
-        for entry in entries.iter().skip(keep_count) {
-            let path = entry.path();
-            debug!("Removing old cache file: {:?}", path);
-            fs::remove_file(&path).await?;
-        }
-
-        info!(
-            "Cleaned up {} old cache files, keeping {}",
-            entries.len() - keep_count,
-            keep_count
-        );
-
-        Ok(())
-    }
 }
 
 /// Extract the hash portion from a derivation path
