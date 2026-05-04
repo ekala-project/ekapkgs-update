@@ -7,6 +7,25 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
     // Header
     output.push_str("## Directory Diff\n\n");
 
+    // Output changes (added/removed outputs)
+    if !diff.added_outputs.is_empty() || !diff.removed_outputs.is_empty() {
+        output.push_str("**Output Changes:**\n");
+
+        if !diff.added_outputs.is_empty() {
+            output.push_str("- **Added outputs:** ");
+            output.push_str(&diff.added_outputs.iter().map(|o| format!("`{}`", o)).collect::<Vec<_>>().join(", "));
+            output.push('\n');
+        }
+
+        if !diff.removed_outputs.is_empty() {
+            output.push_str("- **Removed outputs:** ");
+            output.push_str(&diff.removed_outputs.iter().map(|o| format!("`{}`", o)).collect::<Vec<_>>().join(", "));
+            output.push('\n');
+        }
+
+        output.push('\n');
+    }
+
     // Overall summary
     output.push_str("**Summary:**\n");
     output.push_str(&format!("- Files added: {}\n", diff.total_added));
