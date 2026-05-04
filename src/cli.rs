@@ -48,15 +48,15 @@ pub enum Commands {
         /// Skip updates that would cause more than N rebuilds
         #[arg(long)]
         max_rebuilds: Option<usize>,
-        /// Disable CVE vulnerability checking
+        /// Skip CVE vulnerability checking
         #[arg(long)]
-        no_cve: bool,
-        /// Disable Repology cross-distribution version checking
+        skip_cve: bool,
+        /// Skip Repology cross-distribution version checking
         #[arg(long)]
-        no_repology: bool,
-        /// Disable directory diff comparison in PR body
+        skip_repology: bool,
+        /// Skip directory diff comparison in PR body
         #[arg(long)]
-        no_directory_diff: bool,
+        skip_directory_diff: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -121,9 +121,9 @@ pub enum Commands {
         /// System to use for evaluation (e.g., 'x86_64-linux', 'aarch64-darwin')
         #[arg(long)]
         system: Option<String>,
-        /// Disable directory diff comparison in PR body
+        /// Skip directory diff comparison in PR body
         #[arg(long)]
-        no_directory_diff: bool,
+        skip_directory_diff: bool,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -167,9 +167,9 @@ impl Commands {
                 skip_unstable,
                 analyze_rebuilds,
                 max_rebuilds,
-                no_cve,
-                no_repology,
-                no_directory_diff,
+                skip_cve,
+                skip_repology,
+                skip_directory_diff,
             } => {
                 use commands::pr_enhancements::PrEnhancementsConfig;
                 use commands::run::RunConfig;
@@ -184,9 +184,9 @@ impl Commands {
                     concurrent_updates,
                     skip_unstable,
                     pr_enhancements: PrEnhancementsConfig {
-                        directory_diff: !no_directory_diff,
-                        skip_cve_check: no_cve,
-                        skip_repology: no_repology,
+                        directory_diff: !skip_directory_diff,
+                        skip_cve_check: skip_cve,
+                        skip_repology,
                         analyze_rebuilds,
                         max_rebuilds,
                     },
@@ -214,7 +214,7 @@ impl Commands {
                 format,
                 override_filename,
                 system,
-                no_directory_diff,
+                skip_directory_diff,
             } => {
                 use commands::pr_enhancements::PrEnhancementsConfig;
                 use commands::update::{
@@ -238,7 +238,7 @@ impl Commands {
                         src_only,
                         format,
                         pr_enhancements: PrEnhancementsConfig {
-                            directory_diff: !no_directory_diff,
+                            directory_diff: !skip_directory_diff,
                             ..PrEnhancementsConfig::default()
                         },
                     },
