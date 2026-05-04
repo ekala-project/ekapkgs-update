@@ -10,6 +10,10 @@ pub struct DirectoryDiff {
     pub added_outputs: Vec<String>,
     /// Outputs that were removed in the new version
     pub removed_outputs: Vec<String>,
+    /// Files with significant size changes (>10%)
+    pub significant_size_changes: Vec<SignificantSizeChange>,
+    /// Closure size changes for outputs (if available)
+    pub closure_size_changes: Vec<ClosureSizeChange>,
     /// Total files added across all outputs
     pub total_added: usize,
     /// Total files removed across all outputs
@@ -18,6 +22,34 @@ pub struct DirectoryDiff {
     pub total_size_change: i64,
     /// Whether the diff was truncated due to file count limits
     pub truncated: bool,
+}
+
+/// A file that changed size significantly (>10%)
+#[derive(Debug, Clone)]
+pub struct SignificantSizeChange {
+    /// Which output this file is in
+    pub output_name: String,
+    /// Path to the file (relative to output root)
+    pub file_path: PathBuf,
+    /// Old size in bytes
+    pub old_size: u64,
+    /// New size in bytes
+    pub new_size: u64,
+    /// Percentage change (positive = growth, negative = shrinkage)
+    pub percentage_change: f64,
+}
+
+/// Closure size change for an output (total size including all dependencies)
+#[derive(Debug, Clone)]
+pub struct ClosureSizeChange {
+    /// Which output this is for
+    pub output_name: String,
+    /// Old closure size in bytes
+    pub old_closure_size: u64,
+    /// New closure size in bytes
+    pub new_closure_size: u64,
+    /// Percentage change (positive = growth, negative = shrinkage)
+    pub percentage_change: f64,
 }
 
 /// Directory diff for a single output
