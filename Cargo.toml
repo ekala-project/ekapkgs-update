@@ -27,3 +27,34 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 walkdir = "2.5"
 
+# See `refinements.md` §3.4 for rationale. Rules are pitched at "warn", not
+# "deny", so they surface refactor opportunities without blocking workflows.
+[lints.rust]
+unsafe_code        = "forbid"
+# `unreachable_pub` is intentionally not enabled: this crate is a pure
+# binary (no [lib] target), so every `pub` item is "unreachable" by
+# definition. Revisit if a library target is added.
+rust_2018_idioms   = { level = "warn", priority = -1 }
+
+[lints.clippy]
+# Baseline: keep the default clippy level group at "warn" (it already is),
+# and selectively warn on pedantic lints that map to refinements.md §2.
+all      = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+nursery  = { level = "allow", priority = -1 }
+
+# Pedantic lints we *do* want, drawn from refinements.md §2:
+cloned_instead_of_copied = "warn"  # §2.5
+redundant_closure_for_method_calls = "warn"  # §2.3
+str_to_string            = "warn"  # §2.4 — high-volume; surfaces refactor targets
+needless_pass_by_value   = "warn"  # §2.6
+manual_let_else          = "warn"  # §2.1
+match_same_arms          = "warn"  # §2.1
+unnecessary_wraps        = "warn"  # §1.4
+implicit_clone           = "warn"  # §2.5 (also covers former string_to_string)
+inefficient_to_string    = "warn"  # §2.4
+
+# Allow lints that fight existing patterns in this codebase:
+too_many_arguments       = "allow"  # constructor-like fns deliberately fan out
+module_name_repetitions  = "allow"  # idiomatic for re-exports
+

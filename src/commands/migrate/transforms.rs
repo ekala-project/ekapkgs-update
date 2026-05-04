@@ -14,7 +14,7 @@ pub fn ensure_do_check_false(content: &str) -> anyhow::Result<String> {
         }
 
         // Change to false
-        let result = do_check_pattern.replace(content, |caps: &regex::Captures| {
+        let result = do_check_pattern.replace(content, |caps: &regex::Captures<'_>| {
             let line = &caps[0];
             let indent = line.len() - line.trim_start().len();
             let indent_str = " ".repeat(indent);

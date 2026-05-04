@@ -90,7 +90,7 @@ pub fn update_variant_attr(
     }
 
     // Replace the attribute value within the variant content
-    let updated_variant = re.replace_all(variant_content, |caps: &regex::Captures| {
+    let updated_variant = re.replace_all(variant_content, |caps: &regex::Captures<'_>| {
         format!("{}{}{}", &caps[1], new_value, &caps[caps.len() - 1])
     });
 
