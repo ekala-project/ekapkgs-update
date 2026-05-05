@@ -70,9 +70,9 @@ fn parse_pypi_url(url: &str) -> Option<String> {
     if url.starts_with("mirror://pypi/") {
         let parts: Vec<&str> = url.split('/').collect();
         // Expected format: ["mirror:", "", "pypi", "{letter}", "{package-name}", "{filename}"]
-        if parts.len() >= 5 {
-            // Extract package name from the path (4th element, 0-indexed)
-            return Some(parts[4].to_string());
+        // Extract package name from the path (4th element, 0-indexed)
+        if let Some(package) = parts.get(4) {
+            return Some((*package).to_string());
         }
     }
 
@@ -391,17 +391,18 @@ fn find_best_release(
                 }
             }
 
-            is_version_acceptable(current_version, &version, strategy).unwrap_or(false)
+            match is_version_acceptable(current_version, &version, strategy) {
+                Ok(accept) => accept,
+                Err(e) => {
+                    warn!(
+                        "Failed to evaluate version compatibility for {}: {}; skipping",
+                        version, e
+                    );
+                    false
+                },
+            }
         })
         .collect();
-
-    if compatible_releases.is_empty() {
-        anyhow::bail!(
-            "No compatible releases found for version {} with strategy {:?}",
-            current_version,
-            strategy
-        );
-    }
 
     // Sort by version (newest first)
     compatible_releases.sort_by(|a, b| {
@@ -419,9 +420,16 @@ fn find_best_release(
     });
 
     // Return the best (first after sorting) release
+    let best = compatible_releases.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No compatible releases found for version {} with strategy {:?}",
+            current_version,
+            strategy
+        )
+    })?;
     Ok(Release {
-        tag_name: compatible_releases[0].tag_name.clone(),
-        is_prerelease: compatible_releases[0].is_prerelease,
+        tag_name: best.tag_name.clone(),
+        is_prerelease: best.is_prerelease,
     })
 }
 

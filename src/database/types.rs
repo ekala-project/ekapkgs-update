@@ -28,4 +28,3 @@ impl UpdateLog {
             .unwrap_or_else(|_| Utc::now())
     }
 }
-

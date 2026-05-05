@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use futures::{StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -60,8 +61,11 @@ impl CachedEvaluation {
                 commit,
                 cache_path.display()
             );
-            let contents = fs::read_to_string(&cache_path).await?;
-            let cached: CachedEvaluation = serde_json::from_str(&contents)?;
+            let contents = fs::read_to_string(&cache_path)
+                .await
+                .with_context(|| format!("read cache file {}", cache_path.display()))?;
+            let cached: CachedEvaluation = serde_json::from_str(&contents)
+                .with_context(|| format!("parse cache file {}", cache_path.display()))?;
             debug!("Loaded {} packages from cache", cached.packages.len());
             Ok(cached.packages)
         } else {
@@ -79,9 +83,19 @@ impl CachedEvaluation {
                 packages: packages.clone(),
             };
 
-            fs::create_dir_all(cache_path.parent().unwrap()).await?;
+            let Some(cache_parent) = cache_path.parent() else {
+                anyhow::bail!(
+                    "cache path has no parent directory: {}",
+                    cache_path.display()
+                );
+            };
+            fs::create_dir_all(cache_parent)
+                .await
+                .with_context(|| format!("create cache directory {}", cache_parent.display()))?;
             let json = serde_json::to_string_pretty(&cached)?;
-            fs::write(&cache_path, json).await?;
+            fs::write(&cache_path, json)
+                .await
+                .with_context(|| format!("write cache file {}", cache_path.display()))?;
 
             info!(
                 "Cached {} packages to {}",
@@ -142,7 +156,6 @@ impl CachedEvaluation {
             .join("eval-cache")
             .join(format!("{}-{}.json", commit, file_hash)))
     }
-
 }
 
 /// Extract the hash portion from a derivation path

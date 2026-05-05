@@ -170,25 +170,22 @@ mod tests {
         assert!(candidates.contains(&"foo-bar".to_string()));
     }
 
-    #[test]
-    fn test_rate_limiter() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut limiter = RateLimiter::new();
+    #[tokio::test]
+    async fn test_rate_limiter() {
+        let mut limiter = RateLimiter::new();
 
-            let start = Instant::now();
+        let start = Instant::now();
 
-            // First request should be immediate
-            limiter.wait_if_needed().await;
-            let first_elapsed = start.elapsed();
-            assert!(first_elapsed < Duration::from_millis(100));
+        // First request should be immediate
+        limiter.wait_if_needed().await;
+        let first_elapsed = start.elapsed();
+        assert!(first_elapsed < Duration::from_millis(100));
 
-            // Second request should wait ~1 second
-            limiter.wait_if_needed().await;
-            let second_elapsed = start.elapsed();
-            assert!(second_elapsed >= Duration::from_secs(1));
-            assert!(second_elapsed < Duration::from_millis(1100));
-        });
+        // Second request should wait ~1 second
+        limiter.wait_if_needed().await;
+        let second_elapsed = start.elapsed();
+        assert!(second_elapsed >= Duration::from_secs(1));
+        assert!(second_elapsed < Duration::from_millis(1100));
     }
 
     // Integration test - requires network access
