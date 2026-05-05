@@ -64,8 +64,8 @@ pub fn parse_github_url(url: &str) -> Option<GithubRepo> {
     let caps = github_regex.captures(url)?;
 
     Some(GithubRepo {
-        owner: caps.get(1)?.as_str().to_string(),
-        repo: caps.get(2)?.as_str().to_string(),
+        owner: caps.get(1)?.as_str().to_owned(),
+        repo: caps.get(2)?.as_str().to_owned(),
     })
 }
 
@@ -86,7 +86,7 @@ pub async fn fetch_github_tags(
     repo: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GithubTag>> {
-    let url = format!("https://api.github.com/repos/{}/{}/tags", owner, repo);
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/tags");
 
     debug!("Fetching tags from {}", url);
 
@@ -99,13 +99,10 @@ pub async fn fetch_github_tags(
 
     // Add authorization header if token is provided
     if let Some(token_str) = token {
-        request = request.header("Authorization", format!("Bearer {}", token_str));
+        request = request.header("Authorization", format!("Bearer {token_str}"));
     }
 
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+    let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -117,7 +114,7 @@ pub async fn fetch_github_tags(
     let tags: Vec<GithubTag> = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     Ok(tags)
 }
 
@@ -138,7 +135,7 @@ pub async fn fetch_github_releases(
     repo: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GithubRelease>> {
-    let url = format!("https://api.github.com/repos/{}/{}/releases", owner, repo);
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases");
 
     debug!("Fetching all releases from {}", url);
 
@@ -151,13 +148,10 @@ pub async fn fetch_github_releases(
 
     // Add authorization header if token is provided
     if let Some(token_str) = token {
-        request = request.header("Authorization", format!("Bearer {}", token_str));
+        request = request.header("Authorization", format!("Bearer {token_str}"));
     }
 
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+    let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -169,7 +163,7 @@ pub async fn fetch_github_releases(
     let releases: Vec<GithubRelease> = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     Ok(releases)
 }
 
@@ -195,7 +189,7 @@ pub async fn create_pull_request(
     base: &str,
     token: &str,
 ) -> anyhow::Result<GithubPullRequest> {
-    let url = format!("https://api.github.com/repos/{}/{}/pulls", owner, repo);
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls");
 
     debug!("Creating PR at {}", url);
 
@@ -212,29 +206,25 @@ pub async fn create_pull_request(
         .header("User-Agent", "ekapkgs-update")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&request_body)
         .send()
         .await
-        .with_context(|| format!("POST {}", url))?;
+        .with_context(|| format!("POST {url}"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response
             .text()
             .await
-            .with_context(|| format!("read error body from {}", url))?;
-        anyhow::bail!(
-            "GitHub PR creation failed with status {}: {}",
-            status,
-            error_text
-        );
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR creation failed with status {status}: {error_text}");
     }
 
     let pr: GithubPullRequest = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     debug!("Created PR #{}: {}", pr.number, pr.html_url);
 
     Ok(pr)

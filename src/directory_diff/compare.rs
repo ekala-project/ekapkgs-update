@@ -72,7 +72,7 @@ pub fn compare_build_outputs(
             &mut total_files_listed,
             &mut truncated,
         )
-        .with_context(|| format!("Failed to compare output '{}'", output_name))?;
+        .with_context(|| format!("Failed to compare output '{output_name}'"))?;
 
         // Collect significant size changes
         significant_size_changes.extend(size_changes);
@@ -80,7 +80,7 @@ pub fn compare_build_outputs(
         total_added += output_diff
             .directories
             .values()
-            .map(|d| d.total_added())
+            .map(super::types::DirectoryChange::total_added)
             .sum::<usize>();
         total_added += output_diff
             .summary_dirs
@@ -91,7 +91,7 @@ pub fn compare_build_outputs(
         total_removed += output_diff
             .directories
             .values()
-            .map(|d| d.total_removed())
+            .map(super::types::DirectoryChange::total_removed)
             .sum::<usize>();
         total_removed += output_diff
             .summary_dirs
@@ -102,7 +102,7 @@ pub fn compare_build_outputs(
         total_size_change += output_diff
             .directories
             .values()
-            .map(|d| d.size_change())
+            .map(super::types::DirectoryChange::size_change)
             .sum::<i64>();
         total_size_change += output_diff
             .summary_dirs
@@ -179,7 +179,7 @@ fn compare_single_output(
                 // Report if change is more than 10%
                 if percentage_change.abs() > 10.0 {
                     significant_size_changes.push(SignificantSizeChange {
-                        output_name: output_name.to_string(),
+                        output_name: output_name.to_owned(),
                         file_path: info.relative_path.clone(),
                         old_size: old_info.size,
                         new_size: info.size,
@@ -271,7 +271,7 @@ fn compare_single_output(
 
     Ok((
         OutputDiff {
-            output_name: output_name.to_string(),
+            output_name: output_name.to_owned(),
             directories: regular_dirs,
             summary_dirs,
         },

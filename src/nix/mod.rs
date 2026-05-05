@@ -34,7 +34,7 @@ pub fn normalize_entry_point(entry_point: &str) -> Cow<'_, str> {
     if entry_point.starts_with("./") || entry_point.starts_with('/') {
         Cow::Borrowed(entry_point)
     } else {
-        Cow::Owned(format!("./{}", entry_point))
+        Cow::Owned(format!("./{entry_point}"))
     }
 }
 
@@ -83,7 +83,7 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
     let result = String::from_utf8_lossy(&output.stdout)
         .trim()
         .trim_matches('"')
-        .to_string();
+        .to_owned();
 
     Ok(result)
 }
@@ -94,10 +94,8 @@ pub async fn is_many_variants_package(
     attr_path: &str,
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let check_expr = format!(
-        "with import {} {{ }}; toString ({} ? variants)",
-        normalized_entry, attr_path
-    );
+    let check_expr =
+        format!("with import {normalized_entry} {{ }}; toString ({attr_path} ? variants)");
 
     match eval_nix_expr(&check_expr).await {
         Ok(result) => {
@@ -133,8 +131,8 @@ pub async fn get_variants_list(
 ) -> anyhow::Result<Vec<String>> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let expr = format!(
-        "with import {} {{ }}; builtins.toJSON (builtins.attrNames {}.variants)",
-        normalized_entry, attr_path
+        "with import {normalized_entry} {{ }}; builtins.toJSON (builtins.attrNames \
+         {attr_path}.variants)"
     );
 
     let output = eval_nix_expr(&expr).await?;
@@ -160,8 +158,7 @@ pub async fn get_variant_version(
 ) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let expr = format!(
-        "with import {} {{ }}; {}.variants.{}.version",
-        normalized_entry, attr_path, variant_name
+        "with import {normalized_entry} {{ }}; {attr_path}.variants.{variant_name}.version"
     );
 
     eval_nix_expr(&expr).await
@@ -205,10 +202,8 @@ pub async fn has_attr(
     attribute_name: &str,
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let check_expr = format!(
-        "with import {} {{ }}; toString({} ? {})",
-        normalized_entry, attr_path, attribute_name
-    );
+    let check_expr =
+        format!("with import {normalized_entry} {{ }}; toString({attr_path} ? {attribute_name})");
 
     match eval_nix_expr(&check_expr).await {
         Ok(result) => {

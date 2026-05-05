@@ -31,7 +31,7 @@ pub async fn detect_system() -> anyhow::Result<String> {
         anyhow::bail!("Failed to detect system: {}", stderr.trim());
     }
 
-    let system = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let system = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     debug!("Detected system: {}", system);
     Ok(system)
 }
@@ -57,8 +57,8 @@ pub async fn detect_system() -> anyhow::Result<String> {
 /// ```
 pub fn build_installable(flake_ref: &str, output_path: Option<&str>, attr: &str) -> String {
     match output_path {
-        Some(path) => format!("{}#{}.{}", flake_ref, path, attr),
-        None => format!("{}#{}", flake_ref, attr),
+        Some(path) => format!("{flake_ref}#{path}.{attr}"),
+        None => format!("{flake_ref}#{attr}"),
     }
 }
 
@@ -87,7 +87,7 @@ pub fn build_installable(flake_ref: &str, output_path: Option<&str>, attr: &str)
 /// # }
 /// ```
 pub async fn eval_flake_attr(installable: &str, field: &str) -> anyhow::Result<String> {
-    let attr_path = format!("{}.{}", installable, field);
+    let attr_path = format!("{installable}.{field}");
 
     debug!("Evaluating flake attribute: {}", attr_path);
 
@@ -107,7 +107,7 @@ pub async fn eval_flake_attr(installable: &str, field: &str) -> anyhow::Result<S
         );
     }
 
-    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_owned();
 
     debug!("Flake attribute '{}' = '{}'", attr_path, result);
     Ok(result)
@@ -226,7 +226,7 @@ pub async fn get_flake_package_position(installable: &str) -> anyhow::Result<Str
     if let Some(colon_pos) = position.find(':') {
         let file_path = &position[..colon_pos];
         debug!("Flake package defined in: {}", file_path);
-        Ok(file_path.to_string())
+        Ok(file_path.to_owned())
     } else {
         // If no colon, assume it's just a file path
         Ok(position)

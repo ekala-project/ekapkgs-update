@@ -43,8 +43,7 @@ impl FromStr for SemverStrategy {
             "minor" => Ok(SemverStrategy::Minor),
             "patch" => Ok(SemverStrategy::Patch),
             _ => anyhow::bail!(
-                "Invalid semver strategy: '{}'. Valid options: latest, major, minor, patch",
-                s
+                "Invalid semver strategy: '{s}'. Valid options: latest, major, minor, patch"
             ),
         }
     }
@@ -87,7 +86,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
         // Expected format: ["mirror:", "", "pypi", "{letter}", "{package-name}", "{filename}"]
         // Extract package name from the path (4th element, 0-indexed)
         if let Some(package) = parts.get(4) {
-            return Some((*package).to_string());
+            return Some((*package).to_owned());
         }
     }
 
@@ -98,7 +97,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
             .expect("hard-coded PyPI project regex must compile")
     });
     if let Some(caps) = pypi_project_regex.captures(url) {
-        return caps.get(1).map(|m| m.as_str().to_string());
+        return caps.get(1).map(|m| m.as_str().to_owned());
     }
 
     // Match files.pythonhosted.org or pypi.python.org packages
@@ -119,7 +118,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
                         .next()
                         .is_some_and(|c| c.is_ascii_digit())
                     {
-                        return Some(potential_name.to_string());
+                        return Some(potential_name.to_owned());
                     }
                 }
             }
@@ -311,17 +310,17 @@ impl UpstreamSource {
     /// # Returns
     /// Clean version string
     pub fn get_version(release: &Release) -> String {
-        extract_version_from_tag(&release.tag_name).to_string()
+        extract_version_from_tag(&release.tag_name).to_owned()
     }
 
     /// Get a human-readable description of this source
     pub fn description(&self) -> String {
         match self {
-            UpstreamSource::GitHub { owner, repo } => format!("GitHub repo: {}/{}", owner, repo),
+            UpstreamSource::GitHub { owner, repo } => format!("GitHub repo: {owner}/{repo}"),
             UpstreamSource::GitLab { owner, project } => {
-                format!("GitLab project: {}/{}", owner, project)
+                format!("GitLab project: {owner}/{project}")
             },
-            UpstreamSource::PyPI { pname } => format!("PyPI package: {}", pname),
+            UpstreamSource::PyPI { pname } => format!("PyPI package: {pname}"),
         }
     }
 }
@@ -359,7 +358,7 @@ fn find_best_release(
             let version = if let Some(regex) = version_regex {
                 extract_version_with_regex(&release.tag_name, regex)?
             } else {
-                extract_version_from_tag(&release.tag_name).to_string()
+                extract_version_from_tag(&release.tag_name).to_owned()
             };
 
             // Match either the tag directly or the extracted version
@@ -371,10 +370,7 @@ fn find_best_release(
             }
         }
 
-        anyhow::bail!(
-            "Explicit version '{}' not found in available releases",
-            target_version
-        );
+        anyhow::bail!("Explicit version '{target_version}' not found in available releases");
     }
     // Filter out prereleases and find compatible versions
     let mut compatible_releases: Vec<&Release> = releases
@@ -387,7 +383,7 @@ fn find_best_release(
                     Err(_) => return false,
                 }
             } else {
-                extract_version_from_tag(&r.tag_name).to_string()
+                extract_version_from_tag(&r.tag_name).to_owned()
             };
 
             // If version_prefix is specified, only consider releases that start with that prefix
@@ -432,9 +428,7 @@ fn find_best_release(
     // Return the best (first after sorting) release
     let best = compatible_releases.first().ok_or_else(|| {
         anyhow::anyhow!(
-            "No compatible releases found for version {} with strategy {}",
-            current_version,
-            strategy
+            "No compatible releases found for version {current_version} with strategy {strategy}"
         )
     })?;
     Ok(Release {
@@ -520,26 +514,20 @@ pub fn extract_version_with_regex(tag: &str, regex_pattern: &str) -> anyhow::Res
     use regex::Regex;
 
     let re = Regex::new(regex_pattern)
-        .with_context(|| format!("Invalid version regex pattern: {}", regex_pattern))?;
+        .with_context(|| format!("Invalid version regex pattern: {regex_pattern}"))?;
 
-    let captures = re.captures(tag).with_context(|| {
-        format!(
-            "Version regex '{}' did not match tag '{}'",
-            regex_pattern, tag
-        )
-    })?;
+    let captures = re
+        .captures(tag)
+        .with_context(|| format!("Version regex '{regex_pattern}' did not match tag '{tag}'"))?;
 
     // Get the first capture group (index 1, since 0 is the whole match)
     let version = captures
         .get(1)
         .with_context(|| {
-            format!(
-                "Version regex '{}' must have exactly one capture group",
-                regex_pattern
-            )
+            format!("Version regex '{regex_pattern}' must have exactly one capture group")
         })?
         .as_str()
-        .to_string();
+        .to_owned();
 
     Ok(version)
 }
@@ -577,13 +565,13 @@ pub fn normalize_version(version: &str) -> String {
     let dot_count = base_version.matches('.').count();
 
     let normalized_base = match dot_count {
-        0 => format!("{}.0.0", base_version), // "1" -> "1.0.0"
-        1 => format!("{}.0", base_version),   // "1.25" -> "1.25.0"
-        _ => base_version.to_string(),        // "1.2.3" or more -> unchanged
+        0 => format!("{base_version}.0.0"), // "1" -> "1.0.0"
+        1 => format!("{base_version}.0"),   // "1.25" -> "1.25.0"
+        _ => base_version.to_owned(),       // "1.2.3" or more -> unchanged
     };
 
     if let Some(suffix) = suffix {
-        format!("{}{}", normalized_base, suffix)
+        format!("{normalized_base}{suffix}")
     } else {
         normalized_base
     }

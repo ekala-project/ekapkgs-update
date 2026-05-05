@@ -16,7 +16,11 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
     }
 
@@ -25,7 +29,7 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
     let empty_pattern = Regex::new(r"(?m)^\s*maintainers\s*=\s*\[\s*\]\s*;")?;
     if empty_pattern.is_match(content) {
         // Already empty, no need to change
-        return Ok((content.to_string(), false));
+        return Ok((content.to_owned(), false));
     }
 
     // Pattern to match maintainers attribute with any value
@@ -36,7 +40,7 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
 
     if !regex.is_match(content) {
         // No maintainers found, return unchanged
-        return Ok((content.to_string(), false));
+        return Ok((content.to_owned(), false));
     }
 
     // Replace with empty array, preserving the leading whitespace and attribute name

@@ -32,7 +32,11 @@ pub fn find_and_update_attr(
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         return Err(anyhow::anyhow!(
             "Failed to parse Nix file: {}",
             errors.join(", ")
@@ -60,7 +64,7 @@ pub fn find_and_update_attr(
 
     // Check if the attribute exists
     if !re.is_match(content) {
-        anyhow::bail!("Attribute '{}' not found in Nix file", attr_name);
+        anyhow::bail!("Attribute '{attr_name}' not found in Nix file");
     }
 
     // Replace the attribute value

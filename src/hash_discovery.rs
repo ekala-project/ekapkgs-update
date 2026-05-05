@@ -6,7 +6,7 @@ use regex::Regex;
 fn extract_hash_from_error(stderr: &str) -> Option<String> {
     let hash_regex = Regex::new(r"got:\s+(sha256-[A-Za-z0-9+/=]+)").ok()?;
     let caps = hash_regex.captures(stderr)?;
-    Some(caps.get(1)?.as_str().to_string())
+    Some(caps.get(1)?.as_str().to_owned())
 }
 
 /// Discover hash without the update-verify cycle
@@ -40,7 +40,7 @@ error: hash mismatch in fixed-output derivation '/nix/store/...':
         let hash = extract_hash_from_error(stderr);
         assert_eq!(
             hash,
-            Some("sha256-abcdef1234567890ABCDEF1234567890ABCDEF12=".to_string())
+            Some("sha256-abcdef1234567890ABCDEF1234567890ABCDEF12=".to_owned())
         );
     }
 

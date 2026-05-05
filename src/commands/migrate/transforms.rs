@@ -10,7 +10,7 @@ pub fn ensure_do_check_false(content: &str) -> anyhow::Result<String> {
         let value = caps[1].trim();
         if value == "false" {
             // Already false, no change needed
-            return Ok(content.to_string());
+            return Ok(content.to_owned());
         }
 
         // Change to false
@@ -18,7 +18,7 @@ pub fn ensure_do_check_false(content: &str) -> anyhow::Result<String> {
             let line = &caps[0];
             let indent = line.len() - line.trim_start().len();
             let indent_str = " ".repeat(indent);
-            format!("{}doCheck = false;", indent_str)
+            format!("{indent_str}doCheck = false;")
         });
 
         Ok(result.into_owned())
@@ -38,8 +38,8 @@ pub fn add_do_check_false(content: &str) -> anyhow::Result<String> {
         let result = passthru_pattern.replace(
             content,
             format!(
-                "{}# Test suite is quite long, run as passthru\n{}doCheck = false;\n\n{}passthru =",
-                indent, indent, indent
+                "{indent}# Test suite is quite long, run as passthru\n{indent}doCheck = \
+                 false;\n\n{indent}passthru ="
             ),
         );
         return Ok(result.into_owned());
@@ -52,8 +52,8 @@ pub fn add_do_check_false(content: &str) -> anyhow::Result<String> {
         let result = meta_pattern.replace(
             content,
             format!(
-                "{}# Test suite is quite long, run as passthru\n{}doCheck = false;\n\n{}meta =",
-                indent, indent, indent
+                "{indent}# Test suite is quite long, run as passthru\n{indent}doCheck = \
+                 false;\n\n{indent}meta ="
             ),
         );
         return Ok(result.into_owned());
@@ -61,7 +61,7 @@ pub fn add_do_check_false(content: &str) -> anyhow::Result<String> {
 
     // Otherwise, return as is (we'll let the user handle this case)
     debug!("Could not find appropriate place to add doCheck = false;");
-    Ok(content.to_string())
+    Ok(content.to_owned())
 }
 
 /// Add unittests to passthru.tests
@@ -104,12 +104,12 @@ pub fn add_unittests_to_existing_tests(content: &str) -> anyhow::Result<String> 
         // Check if unittests already exists
         if tests_body.contains("unittests") {
             debug!("unittests already exists in passthru.tests");
-            return Ok(content.to_string());
+            return Ok(content.to_owned());
         }
 
         let result = format!(
-            "{}{}\n{}unittests = runUnitTests finalAttrs.finalPackage;\n{}",
-            tests_header, tests_body, indent, tests_closing
+            "{tests_header}{tests_body}\n{indent}unittests = runUnitTests \
+             finalAttrs.finalPackage;\n{tests_closing}"
         );
 
         Ok(tests_pattern.replace(content, result).into_owned())
@@ -134,15 +134,15 @@ pub fn add_tests_to_passthru(content: &str) -> anyhow::Result<String> {
         let indent = " ".repeat(indent_len + 2);
 
         let result = format!(
-            "{}{}{}tests = {{\n{}unittests = runUnitTests finalAttrs.finalPackage;\n{}}};",
-            passthru_header, passthru_body, indent, indent, indent
+            "{passthru_header}{passthru_body}{indent}tests = {{\n{indent}unittests = runUnitTests \
+             finalAttrs.finalPackage;\n{indent}}};"
         );
 
         // Add newline before closing if there was content
         let final_result = if !passthru_body.trim().is_empty() {
-            format!("{}\n{}{}", result, closing_indent, closing_brace)
+            format!("{result}\n{closing_indent}{closing_brace}")
         } else {
-            format!("{}{}{}", result, closing_indent, closing_brace)
+            format!("{result}{closing_indent}{closing_brace}")
         };
 
         Ok(passthru_pattern.replace(content, final_result).into_owned())
@@ -161,9 +161,9 @@ pub fn add_passthru_with_tests(content: &str) -> anyhow::Result<String> {
         let result = meta_pattern.replace(
             content,
             format!(
-                "{}passthru = {{\n{}  tests = {{\n{}    unittests = runUnitTests \
-                 finalAttrs.finalPackage;\n{}  }};\n{}}};\n\n{}meta =",
-                indent, indent, indent, indent, indent, indent
+                "{indent}passthru = {{\n{indent}  tests = {{\n{indent}    unittests = \
+                 runUnitTests finalAttrs.finalPackage;\n{indent}  \
+                 }};\n{indent}}};\n\n{indent}meta ="
             ),
         );
         return Ok(result.into_owned());
@@ -182,19 +182,19 @@ pub fn add_passthru_with_tests(content: &str) -> anyhow::Result<String> {
         let indent = if let Some(indent_caps) = last_line_pattern.captures(before) {
             indent_caps[1].to_string()
         } else {
-            "  ".to_string() // Default to 2 spaces
+            "  ".to_owned() // Default to 2 spaces
         };
 
         let result = format!(
-            "{}\n{}passthru.tests.unittests = runUnitTests finalAttrs.finalPackage;\n{}",
-            before, indent, closing
+            "{before}\n{indent}passthru.tests.unittests = runUnitTests \
+             finalAttrs.finalPackage;\n{closing}"
         );
         return Ok(result);
     }
 
     // If we still can't find it, just return as is
     debug!("Could not find appropriate place to add passthru");
-    Ok(content.to_string())
+    Ok(content.to_owned())
 }
 
 /// Update test-related comments

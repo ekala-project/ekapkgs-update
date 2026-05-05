@@ -96,10 +96,10 @@ pub async fn fetch_vulnerabilities(
 
     let request = OsvQueryRequest {
         package: Some(OsvPackage {
-            name: package_name.to_string(),
-            ecosystem: ecosystem.to_string(),
+            name: package_name.to_owned(),
+            ecosystem: ecosystem.to_owned(),
         }),
-        version: version.to_string(),
+        version: version.to_owned(),
     };
 
     debug!(
@@ -115,7 +115,7 @@ pub async fn fetch_vulnerabilities(
         .json(&request)
         .send()
         .await
-        .with_context(|| format!("POST {}", url))?;
+        .with_context(|| format!("POST {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!("OSV API request failed with status: {}", response.status());
@@ -124,7 +124,7 @@ pub async fn fetch_vulnerabilities(
     let osv_response: OsvQueryResponse = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
 
     debug!(
         "Found {} vulnerabilities for {} {}@{}",
@@ -161,11 +161,10 @@ fn convert_osv_vulnerability(
     let summary = osv_vuln
         .summary
         .or(osv_vuln.details)
-        .unwrap_or_else(|| "No description available".to_string())
+        .unwrap_or_else(|| "No description available".to_owned())
         .lines()
         .next() // Take only first line for summary
-        .unwrap_or("No description available")
-        .to_string();
+        .unwrap_or("No description available").to_owned();
 
     // Extract fixed versions from affected ranges
     let fixed_in: Vec<String> = osv_vuln
@@ -228,19 +227,19 @@ mod tests {
     #[test]
     fn test_convert_osv_vulnerability() {
         let osv_vuln = OsvVulnerability {
-            id: "CVE-2024-1234".to_string(),
-            summary: Some("Test vulnerability".to_string()),
+            id: "CVE-2024-1234".to_owned(),
+            summary: Some("Test vulnerability".to_owned()),
             details: None,
             severity: vec![OsvSeverity {
-                severity_type: "CVSS_V3".to_string(),
-                score: Some("9.8".to_string()),
+                severity_type: "CVSS_V3".to_owned(),
+                score: Some("9.8".to_owned()),
             }],
             affected: vec![OsvAffected {
                 ranges: vec![OsvRange {
-                    range_type: "SEMVER".to_string(),
+                    range_type: "SEMVER".to_owned(),
                     events: vec![OsvEvent {
-                        introduced: Some("1.0.0".to_string()),
-                        fixed: Some("1.2.3".to_string()),
+                        introduced: Some("1.0.0".to_owned()),
+                        fixed: Some("1.2.3".to_owned()),
                     }],
                 }],
             }],

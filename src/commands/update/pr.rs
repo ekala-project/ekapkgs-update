@@ -96,7 +96,7 @@ pub async fn create_pr_for_update(
 
     // Create branch name
     let sanitized_attr = attr_path.replace(['.', '/'], "-");
-    let branch_name = format!("update/{}/{}", sanitized_attr, new_version);
+    let branch_name = format!("update/{sanitized_attr}/{new_version}");
 
     // Create new branch
     debug!("Creating branch '{}'", branch_name);
@@ -109,7 +109,7 @@ pub async fn create_pr_for_update(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
+        anyhow::bail!("Failed to create branch '{branch_name}': {stderr}");
     }
 
     // Stage all changes
@@ -123,7 +123,7 @@ pub async fn create_pr_for_update(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to stage changes: {}", stderr);
+        anyhow::bail!("Failed to stage changes: {stderr}");
     }
 
     // Create commit with bot signature
@@ -140,12 +140,12 @@ pub async fn create_pr_for_update(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to commit changes: {}", stderr);
+        anyhow::bail!("Failed to commit changes: {stderr}");
     }
 
     // Push to remote
     debug!("Pushing branch to remote");
-    let push_target = format!("{}:{}", branch_name, branch_name);
+    let push_target = format!("{branch_name}:{branch_name}");
     let output = Command::new("git")
         .args(["push", "-u", fork, &push_target])
         .stdout(Stdio::piped())
@@ -155,12 +155,7 @@ pub async fn create_pr_for_update(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Failed to push branch '{}' to remote '{}': {}",
-            branch_name,
-            fork,
-            stderr
-        );
+        anyhow::bail!("Failed to push branch '{branch_name}' to remote '{fork}': {stderr}");
     }
 
     info!("Pushed branch '{}' to remote", branch_name);
@@ -196,15 +191,14 @@ fn create_commit_message(
 ) -> String {
     if tests_passed {
         format!(
-            "Update {} from {} to {}\n\nTests: passthru.tests passed\n\n🤖 Generated with \
-             ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>",
-            attr_path, old_version, new_version
+            "Update {attr_path} from {old_version} to {new_version}\n\nTests: passthru.tests \
+             passed\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
+             <noreply@ekapkgs.org>"
         )
     } else {
         format!(
-            "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-             ekapkgs-update <noreply@ekapkgs.org>",
-            attr_path, old_version, new_version
+            "Update {attr_path} from {old_version} to {new_version}\n\n🤖 Generated with \
+             ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>"
         )
     }
 }
@@ -223,13 +217,13 @@ fn create_pr_body(
 
     // Add optional metadata fields
     if let Some(description) = metadata.description.as_ref() {
-        pr_body.push_str(&format!("\n\n**Description:** {}", description));
+        pr_body.push_str(&format!("\n\n**Description:** {description}"));
     }
     if let Some(homepage) = metadata.homepage.as_ref() {
-        pr_body.push_str(&format!("\n\n**Homepage:** {}", homepage));
+        pr_body.push_str(&format!("\n\n**Homepage:** {homepage}"));
     }
     if let Some(changelog) = metadata.changelog.as_ref() {
-        pr_body.push_str(&format!("\n\n**Changelog:** {}", changelog));
+        pr_body.push_str(&format!("\n\n**Changelog:** {changelog}"));
     }
 
     // Add directory diff if available

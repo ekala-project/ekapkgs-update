@@ -164,7 +164,7 @@ mod tests {
         // Should find it as "requests" in Repology
         assert!(result.is_some());
         let info = result.unwrap();
-        assert!(info.packages.len() > 0);
+        assert!(!info.packages.is_empty());
     }
 
     #[tokio::test]

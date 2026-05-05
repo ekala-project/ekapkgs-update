@@ -130,7 +130,7 @@ impl FileInfo {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
-            .to_string()
+            .to_owned()
     }
 }
 
@@ -148,11 +148,11 @@ impl Default for DiffConfig {
         Self {
             max_files: 10_000,
             summary_path_components: vec![
-                "share".to_string(),
-                "doc".to_string(),
-                "man".to_string(),
-                "locale".to_string(),
-                "info".to_string(),
+                "share".to_owned(),
+                "doc".to_owned(),
+                "man".to_owned(),
+                "locale".to_owned(),
+                "info".to_owned(),
             ],
         }
     }
@@ -163,7 +163,7 @@ impl DiffConfig {
     pub fn should_summarize(&self, path: &std::path::Path) -> bool {
         path.components().any(|c| {
             if let Some(s) = c.as_os_str().to_str() {
-                self.summary_path_components.contains(&s.to_string())
+                self.summary_path_components.contains(&s.to_owned())
             } else {
                 false
             }

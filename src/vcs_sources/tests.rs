@@ -103,8 +103,8 @@ fn test_from_url_pypi_mirror_single_letter() {
 #[test]
 fn test_description_github() {
     let source = UpstreamSource::GitHub {
-        owner: "owner".to_string(),
-        repo: "repo".to_string(),
+        owner: "owner".to_owned(),
+        repo: "repo".to_owned(),
     };
     assert_eq!(source.description(), "GitHub repo: owner/repo");
 }
@@ -112,8 +112,8 @@ fn test_description_github() {
 #[test]
 fn test_description_gitlab() {
     let source = UpstreamSource::GitLab {
-        owner: "owner".to_string(),
-        project: "project".to_string(),
+        owner: "owner".to_owned(),
+        project: "project".to_owned(),
     };
     assert_eq!(source.description(), "GitLab project: owner/project");
 }
@@ -121,7 +121,7 @@ fn test_description_gitlab() {
 #[test]
 fn test_get_version() {
     let release = Release {
-        tag_name: "v1.2.3".to_string(),
+        tag_name: "v1.2.3".to_owned(),
         is_prerelease: false,
     };
     assert_eq!(UpstreamSource::get_version(&release), "1.2.3");

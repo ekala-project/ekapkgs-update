@@ -163,7 +163,7 @@ mod tests {
 
     fn create_test_metadata(ecosystem_type: &str) -> PackageMetadata {
         let mut metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -171,19 +171,19 @@ mod tests {
             npm_deps_hash: None,
             nuget_deps_hash: None,
             composer_deps_hash: None,
-            pname: Some("test-package".to_string()),
+            pname: Some("test-package".to_owned()),
             description: None,
             homepage: None,
             changelog: None,
         };
 
         match ecosystem_type {
-            "rust" => metadata.cargo_hash = Some("sha256-test".to_string()),
+            "rust" => metadata.cargo_hash = Some("sha256-test".to_owned()),
             "python" => {
                 metadata.src_url =
-                    Some("https://files.pythonhosted.org/packages/test.tar.gz".to_string())
+                    Some("https://files.pythonhosted.org/packages/test.tar.gz".to_owned())
             },
-            "npm" => metadata.npm_deps_hash = Some("sha256-test".to_string()),
+            "npm" => metadata.npm_deps_hash = Some("sha256-test".to_owned()),
             _ => {},
         }
 
@@ -260,6 +260,6 @@ mod tests {
             .unwrap();
 
         // Old django versions have known vulnerabilities
-        assert!(analysis.resolved.len() > 0 || analysis.present.len() > 0);
+        assert!(!analysis.resolved.is_empty() || !analysis.present.is_empty());
     }
 }

@@ -51,7 +51,7 @@ pub async fn update_flake_package(
         Some(prefix) => prefix,
         None => {
             let system = detect_system().await?;
-            let detected = format!("packages.{}", system);
+            let detected = format!("packages.{system}");
             info!("Auto-detected output prefix: {}", detected);
             detected
         },
@@ -188,7 +188,7 @@ pub async fn update_flake_package(
 
     if !success {
         warn!("Build failed after update");
-        anyhow::bail!("Build failed: {}", stderr);
+        anyhow::bail!("Build failed: {stderr}");
     }
 
     info!("Build succeeded!");
@@ -271,7 +271,7 @@ async fn update_source_hash_flake(
     let mut hash_attr = "outputHash"; // Default fallback
 
     for &attr in &hash_attr_candidates {
-        let check_attr = format!("src.{}", attr);
+        let check_attr = format!("src.{attr}");
         if eval_flake_attr(installable, &check_attr).await.is_ok() {
             hash_attr = attr;
             break;
@@ -279,7 +279,7 @@ async fn update_source_hash_flake(
     }
 
     // Get current hash value to use as old value
-    let current_hash = eval_flake_attr(installable, &format!("src.{}", hash_attr))
+    let current_hash = eval_flake_attr(installable, &format!("src.{hash_attr}"))
         .await
         .ok();
 
@@ -306,7 +306,7 @@ async fn update_source_hash_flake(
     let (success, _stdout, stderr) = build_flake_package(installable, None).await?;
 
     if !success {
-        anyhow::bail!("Build still fails after updating hash: {}", stderr);
+        anyhow::bail!("Build still fails after updating hash: {stderr}");
     }
 
     Ok(())
@@ -532,7 +532,7 @@ async fn run_package_tests_flake(installable: &str) -> anyhow::Result<()> {
         build_flake_package(installable, Some("passthru.tests")).await?;
 
     if !success {
-        anyhow::bail!("Tests failed: {}", stderr);
+        anyhow::bail!("Tests failed: {stderr}");
     }
 
     info!("All tests passed");

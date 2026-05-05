@@ -17,7 +17,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 &diff
                     .added_outputs
                     .iter()
-                    .map(|o| format!("`{}`", o))
+                    .map(|o| format!("`{o}`"))
                     .collect::<Vec<_>>()
                     .join(", "),
             );
@@ -30,7 +30,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 &diff
                     .removed_outputs
                     .iter()
-                    .map(|o| format!("`{}`", o))
+                    .map(|o| format!("`{o}`"))
                     .collect::<Vec<_>>()
                     .join(", "),
             );
@@ -97,7 +97,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 )
             };
 
-            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+            output.push_str(&format!("<details>\n<summary>{summary}</summary>\n\n"));
 
             for change in &other_changes {
                 let direction = if change.percentage_change > 0.0 {
@@ -176,7 +176,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 "Significant File Size Changes (>10%, {} files)",
                 other_file_changes.len()
             );
-            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+            output.push_str(&format!("<details>\n<summary>{summary}</summary>\n\n"));
 
             for change in &other_file_changes {
                 let direction = if change.percentage_change > 0.0 {
@@ -227,7 +227,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
         // Regular directories with file-by-file listings
         for (dir_path, changes) in &output_diff.directories {
             let dir_str = if dir_path.as_os_str().is_empty() {
-                "(root)".to_string()
+                "(root)".to_owned()
             } else {
                 format!("{}/", dir_path.display())
             };
@@ -240,7 +240,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 format_size_change(changes.size_change())
             );
 
-            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+            output.push_str(&format!("<details>\n<summary>{summary}</summary>\n\n"));
 
             // Added files
             if !changes.added_files.is_empty() {
@@ -294,7 +294,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
                 format_size_change(summary_dir.size_change)
             );
 
-            output.push_str(&format!("<details>\n<summary>{}</summary>\n\n", summary));
+            output.push_str(&format!("<details>\n<summary>{summary}</summary>\n\n"));
             output.push_str("Summary only (documentation, locales, and related files).\n\n");
             output.push_str("</details>\n\n");
         }
@@ -316,7 +316,7 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -326,9 +326,9 @@ fn format_size_change(bytes: i64) -> String {
     let formatted = format_size(abs_bytes);
 
     if bytes > 0 {
-        format!("+{}", formatted)
+        format!("+{formatted}")
     } else if bytes < 0 {
-        format!("-{}", formatted)
+        format!("-{formatted}")
     } else {
         formatted
     }

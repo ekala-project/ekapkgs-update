@@ -30,10 +30,7 @@ use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_ta
 pub async fn get_default_variant(file: &str, attr_path: &str) -> anyhow::Result<String> {
     // Get the version of the base package (which is the default variant)
     let normalized_entry = normalize_entry_point(file);
-    let base_version_expr = format!(
-        "with import {} {{ }}; {}.version",
-        normalized_entry, attr_path
-    );
+    let base_version_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.version");
     let base_version = eval_nix_expr(&base_version_expr).await?;
     debug!("Base package version: {}", base_version);
 
@@ -60,9 +57,7 @@ pub async fn get_default_variant(file: &str, attr_path: &str) -> anyhow::Result<
     }
 
     anyhow::bail!(
-        "Could not determine default variant for {} (base version: {})",
-        attr_path,
-        base_version
+        "Could not determine default variant for {attr_path} (base version: {base_version})"
     )
 }
 
@@ -75,7 +70,7 @@ pub async fn update_single_variant(
     _update_config: super::UpdateConfig,
 ) -> anyhow::Result<()> {
     // Get metadata for this specific variant
-    let variant_attr_path = format!("{}.variants.{}", attr_path, variant_name);
+    let variant_attr_path = format!("{attr_path}.variants.{variant_name}");
     let metadata = PackageMetadata::from_attr_path(file, &variant_attr_path).await?;
 
     info!(
@@ -87,10 +82,10 @@ pub async fn update_single_variant(
     let src_url = metadata
         .src_url
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{}'", variant_name))?;
+        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{variant_name}'"))?;
 
     let upstream_source = UpstreamSource::from_url(src_url)
-        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {}", src_url))?;
+        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?;
 
     info!("Upstream source: {:?}", upstream_source);
 
@@ -183,7 +178,7 @@ pub async fn update_single_variant(
 
     if !build_result.status.success() {
         let stderr = String::from_utf8_lossy(&build_result.stderr);
-        anyhow::bail!("Build failed for variant '{}': {}", variant_name, stderr);
+        anyhow::bail!("Build failed for variant '{variant_name}': {stderr}");
     }
 
     info!("Build successful for variant '{}'", variant_name);
@@ -195,21 +190,18 @@ pub async fn update_single_variant(
 pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<String> {
     // Get the package's meta.position to find the directory
     let normalized_entry = normalize_entry_point(file);
-    let position_expr = format!(
-        "with import {} {{ }}; {}.meta.position",
-        normalized_entry, attr_path
-    );
+    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
 
     let position = eval_nix_expr(&position_expr).await?;
     let (file_path, _) = position
         .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
 
     // The variants.nix file should be in the same directory
     let path = std::path::Path::new(file_path);
     let dir = path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot get parent directory of {}", file_path))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot get parent directory of {file_path}"))?;
 
     let variants_path = dir.join("variants.nix");
 
@@ -242,7 +234,7 @@ async fn discover_hash_for_variant(
 
     tokio::fs::write(&variants_file_path, &temp_with_bad_hash).await?;
 
-    let variant_attr_path = format!("{}.variants.{}", attr_path, variant_name);
+    let variant_attr_path = format!("{attr_path}.variants.{variant_name}");
 
     // Try to build - it will fail but give us the correct hash
     let build_result = Command::new("nix-build")
@@ -266,7 +258,7 @@ async fn discover_hash_for_variant(
     // Extract hash from error message
     let hash_pattern = Regex::new(r"got:\s+(sha256-[A-Za-z0-9+/=]+)")?;
     if let Some(captures) = hash_pattern.captures(&stderr) {
-        let hash = captures.get(1).unwrap().as_str().to_string();
+        let hash = captures.get(1).unwrap().as_str().to_owned();
         info!("Discovered hash for variant '{}': {}", variant_name, hash);
         Ok(Some(hash))
     } else {
@@ -301,7 +293,7 @@ pub async fn find_version_in_siblings(
     for entry in WalkDir::new(parent)
         .max_depth(1)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         let entry_path = entry.path();
 

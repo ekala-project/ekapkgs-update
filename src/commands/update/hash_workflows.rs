@@ -45,10 +45,7 @@ pub async fn update_source_hash(
     }
 
     let correct_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Could not extract correct hash from build error:\n{}",
-            stderr
-        )
+        anyhow::anyhow!("Could not extract correct hash from build error:\n{stderr}")
     })?;
 
     info!("Extracted correct hash: {}", correct_hash);
@@ -72,7 +69,7 @@ pub async fn update_source_hash(
         build_nix_expr(eval_entry_point, attr_path, Some("src")).await?;
 
     if !success {
-        anyhow::bail!("Source build failed after hash update:\n{}", stderr);
+        anyhow::bail!("Source build failed after hash update:\n{stderr}");
     }
 
     info!("Source build successful");
@@ -105,10 +102,7 @@ pub async fn update_cargo_hash_if_needed(
         }
 
         let correct_cargo_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct cargoHash from build error:\n{}",
-                stderr
-            )
+            anyhow::anyhow!("Could not extract correct cargoHash from build error:\n{stderr}")
         })?;
 
         info!("Extracted correct cargoHash: {}", correct_cargo_hash);
@@ -147,10 +141,7 @@ pub async fn update_vendor_hash_if_needed(
         }
 
         let correct_vendor_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct vendorHash from build error:\n{}",
-                stderr
-            )
+            anyhow::anyhow!("Could not extract correct vendorHash from build error:\n{stderr}")
         })?;
 
         info!("Extracted correct vendorHash: {}", correct_vendor_hash);
@@ -220,11 +211,8 @@ pub async fn build_with_patch_recovery(
                     // Can't remove the patch, return the original error
                     anyhow::bail!(
                         "Package build failed after update. Detected reversed/already-applied \
-                         patch '{}' but couldn't remove it from the patches array: {}\n\nBuild \
-                         error:\n{}",
-                        patch_name,
-                        e,
-                        stderr
+                         patch '{patch_name}' but couldn't remove it from the patches array: \
+                         {e}\n\nBuild error:\n{stderr}"
                     );
                 },
             }
@@ -233,8 +221,8 @@ pub async fn build_with_patch_recovery(
             warn!("Full package build failed:\n{}", stderr);
             anyhow::bail!(
                 "Package build failed after update with no reversed patches detected. This \
-                 indicates a real build issue that needs manual intervention.\n\nBuild error:\n{}",
-                stderr
+                 indicates a real build issue that needs manual intervention.\n\nBuild \
+                 error:\n{stderr}"
             );
         }
     }
@@ -308,10 +296,7 @@ pub async fn update_npm_deps_hash_if_needed(
         }
 
         let correct_npm_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct npmDepsHash from build error:\n{}",
-                stderr
-            )
+            anyhow::anyhow!("Could not extract correct npmDepsHash from build error:\n{stderr}")
         })?;
 
         info!("Extracted correct npmDepsHash: {}", correct_npm_deps_hash);
@@ -350,10 +335,7 @@ pub async fn update_nuget_deps_hash_if_needed(
         }
 
         let correct_nuget_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract correct nugetDeps hash from build error:\n{}",
-                stderr
-            )
+            anyhow::anyhow!("Could not extract correct nugetDeps hash from build error:\n{stderr}")
         })?;
 
         info!(
@@ -405,8 +387,7 @@ pub async fn update_composer_deps_hash_if_needed(
         let correct_composer_deps_hash =
             hash_discovery::extract_hash(&stderr).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Could not extract correct composerDepsHash from build error:\n{}",
-                    stderr
+                    "Could not extract correct composerDepsHash from build error:\n{stderr}"
                 )
             })?;
 

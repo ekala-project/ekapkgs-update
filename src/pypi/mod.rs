@@ -49,7 +49,7 @@ pub struct PypiArtifact {
 /// # }
 /// ```
 pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
-    let url = format!("https://pypi.org/pypi/{}/json", pname);
+    let url = format!("https://pypi.org/pypi/{pname}/json");
 
     debug!("Fetching PyPI releases from {}", url);
 
@@ -59,7 +59,7 @@ pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
         .header("User-Agent", "ekapkgs-update")
         .send()
         .await
-        .with_context(|| format!("GET {}", url))?;
+        .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!("PyPI API request failed with status: {}", response.status());
@@ -68,7 +68,7 @@ pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
     let pypi_response: PypiResponse = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     Ok(pypi_response)
 }
 

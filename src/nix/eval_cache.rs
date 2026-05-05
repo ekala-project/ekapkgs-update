@@ -77,9 +77,9 @@ impl CachedEvaluation {
 
             // Save to cache
             let cached = CachedEvaluation {
-                commit_hash: commit.to_string(),
+                commit_hash: commit.to_owned(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
-                file_path: eval_file.to_string(),
+                file_path: eval_file.to_owned(),
                 packages: packages.clone(),
             };
 
@@ -109,7 +109,7 @@ impl CachedEvaluation {
 
     /// Perform a fresh evaluation using nix-eval-jobs
     async fn evaluate_fresh(eval_file: &str) -> anyhow::Result<HashMap<String, DrvInfo>> {
-        let stream = run_nix_eval_jobs(eval_file.to_string());
+        let stream = run_nix_eval_jobs(eval_file.to_owned());
         let mut packages = HashMap::new();
 
         pin_mut!(stream);
@@ -154,7 +154,7 @@ impl CachedEvaluation {
 
         Ok(cache_dir
             .join("eval-cache")
-            .join(format!("{}-{}.json", commit, file_hash)))
+            .join(format!("{commit}-{file_hash}.json")))
     }
 }
 
@@ -173,7 +173,7 @@ pub fn extract_hash_from_drv_path(drv_path: &str) -> String {
         .strip_prefix("/nix/store/")
         .and_then(|s| s.split('-').next())
         .unwrap_or("")
-        .to_string()
+        .to_owned()
 }
 
 /// Initial seed for the djb2 string hash (Bernstein's classic constant).
@@ -190,7 +190,7 @@ fn hash_string(s: &str) -> String {
     for byte in s.bytes() {
         hash = hash.wrapping_mul(DJB2_MULTIPLIER).wrapping_add(byte as u64);
     }
-    format!("{:016x}", hash)
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]

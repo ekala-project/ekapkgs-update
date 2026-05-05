@@ -60,8 +60,8 @@ pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
     let caps = gitlab_regex.captures(url)?;
 
     Some(GitlabProject {
-        owner: caps.get(1)?.as_str().to_string(),
-        project: caps.get(2)?.as_str().to_string(),
+        owner: caps.get(1)?.as_str().to_owned(),
+        project: caps.get(2)?.as_str().to_owned(),
     })
 }
 
@@ -82,10 +82,9 @@ pub async fn fetch_gitlab_tags(
     project: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GitlabTag>> {
-    let encoded_path = format!("{}%2F{}", owner, project);
+    let encoded_path = format!("{owner}%2F{project}");
     let url = format!(
-        "https://gitlab.com/api/v4/projects/{}/repository/tags?order_by=updated&sort=desc",
-        encoded_path
+        "https://gitlab.com/api/v4/projects/{encoded_path}/repository/tags?order_by=updated&sort=desc"
     );
 
     debug!("Fetching tags from {}", url);
@@ -98,10 +97,7 @@ pub async fn fetch_gitlab_tags(
         request = request.header("PRIVATE-TOKEN", token_str);
     }
 
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+    let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -113,7 +109,7 @@ pub async fn fetch_gitlab_tags(
     let tags: Vec<GitlabTag> = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     Ok(tags)
 }
 
@@ -134,11 +130,8 @@ pub async fn fetch_gitlab_releases(
     project: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GitlabRelease>> {
-    let encoded_path = format!("{}%2F{}", owner, project);
-    let url = format!(
-        "https://gitlab.com/api/v4/projects/{}/releases",
-        encoded_path
-    );
+    let encoded_path = format!("{owner}%2F{project}");
+    let url = format!("https://gitlab.com/api/v4/projects/{encoded_path}/releases");
 
     debug!("Fetching all releases from {}", url);
 
@@ -150,10 +143,7 @@ pub async fn fetch_gitlab_releases(
         request = request.header("PRIVATE-TOKEN", token_str);
     }
 
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("GET {}", url))?;
+    let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -165,7 +155,7 @@ pub async fn fetch_gitlab_releases(
     let releases: Vec<GitlabRelease> = response
         .json()
         .await
-        .with_context(|| format!("decode JSON from {}", url))?;
+        .with_context(|| format!("decode JSON from {url}"))?;
     Ok(releases)
 }
 

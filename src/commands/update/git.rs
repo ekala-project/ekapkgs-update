@@ -66,17 +66,14 @@ pub async fn create_git_commit(
 
     if !add_output.status.success() {
         let stderr = String::from_utf8_lossy(&add_output.stderr);
-        anyhow::bail!("git add failed: {}", stderr);
+        anyhow::bail!("git add failed: {stderr}");
     }
 
     // Create commit with formatted message
     let commit_message = if tests_passed {
-        format!(
-            "{}: {} -> {}\n\nTests: passthru.tests passed",
-            attr_path, old_version, new_version
-        )
+        format!("{attr_path}: {old_version} -> {new_version}\n\nTests: passthru.tests passed")
     } else {
-        format!("{}: {} -> {}", attr_path, old_version, new_version)
+        format!("{attr_path}: {old_version} -> {new_version}")
     };
     let commit_output = Command::new("git")
         .args(["commit", "-m", &commit_message])
@@ -86,7 +83,7 @@ pub async fn create_git_commit(
 
     if !commit_output.status.success() {
         let stderr = String::from_utf8_lossy(&commit_output.stderr);
-        anyhow::bail!("git commit failed: {}", stderr);
+        anyhow::bail!("git commit failed: {stderr}");
     }
 
     info!("✓ Created commit: {}", commit_message);

@@ -46,14 +46,14 @@ impl Database {
 
         // Create connection options
         let options = SqliteConnectOptions::from_str(db_path)
-            .with_context(|| format!("parse sqlite URL {}", db_path))?
+            .with_context(|| format!("parse sqlite URL {db_path}"))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
         // Connect to database
         let pool = SqlitePool::connect_with(options)
             .await
-            .with_context(|| format!("connect to sqlite database {}", db_path))?;
+            .with_context(|| format!("connect to sqlite database {db_path}"))?;
 
         info!("Connected to database at {}", db_path);
 
@@ -98,7 +98,7 @@ impl Database {
         .bind(attr_path)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("get update record for {}", attr_path))?;
+        .with_context(|| format!("get update record for {attr_path}"))?;
 
         row.map(|row| {
             let last_attempted: Option<String> = row.try_get("last_attempted")?;
@@ -356,7 +356,7 @@ impl Database {
         .bind(drv_identifier)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("get log by drv {}", drv_identifier))?;
+        .with_context(|| format!("get log by drv {drv_identifier}"))?;
 
         // If no exact match and identifier doesn't start with /nix/store/,
         // try matching the end of drv_path
@@ -368,10 +368,10 @@ impl Database {
                 WHERE drv_path LIKE ?
                 "#,
             )
-            .bind(format!("%/{}", drv_identifier))
+            .bind(format!("%/{drv_identifier}"))
             .fetch_optional(&self.pool)
             .await
-            .with_context(|| format!("get log by drv suffix {}", drv_identifier))?;
+            .with_context(|| format!("get log by drv suffix {drv_identifier}"))?;
         }
 
         Ok(log)
@@ -390,7 +390,7 @@ impl Database {
         .bind(attr_path)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("get failed logs for {}", attr_path))?;
+        .with_context(|| format!("get failed logs for {attr_path}"))?;
 
         Ok(logs)
     }
@@ -408,7 +408,7 @@ impl Database {
         .bind(attr_path)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("get rebuild count for {}", attr_path))?
+        .with_context(|| format!("get rebuild count for {attr_path}"))?
         .flatten();
 
         Ok(count)
@@ -514,7 +514,7 @@ impl Database {
         .bind(max)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("get packages by rebuild range [{}, {}]", min, max))?;
+        .with_context(|| format!("get packages by rebuild range [{min}, {max}]"))?;
 
         Ok(results)
     }

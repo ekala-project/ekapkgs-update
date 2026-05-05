@@ -36,7 +36,7 @@ where
             .join(" ");
         match cwd {
             Some(d) => format!("git {} (cwd={})", rendered, d.display()),
-            None => format!("git {}", rendered),
+            None => format!("git {rendered}"),
         }
     })
 }
@@ -44,7 +44,7 @@ where
 /// Decode `git` stdout as UTF-8, attaching command context to any error.
 fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
     String::from_utf8(output.stdout)
-        .with_context(|| format!("git produced non-UTF-8 output ({})", what))
+        .with_context(|| format!("git produced non-UTF-8 output ({what})"))
 }
 
 /// Create a git worktree for an isolated update
@@ -59,7 +59,7 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
     let worktree_name = attr_path.replace(['.', '/'], "-");
     let worktree_path = cache_dir
         .join("worktrees")
-        .join(format!("update-{}", worktree_name));
+        .join(format!("update-{worktree_name}"));
 
     // Remove existing worktree if it exists
     if worktree_path.exists() {
@@ -92,7 +92,7 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to create worktree: {}", stderr);
+        anyhow::bail!("Failed to create worktree: {stderr}");
     }
 
     debug!("{}: Worktree created successfully", attr_path);
@@ -148,7 +148,7 @@ pub async fn create_and_push_branch(
 ) -> anyhow::Result<String> {
     // Create a safe branch name from attr_path and version
     let sanitized_attr = attr_path.replace(['.', '/'], "-");
-    let branch_name = format!("update/{}/{}", sanitized_attr, new_version);
+    let branch_name = format!("update/{sanitized_attr}/{new_version}");
 
     debug!(
         "{}: Creating branch '{}' in worktree {:?}",
@@ -160,7 +160,7 @@ pub async fn create_and_push_branch(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to create branch '{}': {}", branch_name, stderr);
+        anyhow::bail!("Failed to create branch '{branch_name}': {stderr}");
     }
 
     // Add all changes
@@ -168,14 +168,13 @@ pub async fn create_and_push_branch(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to stage changes: {}", stderr);
+        anyhow::bail!("Failed to stage changes: {stderr}");
     }
 
     // Create commit message
     let commit_message = format!(
-        "Update {} from {} to {}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
-         ekapkgs-update <noreply@ekapkgs.org>",
-        attr_path, old_version, new_version
+        "Update {attr_path} from {old_version} to {new_version}\n\n🤖 Generated with \
+         ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>"
     );
 
     // Commit changes
@@ -183,7 +182,7 @@ pub async fn create_and_push_branch(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to commit changes: {}", stderr);
+        anyhow::bail!("Failed to commit changes: {stderr}");
     }
 
     debug!(
@@ -192,7 +191,7 @@ pub async fn create_and_push_branch(
     );
 
     // Push to remote
-    let push_target = format!("{}:{}", branch_name, branch_name);
+    let push_target = format!("{branch_name}:{branch_name}");
     let output = run_git(
         Some(worktree_path),
         ["push", "-u", remote_repo, &push_target],
@@ -201,12 +200,7 @@ pub async fn create_and_push_branch(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Failed to push branch '{}' to remote '{}': {}",
-            branch_name,
-            remote_repo,
-            stderr
-        );
+        anyhow::bail!("Failed to push branch '{branch_name}' to remote '{remote_repo}': {stderr}");
     }
 
     debug!(
@@ -235,7 +229,7 @@ pub async fn get_pr_config_from_remote(remote: &str) -> anyhow::Result<PrConfig>
 
     // Parse GitHub owner/repo from URL
     let github_repo = parse_github_url(&remote_url)
-        .ok_or_else(|| anyhow::anyhow!("Remote URL is not a GitHub repository: {}", remote_url))?;
+        .ok_or_else(|| anyhow::anyhow!("Remote URL is not a GitHub repository: {remote_url}"))?;
 
     // Get default/base branch
     let base_branch = get_default_branch(remote).await?;
@@ -270,12 +264,12 @@ async fn get_current_branch() -> anyhow::Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get current branch: {}", stderr);
+        anyhow::bail!("Failed to get current branch: {stderr}");
     }
 
     let branch = decode_git_stdout(output, "rev-parse --abbrev-ref HEAD")?
         .trim()
-        .to_string();
+        .to_owned();
 
     if branch == "HEAD" {
         anyhow::bail!("Currently in detached HEAD state");
@@ -286,13 +280,13 @@ async fn get_current_branch() -> anyhow::Result<String> {
 
 /// Get the upstream remote name for a branch
 async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
-    let key = format!("branch.{}.remote", branch);
+    let key = format!("branch.{branch}.remote");
     let output = run_git(None, ["config", &key]).await?;
 
     if output.status.success() {
         let remote = decode_git_stdout(output, "config branch.<name>.remote")?
             .trim()
-            .to_string();
+            .to_owned();
         if !remote.is_empty() {
             return Ok(remote);
         }
@@ -303,7 +297,7 @@ async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
         "No upstream remote configured for branch '{}', using 'origin'",
         branch
     );
-    Ok("origin".to_string())
+    Ok("origin".to_owned())
 }
 
 /// Get the URL for a git remote
@@ -312,30 +306,30 @@ async fn get_remote_url(remote: &str) -> anyhow::Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get URL for remote '{}': {}", remote, stderr);
+        anyhow::bail!("Failed to get URL for remote '{remote}': {stderr}");
     }
 
     Ok(decode_git_stdout(output, "remote get-url")?
         .trim()
-        .to_string())
+        .to_owned())
 }
 
 /// Get the default branch for a remote
 async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     // First try: local cached symbolic ref (fast, no network)
-    let symref_path = format!("refs/remotes/{}/HEAD", remote);
+    let symref_path = format!("refs/remotes/{remote}/HEAD");
     let output = run_git(None, ["symbolic-ref", &symref_path]).await?;
 
     if output.status.success() {
         let full_ref = decode_git_stdout(output, "symbolic-ref refs/remotes/<remote>/HEAD")?
             .trim()
-            .to_string();
+            .to_owned();
 
         // Extract branch name from "refs/remotes/origin/master"
-        let prefix = format!("refs/remotes/{}/", remote);
+        let prefix = format!("refs/remotes/{remote}/");
         if let Some(branch) = full_ref.strip_prefix(&prefix) {
             debug!("Found default branch from local symbolic ref: {}", branch);
-            return Ok(branch.to_string());
+            return Ok(branch.to_owned());
         }
     }
 
@@ -353,7 +347,7 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
                 if let Some(ref_part) = line.split_whitespace().nth(1) {
                     if let Some(branch) = ref_part.strip_prefix("refs/heads/") {
                         debug!("Found default branch from remote: {}", branch);
-                        return Ok(branch.to_string());
+                        return Ok(branch.to_owned());
                     }
                 }
             }
@@ -368,9 +362,9 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
 
         if output.status.success() && !output.stdout.is_empty() {
             debug!("Using fallback branch: {}", candidate);
-            return Ok((*candidate).to_string());
+            return Ok((*candidate).to_owned());
         }
     }
 
-    anyhow::bail!("Could not determine default branch for remote '{}'", remote)
+    anyhow::bail!("Could not determine default branch for remote '{remote}'")
 }
