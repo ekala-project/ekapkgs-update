@@ -176,13 +176,19 @@ pub fn extract_hash_from_drv_path(drv_path: &str) -> String {
         .to_string()
 }
 
-/// Simple hash function for strings (used for cache file naming)
+/// Initial seed for the djb2 string hash (Bernstein's classic constant).
+const DJB2_SEED: u64 = 5381;
+/// Multiplier for the djb2 string hash.
+const DJB2_MULTIPLIER: u64 = 33;
+
+/// Simple deterministic djb2 hash for strings (used for cache-file naming).
+///
+/// Not cryptographically secure; only meant to derive a stable filename token
+/// from short inputs like Nix file paths.
 fn hash_string(s: &str) -> String {
-    // Simple deterministic hash for file naming
-    // Using a basic checksum approach since we don't need cryptographic security
-    let mut hash: u64 = 5381;
+    let mut hash: u64 = DJB2_SEED;
     for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+        hash = hash.wrapping_mul(DJB2_MULTIPLIER).wrapping_add(byte as u64);
     }
     format!("{:016x}", hash)
 }

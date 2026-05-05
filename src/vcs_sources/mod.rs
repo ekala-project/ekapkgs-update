@@ -193,31 +193,28 @@ impl UpstreamSource {
                     );
                 }
 
-                // Try to fetch all releases first
+                // Try to fetch all releases first; fall back to tags on failure.
                 let all_releases = fetch_github_releases(owner, repo, token.as_deref()).await;
+                if let Err(e) = &all_releases {
+                    debug!("GitHub releases endpoint failed, falling back to tags: {e}");
+                }
 
                 let releases: Vec<Release> = match all_releases {
-                    Ok(gh_releases) => {
-                        // Convert GitHub releases to our Release struct
-                        gh_releases
-                            .into_iter()
-                            .map(|r| Release {
-                                tag_name: r.tag_name,
-                                is_prerelease: r.prerelease,
-                            })
-                            .collect()
-                    },
-                    Err(_) => {
-                        // Fallback to tags if releases endpoint fails
-                        debug!("No releases found, falling back to tags");
-                        let tags = fetch_github_tags(owner, repo, token.as_deref()).await?;
-                        tags.into_iter()
-                            .map(|t| Release {
-                                tag_name: t.name,
-                                is_prerelease: false,
-                            })
-                            .collect()
-                    },
+                    Ok(gh_releases) => gh_releases
+                        .into_iter()
+                        .map(|r| Release {
+                            tag_name: r.tag_name,
+                            is_prerelease: r.prerelease,
+                        })
+                        .collect(),
+                    Err(_) => fetch_github_tags(owner, repo, token.as_deref())
+                        .await?
+                        .into_iter()
+                        .map(|t| Release {
+                            tag_name: t.name,
+                            is_prerelease: false,
+                        })
+                        .collect(),
                 };
 
                 // Filter and find best match
@@ -240,31 +237,28 @@ impl UpstreamSource {
                     );
                 }
 
-                // Try to fetch all releases first
+                // Try to fetch all releases first; fall back to tags on failure.
                 let all_releases = fetch_gitlab_releases(owner, project, token.as_deref()).await;
+                if let Err(e) = &all_releases {
+                    debug!("GitLab releases endpoint failed, falling back to tags: {e}");
+                }
 
                 let releases: Vec<Release> = match all_releases {
-                    Ok(gl_releases) => {
-                        // Convert GitLab releases to our Release struct
-                        gl_releases
-                            .into_iter()
-                            .map(|r| Release {
-                                tag_name: r.tag_name,
-                                is_prerelease: r.upcoming_release,
-                            })
-                            .collect()
-                    },
-                    Err(_) => {
-                        // Fallback to tags if releases endpoint fails
-                        debug!("No releases found, falling back to tags");
-                        let tags = fetch_gitlab_tags(owner, project, token.as_deref()).await?;
-                        tags.into_iter()
-                            .map(|t| Release {
-                                tag_name: t.name,
-                                is_prerelease: false,
-                            })
-                            .collect()
-                    },
+                    Ok(gl_releases) => gl_releases
+                        .into_iter()
+                        .map(|r| Release {
+                            tag_name: r.tag_name,
+                            is_prerelease: r.upcoming_release,
+                        })
+                        .collect(),
+                    Err(_) => fetch_gitlab_tags(owner, project, token.as_deref())
+                        .await?
+                        .into_iter()
+                        .map(|t| Release {
+                            tag_name: t.name,
+                            is_prerelease: false,
+                        })
+                        .collect(),
                 };
 
                 // Filter and find best match
@@ -283,18 +277,16 @@ impl UpstreamSource {
 
                 // Convert PyPI releases to our Release struct
                 // PyPI returns a HashMap where keys are version strings
-                let mut releases: Vec<Release> = Vec::new();
-
-                for (version, artifacts) in pypi_response.releases {
-                    // Check if this version has been yanked (any artifact yanked means version is
-                    // yanked)
-                    let is_yanked = artifacts.iter().any(|a| a.yanked);
-
-                    releases.push(Release {
+                // Treat yanked releases as prereleases (a version is yanked when any
+                // of its artifacts has been yanked).
+                let releases: Vec<Release> = pypi_response
+                    .releases
+                    .into_iter()
+                    .map(|(version, artifacts)| Release {
                         tag_name: version,
-                        is_prerelease: is_yanked, // Treat yanked releases as prereleases
-                    });
-                }
+                        is_prerelease: artifacts.iter().any(|a| a.yanked),
+                    })
+                    .collect();
 
                 // Filter and find best match
                 find_best_release(
