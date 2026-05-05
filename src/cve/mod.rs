@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
-pub use types::{CveAnalysis, Vulnerability};
+use types::{CveAnalysis, Vulnerability};
 
 use crate::package::PackageMetadata;
 

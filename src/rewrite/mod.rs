@@ -8,7 +8,7 @@ mod variants;
 #[cfg(test)]
 mod tests;
 
-pub use attributes::*;
-pub use maintainers::*;
-pub use patches::*;
-pub use variants::*;
+pub use attributes::find_and_update_attr;
+pub use maintainers::replace_maintainers_with_empty;
+pub use patches::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
+pub use variants::update_variant_attr;

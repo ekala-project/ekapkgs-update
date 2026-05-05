@@ -8,7 +8,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};
-pub use types::{UpdateLog, UpdateRecord};
+pub use types::UpdateLog;
+use types::UpdateRecord;
 
 /// Parse an optional RFC 3339 timestamp string into UTC, ignoring parse errors.
 ///
