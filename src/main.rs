@@ -31,6 +31,7 @@ mod gitlab;
 mod hash_discovery;
 mod nix;
 mod package;
+mod paths;
 mod pypi;
 mod repology;
 mod rewrite;
