@@ -37,7 +37,10 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
     // Create the worktree
     debug!("{}: Creating worktree at {:?}", attr_path, worktree_path);
     let output = Command::new("git")
-        .args(["worktree", "add", worktree_path.to_str().unwrap(), "HEAD"])
+        .arg("worktree")
+        .arg("add")
+        .arg(&worktree_path)
+        .arg("HEAD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -62,12 +65,10 @@ pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
 
     // Remove the worktree using git worktree remove
     let output = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            worktree_path.to_str().unwrap(),
-        ])
+        .arg("worktree")
+        .arg("remove")
+        .arg("--force")
+        .arg(worktree_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()

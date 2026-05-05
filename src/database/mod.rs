@@ -243,6 +243,11 @@ impl Database {
             );
         }
 
+        let rebuild_count_i64 = rebuild_count
+            .map(i64::try_from)
+            .transpose()
+            .context("rebuild_count overflowed i64")?;
+
         sqlx::query(
             r#"
             INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
@@ -262,7 +267,7 @@ impl Database {
         .bind(next_attempt.to_rfc3339())
         .bind(new_version)
         .bind(new_version)
-        .bind(rebuild_count.map(|c| c as i64))
+        .bind(rebuild_count_i64)
         .execute(&self.pool)
         .await
         .context("Failed to record successful update")?;

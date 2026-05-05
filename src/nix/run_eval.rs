@@ -60,8 +60,10 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
             }
         };
 
-        // TODO: handle failure case more nicely
-        let stdout = cmd.stdout.take().unwrap();
+        let Some(stdout) = cmd.stdout.take() else {
+            yield Err(anyhow::anyhow!("nix-eval-jobs stdout was not piped"));
+            return;
+        };
         // Create a stream, so that we can pass through values as they are produced
         let stdout_reader = BufReader::new(stdout);
         let mut stdout_lines = stdout_reader.lines();
