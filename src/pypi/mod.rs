@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use anyhow::Context;
 use serde::Deserialize;
 use tracing::debug;
 
@@ -57,13 +58,17 @@ pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
         .get(&url)
         .header("User-Agent", "ekapkgs-update")
         .send()
-        .await?;
+        .await
+        .with_context(|| format!("GET {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!("PyPI API request failed with status: {}", response.status());
     }
 
-    let pypi_response: PypiResponse = response.json().await?;
+    let pypi_response: PypiResponse = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     Ok(pypi_response)
 }
 

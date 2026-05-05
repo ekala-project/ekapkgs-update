@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 use tracing::debug;
@@ -83,7 +83,8 @@ impl RepologyClient {
             .get(&url)
             .header("User-Agent", &self.user_agent)
             .send()
-            .await?;
+            .await
+            .with_context(|| format!("GET {}", url))?;
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
@@ -101,7 +102,10 @@ impl RepologyClient {
             );
         }
 
-        let packages: Vec<RepologyPackage> = response.json().await?;
+        let packages: Vec<RepologyPackage> = response
+            .json()
+            .await
+            .with_context(|| format!("decode JSON from {}", url))?;
 
         debug!(
             "Found {} packages for {} in Repology",

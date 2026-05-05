@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -113,13 +114,17 @@ pub async fn fetch_vulnerabilities(
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .await?;
+        .await
+        .with_context(|| format!("POST {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!("OSV API request failed with status: {}", response.status());
     }
 
-    let osv_response: OsvQueryResponse = response.json().await?;
+    let osv_response: OsvQueryResponse = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
 
     debug!(
         "Found {} vulnerabilities for {} {}@{}",

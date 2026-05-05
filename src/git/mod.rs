@@ -1,10 +1,47 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 
+use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::github::parse_github_url;
+
+/// Run a `git` subcommand and capture both args and cwd in any error context.
+///
+/// Returns the raw `Output` (caller must check `status.success()`).
+async fn run_git<I, S>(cwd: Option<&Path>, args: I) -> anyhow::Result<Output>
+where
+    I: IntoIterator<Item = S> + Clone,
+    S: AsRef<OsStr>,
+{
+    let mut cmd = Command::new("git");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args.clone())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    cmd.output().await.with_context(|| {
+        let rendered = args
+            .into_iter()
+            .map(|a| a.as_ref().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        match cwd {
+            Some(d) => format!("git {} (cwd={})", rendered, d.display()),
+            None => format!("git {}", rendered),
+        }
+    })
+}
+
+/// Decode `git` stdout as UTF-8, attaching command context to any error.
+fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("git produced non-UTF-8 output ({})", what))
+}
 
 /// Create a git worktree for an isolated update
 pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
@@ -31,20 +68,23 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
 
     // Create parent directory
     if let Some(parent) = worktree_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create worktree parent directory {}", parent.display()))?;
     }
 
     // Create the worktree
     debug!("{}: Creating worktree at {:?}", attr_path, worktree_path);
-    let output = Command::new("git")
-        .arg("worktree")
-        .arg("add")
-        .arg(&worktree_path)
-        .arg("HEAD")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(
+        None,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            worktree_path.as_os_str(),
+            OsStr::new("HEAD"),
+        ],
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -64,15 +104,16 @@ pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
     debug!("Cleaning up worktree at {:?}", worktree_path);
 
     // Remove the worktree using git worktree remove
-    let output = Command::new("git")
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(worktree_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(
+        None,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            worktree_path.as_os_str(),
+        ],
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,7 +121,11 @@ pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
 
         // Fall back to manual removal if git command fails
         if worktree_path.exists() {
-            tokio::fs::remove_dir_all(worktree_path).await?;
+            tokio::fs::remove_dir_all(worktree_path)
+                .await
+                .with_context(|| {
+                    format!("remove worktree directory {}", worktree_path.display())
+                })?;
         }
     }
 
@@ -107,13 +152,7 @@ pub async fn create_and_push_branch(
     );
 
     // Create new branch
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["checkout", "-b", &branch_name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(Some(worktree_path), ["checkout", "-b", &branch_name]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -121,13 +160,7 @@ pub async fn create_and_push_branch(
     }
 
     // Add all changes
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["add", "-A"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(Some(worktree_path), ["add", "-A"]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -142,13 +175,7 @@ pub async fn create_and_push_branch(
     );
 
     // Commit changes
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["commit", "-m", &commit_message])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(Some(worktree_path), ["commit", "-m", &commit_message]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -162,13 +189,11 @@ pub async fn create_and_push_branch(
 
     // Push to remote
     let push_target = format!("{}:{}", branch_name, branch_name);
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["push", "-u", remote_repo, &push_target])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(
+        Some(worktree_path),
+        ["push", "-u", remote_repo, &push_target],
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -237,19 +262,16 @@ pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
 
 /// Get the current git branch name
 async fn get_current_branch() -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(None, ["rev-parse", "--abbrev-ref", "HEAD"]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("Failed to get current branch: {}", stderr);
     }
 
-    let branch = String::from_utf8(output.stdout)?.trim().to_string();
+    let branch = decode_git_stdout(output, "rev-parse --abbrev-ref HEAD")?
+        .trim()
+        .to_string();
 
     if branch == "HEAD" {
         anyhow::bail!("Currently in detached HEAD state");
@@ -260,15 +282,13 @@ async fn get_current_branch() -> anyhow::Result<String> {
 
 /// Get the upstream remote name for a branch
 async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["config", &format!("branch.{}.remote", branch)])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let key = format!("branch.{}.remote", branch);
+    let output = run_git(None, ["config", &key]).await?;
 
     if output.status.success() {
-        let remote = String::from_utf8(output.stdout)?.trim().to_string();
+        let remote = decode_git_stdout(output, "config branch.<name>.remote")?
+            .trim()
+            .to_string();
         if !remote.is_empty() {
             return Ok(remote);
         }
@@ -284,36 +304,28 @@ async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
 
 /// Get the URL for a git remote
 async fn get_remote_url(remote: &str) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["remote", "get-url", remote])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(None, ["remote", "get-url", remote]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("Failed to get URL for remote '{}': {}", remote, stderr);
     }
 
-    let url = String::from_utf8(output.stdout)?.trim().to_string();
-
-    Ok(url)
+    Ok(decode_git_stdout(output, "remote get-url")?
+        .trim()
+        .to_string())
 }
 
 /// Get the default branch for a remote
 async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     // First try: local cached symbolic ref (fast, no network)
     let symref_path = format!("refs/remotes/{}/HEAD", remote);
-    let output = Command::new("git")
-        .args(["symbolic-ref", &symref_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(None, ["symbolic-ref", &symref_path]).await?;
 
     if output.status.success() {
-        let full_ref = String::from_utf8(output.stdout)?.trim().to_string();
+        let full_ref = decode_git_stdout(output, "symbolic-ref refs/remotes/<remote>/HEAD")?
+            .trim()
+            .to_string();
 
         // Extract branch name from "refs/remotes/origin/master"
         let prefix = format!("refs/remotes/{}/", remote);
@@ -326,15 +338,10 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     debug!("Local symbolic ref not found, querying remote");
 
     // Second try: query remote directly (requires network)
-    let output = Command::new("git")
-        .args(["ls-remote", "--symref", remote, "HEAD"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_git(None, ["ls-remote", "--symref", remote, "HEAD"]).await?;
 
     if output.status.success() {
-        let stdout = String::from_utf8(output.stdout)?;
+        let stdout = decode_git_stdout(output, "ls-remote --symref")?;
 
         // Parse output like: "ref: refs/heads/master	HEAD"
         for line in stdout.lines() {
@@ -353,16 +360,11 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     debug!("Could not determine default branch from remote, trying fallbacks");
 
     for candidate in &["master", "main"] {
-        let output = Command::new("git")
-            .args(["ls-remote", "--heads", remote, candidate])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = run_git(None, ["ls-remote", "--heads", remote, candidate]).await?;
 
         if output.status.success() && !output.stdout.is_empty() {
             debug!("Using fallback branch: {}", candidate);
-            return Ok(candidate.to_string());
+            return Ok((*candidate).to_string());
         }
     }
 
