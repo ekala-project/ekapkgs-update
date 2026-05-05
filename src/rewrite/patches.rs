@@ -1,5 +1,7 @@
 use regex::Regex;
 
+use super::error::{Result, RewriteError};
+
 /// Check if the patches array is empty
 ///
 /// # Arguments
@@ -35,11 +37,15 @@ pub fn is_patches_array_empty(content: &str) -> bool {
 /// * `content` - The Nix file content as a string
 ///
 /// # Returns
-/// The updated content with the patches attribute removed, or an error if:
-/// - The file has invalid Nix syntax
-/// - The patches attribute is not found
-/// - The removal would create invalid syntax
-pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
+/// The updated content with the patches attribute removed.
+///
+/// # Errors
+/// Returns a [`RewriteError`] if:
+/// - [`RewriteError::Parse`] - the file has invalid Nix syntax
+/// - [`RewriteError::NotFound`] - no empty `patches = [];` attribute is present
+/// - [`RewriteError::InvalidResult`] - removal would create invalid syntax
+/// - [`RewriteError::Regex`] - the internal regex failed to compile
+pub fn remove_patches_attribute(content: &str) -> Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
@@ -48,7 +54,7 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
+        return Err(RewriteError::Parse(errors.join(", ")));
     }
 
     // Pattern to match the entire patches attribute (including comments)
@@ -59,7 +65,7 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     let regex = Regex::new(pattern)?;
 
     if !regex.is_match(content) {
-        anyhow::bail!("Empty patches attribute not found in Nix file");
+        return Err(RewriteError::empty_patches_not_found());
     }
 
     let result = regex.replace(content, "");
@@ -67,7 +73,9 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        anyhow::bail!("Removal would create invalid Nix syntax");
+        return Err(RewriteError::InvalidResult {
+            operation: "Removal",
+        });
     }
 
     Ok(result.into_owned())
@@ -80,15 +88,18 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
 /// * `patch_name` - The patch filename to remove (e.g., "fix-build.patch")
 ///
 /// # Returns
-/// The updated content with the patch removed, or an error if:
-/// - The file has invalid Nix syntax
-/// - The patches attribute is not found
-/// - The patch is not found in the array
-/// - The removal would create invalid syntax
+/// The updated content with the patch removed.
+///
+/// # Errors
+/// Returns a [`RewriteError`] if:
+/// - [`RewriteError::Parse`] - the file has invalid Nix syntax
+/// - [`RewriteError::NotFound`] - the patch is not found in the array
+/// - [`RewriteError::InvalidResult`] - removal would create invalid syntax
+/// - [`RewriteError::Regex`] - the internal regex failed to compile
 ///
 /// This function uses regex-based removal since rnix doesn't provide easy
 /// whitespace-preserving AST manipulation for array elements.
-pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Result<String> {
+pub fn remove_patch_from_array(content: &str, patch_name: &str) -> Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
@@ -97,10 +108,7 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        return Err(anyhow::anyhow!(
-            "Failed to parse Nix file: {}",
-            errors.join(", ")
-        ));
+        return Err(RewriteError::Parse(errors.join(", ")));
     }
 
     // Build regex pattern to match the patch entry in the array
@@ -121,7 +129,9 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
         // Validate the result parses correctly
         let result_parse = rnix::Root::parse(&result);
         if !result_parse.errors().is_empty() {
-            anyhow::bail!("Removal would create invalid Nix syntax");
+            return Err(RewriteError::InvalidResult {
+                operation: "Removal",
+            });
         }
 
         return Ok(result.into_owned());
@@ -143,12 +153,14 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
         // Validate the result parses correctly
         let result_parse = rnix::Root::parse(&result);
         if !result_parse.errors().is_empty() {
-            anyhow::bail!("Removal would create invalid Nix syntax");
+            return Err(RewriteError::InvalidResult {
+                operation: "Removal",
+            });
         }
 
         return Ok(result.into_owned());
     }
 
     // If we didn't find the patch, return an error
-    anyhow::bail!("Patch '{patch_name}' not found in patches array")
+    Err(RewriteError::patch_not_found(patch_name))
 }

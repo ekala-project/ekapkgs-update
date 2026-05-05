@@ -1,5 +1,7 @@
 use regex::Regex;
 
+use super::error::{Result, RewriteError};
+
 /// Replace meta.maintainers with an empty array
 ///
 /// # Arguments
@@ -9,10 +11,11 @@ use regex::Regex;
 /// A tuple of (updated_content, changed) where changed indicates if any replacement was made
 ///
 /// # Errors
-/// Returns an error if:
-/// - The file has invalid Nix syntax before replacement
-/// - The replacement would create invalid syntax
-pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, bool)> {
+/// Returns a [`RewriteError`] if:
+/// - [`RewriteError::Parse`] - the file has invalid Nix syntax before replacement
+/// - [`RewriteError::InvalidResult`] - the replacement would create invalid syntax
+/// - [`RewriteError::Regex`] - the internal regex failed to compile
+pub fn replace_maintainers_with_empty(content: &str) -> Result<(String, bool)> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
@@ -21,7 +24,7 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
+        return Err(RewriteError::Parse(errors.join(", ")));
     }
 
     // Check if maintainers is already exactly empty (maintainers = [ ];)
@@ -49,7 +52,9 @@ pub fn replace_maintainers_with_empty(content: &str) -> anyhow::Result<(String, 
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        anyhow::bail!("Replacement would create invalid Nix syntax");
+        return Err(RewriteError::InvalidResult {
+            operation: "Replacement",
+        });
     }
 
     Ok((result.into_owned(), true))

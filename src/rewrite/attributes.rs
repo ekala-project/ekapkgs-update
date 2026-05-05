@@ -1,5 +1,7 @@
 use regex::Regex;
 
+use super::error::{Result, RewriteError};
+
 /// Find and update an attribute value in a Nix file using regex with rnix validation
 ///
 /// # Arguments
@@ -9,26 +11,21 @@ use regex::Regex;
 /// * `old_value` - Optional old value to match (for safety)
 ///
 /// # Returns
-/// The updated content if successful, or an error if:
-/// - The file has invalid Nix syntax
-/// - The attribute is not found
-/// - The old value doesn't match (if specified)
-/// - The replacement would create invalid syntax
+/// The updated content if successful.
 ///
-/// # Example
-/// ```
-/// use ekapkgs_update::rewrite::find_and_update_attr;
-///
-/// let content = r#"{ version = "1.0.0"; }"#;
-/// let result = find_and_update_attr(content, "version", "2.0.0", Some("1.0.0"));
-/// assert!(result.is_ok());
-/// ```
+/// # Errors
+/// Returns a [`RewriteError`] if:
+/// - [`RewriteError::Parse`] - the file has invalid Nix syntax
+/// - [`RewriteError::NotFound`] - the attribute is not found (or the old value doesn't match the
+///   matched site)
+/// - [`RewriteError::InvalidResult`] - the replacement would produce invalid Nix syntax
+/// - [`RewriteError::Regex`] - the internal regex failed to compile
 pub fn find_and_update_attr(
     content: &str,
     attr_name: &str,
     new_value: &str,
     old_value: Option<&str>,
-) -> anyhow::Result<String> {
+) -> Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
@@ -37,10 +34,7 @@ pub fn find_and_update_attr(
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        return Err(anyhow::anyhow!(
-            "Failed to parse Nix file: {}",
-            errors.join(", ")
-        ));
+        return Err(RewriteError::Parse(errors.join(", ")));
     }
 
     // Build regex pattern to match: attr_name = "value";
@@ -64,7 +58,7 @@ pub fn find_and_update_attr(
 
     // Check if the attribute exists
     if !re.is_match(content) {
-        anyhow::bail!("Attribute '{attr_name}' not found in Nix file");
+        return Err(RewriteError::attr_not_found(attr_name));
     }
 
     // Replace the attribute value
@@ -75,7 +69,9 @@ pub fn find_and_update_attr(
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        anyhow::bail!("Replacement would create invalid Nix syntax");
+        return Err(RewriteError::InvalidResult {
+            operation: "Replacement",
+        });
     }
 
     Ok(result.into_owned())

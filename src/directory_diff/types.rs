@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Complete directory diff result across all outputs
 #[derive(Debug, Clone)]
@@ -30,7 +31,7 @@ pub struct SignificantSizeChange {
     /// Which output this file is in
     pub output_name: String,
     /// Path to the file (relative to output root)
-    pub file_path: PathBuf,
+    pub file_path: Utf8PathBuf,
     /// Old size in bytes
     pub old_size: u64,
     /// New size in bytes
@@ -58,7 +59,7 @@ pub struct OutputDiff {
     /// Name of the output (e.g., "out", "dev", "lib")
     pub output_name: String,
     /// Changes grouped by directory (sorted by path)
-    pub directories: BTreeMap<PathBuf, DirectoryChange>,
+    pub directories: BTreeMap<Utf8PathBuf, DirectoryChange>,
     /// Directories that are summarized (share/, doc/, etc.)
     pub summary_dirs: Vec<SummaryDirectory>,
 }
@@ -103,7 +104,7 @@ impl DirectoryChange {
 #[derive(Debug, Clone)]
 pub struct SummaryDirectory {
     /// Path to the directory (relative to output root)
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     /// Number of files added
     pub files_added: usize,
     /// Number of files removed
@@ -116,7 +117,7 @@ pub struct SummaryDirectory {
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     /// Path relative to output root
-    pub relative_path: PathBuf,
+    pub relative_path: Utf8PathBuf,
     /// File size in bytes
     pub size: u64,
     /// Whether the file is executable
@@ -126,11 +127,7 @@ pub struct FileInfo {
 impl FileInfo {
     /// Get just the filename component
     pub fn filename(&self) -> String {
-        self.relative_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_owned()
+        self.relative_path.file_name().unwrap_or("").to_owned()
     }
 }
 
@@ -160,13 +157,8 @@ impl Default for DiffConfig {
 
 impl DiffConfig {
     /// Check if a path should be summarized rather than listed file-by-file
-    pub fn should_summarize(&self, path: &std::path::Path) -> bool {
-        path.components().any(|c| {
-            if let Some(s) = c.as_os_str().to_str() {
-                self.summary_path_components.contains(&s.to_owned())
-            } else {
-                false
-            }
-        })
+    pub fn should_summarize(&self, path: &Utf8Path) -> bool {
+        path.components()
+            .any(|c| self.summary_path_components.iter().any(|s| s == c.as_str()))
     }
 }

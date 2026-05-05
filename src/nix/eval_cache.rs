@@ -147,7 +147,9 @@ impl CachedEvaluation {
         // Use a hash of the eval file path to create a stable filename
         let file_hash = hash_string(eval_file);
 
-        Ok(crate::paths::eval_cache_dir()?.join(format!("{commit}-{file_hash}.json")))
+        Ok(crate::paths::eval_cache_dir()?
+            .join(format!("{commit}-{file_hash}.json"))
+            .into_std_path_buf())
     }
 }
 

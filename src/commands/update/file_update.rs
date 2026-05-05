@@ -34,7 +34,7 @@ pub async fn update_nix_file(
                 );
                 (content, file_path.to_path_buf())
             },
-            Err(e) if e.to_string().contains("not found") => {
+            Err(e) if e.is_not_found() => {
                 // Version not found - check if this is a mkManyVariants package
                 debug!(
                     "Version not found in {}, checking if mkManyVariants",
@@ -57,15 +57,15 @@ pub async fn update_nix_file(
                         },
                         None => {
                             // No sibling found, return original error
-                            return Err(e);
+                            return Err(e.into());
                         },
                     }
                 } else {
                     // Not a mkManyVariants package, return original error
-                    return Err(e);
+                    return Err(e.into());
                 }
             },
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
 
     // Update hash if provided
