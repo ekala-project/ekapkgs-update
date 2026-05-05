@@ -165,101 +165,261 @@ fn test_semver_strategy_from_str() {
 #[test]
 fn test_version_acceptable_latest() {
     // Latest accepts any newer version
-    assert!(is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.0.1", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "2.0.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.1.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.0.1",
+        SemverStrategy::Latest
+    ));
 
     // Doesn't accept same or older
-    assert!(!is_version_acceptable("1.0.0", "1.0.0", SemverStrategy::Latest).unwrap());
-    assert!(!is_version_acceptable("2.0.0", "1.0.0", SemverStrategy::Latest).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "1.0.0",
+        SemverStrategy::Latest
+    ));
+    assert!(!is_version_acceptable(
+        "2.0.0",
+        "1.0.0",
+        SemverStrategy::Latest
+    ));
 }
 
 // is_version_acceptable tests - Major strategy
 #[test]
 fn test_version_acceptable_major() {
     // Major accepts any newer version (same as latest)
-    assert!(is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Major).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Major).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.0.1", SemverStrategy::Major).unwrap());
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "2.0.0",
+        SemverStrategy::Major
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.1.0",
+        SemverStrategy::Major
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.0.1",
+        SemverStrategy::Major
+    ));
 
     // Doesn't accept same or older
-    assert!(!is_version_acceptable("1.0.0", "1.0.0", SemverStrategy::Major).unwrap());
-    assert!(!is_version_acceptable("2.0.0", "1.0.0", SemverStrategy::Major).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "1.0.0",
+        SemverStrategy::Major
+    ));
+    assert!(!is_version_acceptable(
+        "2.0.0",
+        "1.0.0",
+        SemverStrategy::Major
+    ));
 }
 
 // is_version_acceptable tests - Minor strategy
 #[test]
 fn test_version_acceptable_minor() {
     // Minor accepts only same major version
-    assert!(is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Minor).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.0.1", SemverStrategy::Minor).unwrap());
-    assert!(is_version_acceptable("1.5.2", "1.9.0", SemverStrategy::Minor).unwrap());
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.1.0",
+        SemverStrategy::Minor
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.0.1",
+        SemverStrategy::Minor
+    ));
+    assert!(is_version_acceptable(
+        "1.5.2",
+        "1.9.0",
+        SemverStrategy::Minor
+    ));
 
     // Doesn't accept different major version
-    assert!(!is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("1.0.0", "2.1.0", SemverStrategy::Minor).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "2.0.0",
+        SemverStrategy::Minor
+    ));
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "2.1.0",
+        SemverStrategy::Minor
+    ));
 
     // Doesn't accept same or older
-    assert!(!is_version_acceptable("1.5.0", "1.5.0", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("1.5.0", "1.4.0", SemverStrategy::Minor).unwrap());
+    assert!(!is_version_acceptable(
+        "1.5.0",
+        "1.5.0",
+        SemverStrategy::Minor
+    ));
+    assert!(!is_version_acceptable(
+        "1.5.0",
+        "1.4.0",
+        SemverStrategy::Minor
+    ));
 }
 
 // is_version_acceptable tests - Patch strategy
 #[test]
 fn test_version_acceptable_patch() {
     // Patch accepts only same major.minor version
-    assert!(is_version_acceptable("1.0.0", "1.0.1", SemverStrategy::Patch).unwrap());
-    assert!(is_version_acceptable("1.0.0", "1.0.9", SemverStrategy::Patch).unwrap());
-    assert!(is_version_acceptable("2.3.4", "2.3.5", SemverStrategy::Patch).unwrap());
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.0.1",
+        SemverStrategy::Patch
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "1.0.9",
+        SemverStrategy::Patch
+    ));
+    assert!(is_version_acceptable(
+        "2.3.4",
+        "2.3.5",
+        SemverStrategy::Patch
+    ));
 
     // Doesn't accept different minor version
-    assert!(!is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Patch).unwrap());
-    assert!(!is_version_acceptable("1.0.0", "1.1.1", SemverStrategy::Patch).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "1.1.0",
+        SemverStrategy::Patch
+    ));
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "1.1.1",
+        SemverStrategy::Patch
+    ));
 
     // Doesn't accept different major version
-    assert!(!is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Patch).unwrap());
-    assert!(!is_version_acceptable("1.0.0", "2.0.1", SemverStrategy::Patch).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "2.0.0",
+        SemverStrategy::Patch
+    ));
+    assert!(!is_version_acceptable(
+        "1.0.0",
+        "2.0.1",
+        SemverStrategy::Patch
+    ));
 
     // Doesn't accept same or older
-    assert!(!is_version_acceptable("1.0.5", "1.0.5", SemverStrategy::Patch).unwrap());
-    assert!(!is_version_acceptable("1.0.5", "1.0.4", SemverStrategy::Patch).unwrap());
+    assert!(!is_version_acceptable(
+        "1.0.5",
+        "1.0.5",
+        SemverStrategy::Patch
+    ));
+    assert!(!is_version_acceptable(
+        "1.0.5",
+        "1.0.4",
+        SemverStrategy::Patch
+    ));
 }
 
 // Test with version prefixes
 #[test]
 fn test_version_acceptable_with_prefixes() {
     // v prefix
-    assert!(is_version_acceptable("v1.0.0", "v2.0.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("v1.0.0", "2.0.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.0.0", "v2.0.0", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable(
+        "v1.0.0",
+        "v2.0.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "v1.0.0",
+        "2.0.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "1.0.0",
+        "v2.0.0",
+        SemverStrategy::Latest
+    ));
 
     // Minor with v prefix
-    assert!(is_version_acceptable("v1.0.0", "v1.1.0", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("v1.0.0", "v2.0.0", SemverStrategy::Minor).unwrap());
+    assert!(is_version_acceptable(
+        "v1.0.0",
+        "v1.1.0",
+        SemverStrategy::Minor
+    ));
+    assert!(!is_version_acceptable(
+        "v1.0.0",
+        "v2.0.0",
+        SemverStrategy::Minor
+    ));
 }
 
 // Test non-semver versions
 #[test]
 fn test_version_acceptable_non_semver() {
     // Latest/Major strategies should fall back to string comparison
-    assert!(is_version_acceptable("2024.01.01", "2024.12.01", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("2024.01.01", "2024.12.01", SemverStrategy::Major).unwrap());
+    assert!(is_version_acceptable(
+        "2024.01.01",
+        "2024.12.01",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "2024.01.01",
+        "2024.12.01",
+        SemverStrategy::Major
+    ));
 
     // Minor/Patch strategies should reject non-semver
-    assert!(!is_version_acceptable("2024.01.01", "2024.12.01", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("2024.01.01", "2024.12.01", SemverStrategy::Patch).unwrap());
+    assert!(!is_version_acceptable(
+        "2024.01.01",
+        "2024.12.01",
+        SemverStrategy::Minor
+    ));
+    assert!(!is_version_acceptable(
+        "2024.01.01",
+        "2024.12.01",
+        SemverStrategy::Patch
+    ));
 }
 
 // Test edge case: version 0.x.y
 #[test]
 fn test_version_acceptable_zero_versions() {
     // 0.x versions
-    assert!(is_version_acceptable("0.1.0", "0.2.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("0.1.0", "0.2.0", SemverStrategy::Major).unwrap());
-    assert!(is_version_acceptable("0.1.0", "0.2.0", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("0.1.0", "0.2.0", SemverStrategy::Patch).unwrap());
+    assert!(is_version_acceptable(
+        "0.1.0",
+        "0.2.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "0.1.0",
+        "0.2.0",
+        SemverStrategy::Major
+    ));
+    assert!(is_version_acceptable(
+        "0.1.0",
+        "0.2.0",
+        SemverStrategy::Minor
+    ));
+    assert!(!is_version_acceptable(
+        "0.1.0",
+        "0.2.0",
+        SemverStrategy::Patch
+    ));
 
-    assert!(is_version_acceptable("0.1.0", "0.1.1", SemverStrategy::Patch).unwrap());
+    assert!(is_version_acceptable(
+        "0.1.0",
+        "0.1.1",
+        SemverStrategy::Patch
+    ));
 }
 
 // Test normalize_version function
@@ -291,33 +451,53 @@ fn test_normalize_version() {
 #[test]
 fn test_version_acceptable_two_components() {
     // This is the key test case: 1.25 should be considered newer than 1.9
-    assert!(!is_version_acceptable("1.25", "1.9", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Latest).unwrap());
+    assert!(!is_version_acceptable(
+        "1.25",
+        "1.9",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Latest));
 
     // More two-component version tests
-    assert!(is_version_acceptable("1.0", "1.1", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.9", "1.10", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("2.0", "2.1", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable("1.0", "1.1", SemverStrategy::Latest));
+    assert!(is_version_acceptable("1.9", "1.10", SemverStrategy::Latest));
+    assert!(is_version_acceptable("2.0", "2.1", SemverStrategy::Latest));
 
     // Two-component with Minor strategy
-    assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Minor).unwrap());
-    assert!(!is_version_acceptable("1.9", "2.0", SemverStrategy::Minor).unwrap());
+    assert!(is_version_acceptable("1.9", "1.25", SemverStrategy::Minor));
+    assert!(!is_version_acceptable("1.9", "2.0", SemverStrategy::Minor));
 
     // Two-component with Patch strategy (should upgrade minor version)
-    assert!(!is_version_acceptable("1.9", "1.25", SemverStrategy::Patch).unwrap());
-    assert!(is_version_acceptable("1.9", "1.9.1", SemverStrategy::Patch).unwrap());
+    assert!(!is_version_acceptable("1.9", "1.25", SemverStrategy::Patch));
+    assert!(is_version_acceptable("1.9", "1.9.1", SemverStrategy::Patch));
 }
 
 // Test mixed component version comparison
 #[test]
 fn test_version_acceptable_mixed_components() {
     // Two-component current, three-component new
-    assert!(is_version_acceptable("1.9", "1.25.0", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.9", "1.9.1", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable(
+        "1.9",
+        "1.25.0",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "1.9",
+        "1.9.1",
+        SemverStrategy::Latest
+    ));
 
     // Three-component current, two-component new
-    assert!(is_version_acceptable("1.9.0", "1.25", SemverStrategy::Latest).unwrap());
-    assert!(!is_version_acceptable("1.25.0", "1.9", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable(
+        "1.9.0",
+        "1.25",
+        SemverStrategy::Latest
+    ));
+    assert!(!is_version_acceptable(
+        "1.25.0",
+        "1.9",
+        SemverStrategy::Latest
+    ));
 }
 
 // Test that single-component versions are rejected
@@ -325,17 +505,37 @@ fn test_version_acceptable_mixed_components() {
 fn test_version_acceptable_single_component_rejected() {
     // Single-component versions should be rejected (no major.minor)
     // Date-like version (the ninja 120715 case)
-    assert!(!is_version_acceptable("1.13.1", "120715", SemverStrategy::Latest).unwrap());
-    assert!(!is_version_acceptable("1.13.1", "120715", SemverStrategy::Minor).unwrap());
+    assert!(!is_version_acceptable(
+        "1.13.1",
+        "120715",
+        SemverStrategy::Latest
+    ));
+    assert!(!is_version_acceptable(
+        "1.13.1",
+        "120715",
+        SemverStrategy::Minor
+    ));
 
     // Regular single-component version
-    assert!(!is_version_acceptable("1.0.0", "2", SemverStrategy::Latest).unwrap());
-    assert!(!is_version_acceptable("1", "2", SemverStrategy::Latest).unwrap());
+    assert!(!is_version_acceptable("1.0.0", "2", SemverStrategy::Latest));
+    assert!(!is_version_acceptable("1", "2", SemverStrategy::Latest));
 
     // With v prefix
-    assert!(!is_version_acceptable("v1.0.0", "v2", SemverStrategy::Latest).unwrap());
+    assert!(!is_version_acceptable(
+        "v1.0.0",
+        "v2",
+        SemverStrategy::Latest
+    ));
 
     // Two-component versions should still work
-    assert!(is_version_acceptable("1.13", "1.14", SemverStrategy::Latest).unwrap());
-    assert!(is_version_acceptable("1.13.1", "1.13.2", SemverStrategy::Latest).unwrap());
+    assert!(is_version_acceptable(
+        "1.13",
+        "1.14",
+        SemverStrategy::Latest
+    ));
+    assert!(is_version_acceptable(
+        "1.13.1",
+        "1.13.2",
+        SemverStrategy::Latest
+    ));
 }

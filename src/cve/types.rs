@@ -10,15 +10,18 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// Parse severity from OSV severity string
+    /// Parse severity from OSV severity string.
+    ///
+    /// Unknown values default to `Medium`. OSV uses both `MEDIUM` and
+    /// `MODERATE` for the medium tier; both fall through to the default arm.
     #[allow(dead_code)]
     pub fn from_osv_severity(s: &str) -> Self {
         match s.to_uppercase().as_str() {
             "CRITICAL" => Severity::Critical,
             "HIGH" => Severity::High,
-            "MEDIUM" | "MODERATE" => Severity::Medium,
             "LOW" => Severity::Low,
-            _ => Severity::Medium, // Default to Medium for unknown
+            // "MEDIUM", "MODERATE", or any unknown value → Medium
+            _ => Severity::Medium,
         }
     }
 
