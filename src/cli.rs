@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::commands;
+use crate::vcs_sources::SemverStrategy;
 
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
@@ -66,8 +67,8 @@ pub enum Commands {
         /// Attribute path of the package to update
         attr_path: String,
         /// Version selection strategy: latest, major, minor, or patch
-        #[arg(long, default_value = "latest")]
-        semver: String,
+        #[arg(long, default_value_t = SemverStrategy::Latest)]
+        semver: SemverStrategy,
         /// Ignore update script and use generic update method
         #[arg(long, default_value = "false")]
         ignore_update_script: bool,
@@ -221,8 +222,6 @@ impl Commands {
                     FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig,
                 };
 
-                use crate::vcs_sources::SemverStrategy;
-
                 let params = UpdateParams {
                     file,
                     attr_path,
@@ -243,7 +242,7 @@ impl Commands {
                         },
                     },
                     version_config: VersionConfig {
-                        strategy: SemverStrategy::from_str(&semver)?,
+                        strategy: semver,
                         explicit_version: version,
                         version_regex,
                     },

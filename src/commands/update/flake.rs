@@ -84,7 +84,7 @@ pub async fn update_flake_package(
 
     // Step 3: Find best release according to strategy
     info!(
-        "Fetching compatible release with strategy: {:?}",
+        "Fetching compatible release with strategy: {}",
         version_config.strategy
     );
     let best_release = upstream_source

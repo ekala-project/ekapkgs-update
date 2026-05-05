@@ -1,6 +1,8 @@
 //! VCS source abstraction for GitHub, GitLab, and other code hosting platforms
 
-use std::env;
+use std::str::FromStr;
+use std::sync::OnceLock;
+use std::{env, fmt};
 
 use anyhow::Context;
 use regex::Regex;
@@ -31,9 +33,10 @@ pub enum SemverStrategy {
     Patch,
 }
 
-impl SemverStrategy {
-    /// Parse strategy from string
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+impl FromStr for SemverStrategy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
         match s.to_lowercase().as_str() {
             "latest" => Ok(SemverStrategy::Latest),
             "major" => Ok(SemverStrategy::Major),
@@ -44,6 +47,18 @@ impl SemverStrategy {
                 s
             ),
         }
+    }
+}
+
+impl fmt::Display for SemverStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SemverStrategy::Latest => "latest",
+            SemverStrategy::Major => "major",
+            SemverStrategy::Minor => "minor",
+            SemverStrategy::Patch => "patch",
+        };
+        f.write_str(s)
     }
 }
 
@@ -77,10 +92,13 @@ fn parse_pypi_url(url: &str) -> Option<String> {
     }
 
     // Match pypi.org/project/{pname}
-    if let Ok(pypi_project_regex) = Regex::new(r"pypi\.(?:python\.)?org/project/([^/]+)") {
-        if let Some(caps) = pypi_project_regex.captures(url) {
-            return caps.get(1).map(|m| m.as_str().to_string());
-        }
+    static PYPI_PROJECT_REGEX: OnceLock<Regex> = OnceLock::new();
+    let pypi_project_regex = PYPI_PROJECT_REGEX.get_or_init(|| {
+        Regex::new(r"pypi\.(?:python\.)?org/project/([^/]+)")
+            .expect("hard-coded PyPI project regex must compile")
+    });
+    if let Some(caps) = pypi_project_regex.captures(url) {
+        return caps.get(1).map(|m| m.as_str().to_string());
     }
 
     // Match files.pythonhosted.org or pypi.python.org packages
@@ -422,7 +440,7 @@ fn find_best_release(
     // Return the best (first after sorting) release
     let best = compatible_releases.first().ok_or_else(|| {
         anyhow::anyhow!(
-            "No compatible releases found for version {} with strategy {:?}",
+            "No compatible releases found for version {} with strategy {}",
             current_version,
             strategy
         )
@@ -666,7 +684,7 @@ pub fn is_version_acceptable(
         // For non-semver versions, only Latest/Major strategies work
         debug!(
             "Could not parse versions as semver (current: {}, new: {}), using string comparison \
-             (strategy: {:?})",
+             (strategy: {})",
             clean_current, clean_new, strategy
         );
 
@@ -674,8 +692,7 @@ pub fn is_version_acceptable(
             SemverStrategy::Latest | SemverStrategy::Major => Ok(clean_new > clean_current),
             SemverStrategy::Minor | SemverStrategy::Patch => {
                 warn!(
-                    "Version '{}' is not valid semver, cannot apply {:?} strategy. Skipping \
-                     update.",
+                    "Version '{}' is not valid semver, cannot apply {} strategy. Skipping update.",
                     clean_current, strategy
                 );
                 Ok(false)
