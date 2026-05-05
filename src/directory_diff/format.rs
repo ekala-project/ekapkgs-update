@@ -158,7 +158,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
                 output.push_str(&format!(
                     "- ⚠️ `{}` in output `{}` {} by **{:.1}%** ({} → {})\n",
-                    change.file_path.display(),
+                    change.file_path,
                     change.output_name,
                     direction,
                     change.percentage_change.abs(),
@@ -187,7 +187,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
                 output.push_str(&format!(
                     "- `{}` in output `{}` {} by **{:.1}%** ({} → {})\n",
-                    change.file_path.display(),
+                    change.file_path,
                     change.output_name,
                     direction,
                     change.percentage_change.abs(),
@@ -226,10 +226,10 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
         // Regular directories with file-by-file listings
         for (dir_path, changes) in &output_diff.directories {
-            let dir_str = if dir_path.as_os_str().is_empty() {
+            let dir_str = if dir_path.as_str().is_empty() {
                 "(root)".to_owned()
             } else {
-                format!("{}/", dir_path.display())
+                format!("{dir_path}/")
             };
 
             let summary = format!(
@@ -285,7 +285,7 @@ pub fn format_for_pr_body(diff: &DirectoryDiff) -> String {
 
         // Summary directories
         for summary_dir in &output_diff.summary_dirs {
-            let dir_str = format!("{}/", summary_dir.path.display());
+            let dir_str = format!("{}/", summary_dir.path);
             let summary = format!(
                 "{} (+{}, -{}, {})",
                 dir_str,

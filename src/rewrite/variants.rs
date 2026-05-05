@@ -1,5 +1,7 @@
 use regex::Regex;
 
+use super::error::{Result, RewriteError};
+
 /// Update an attribute within a specific variant in a mkManyVariants variants.nix file
 ///
 /// This function locates a specific variant attribute set and updates an attribute
@@ -13,12 +15,14 @@ use regex::Regex;
 /// * `old_value` - Optional old value to match (for safety)
 ///
 /// # Returns
-/// The updated content if successful, or an error if:
-/// - The file has invalid Nix syntax
-/// - The variant is not found
-/// - The attribute is not found within the variant
-/// - The old value doesn't match (if specified)
-/// - The replacement would create invalid syntax
+/// The updated content if successful.
+///
+/// # Errors
+/// Returns a [`RewriteError`] if:
+/// - [`RewriteError::Parse`] - the file has invalid Nix syntax
+/// - [`RewriteError::NotFound`] - the variant or the attribute within it is not found
+/// - [`RewriteError::InvalidResult`] - the replacement would produce invalid syntax
+/// - [`RewriteError::Regex`] - the internal regex failed to compile
 ///
 /// # Example
 /// ```
@@ -45,7 +49,7 @@ pub fn update_variant_attr(
     attr_name: &str,
     new_value: &str,
     old_value: Option<&str>,
-) -> anyhow::Result<String> {
+) -> Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
@@ -54,10 +58,7 @@ pub fn update_variant_attr(
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        return Err(anyhow::anyhow!(
-            "Failed to parse Nix file: {}",
-            errors.join(", ")
-        ));
+        return Err(RewriteError::Parse(errors.join(", ")));
     }
 
     // Find the variant attribute set boundaries using regex
@@ -86,7 +87,10 @@ pub fn update_variant_attr(
 
     // Check if the attribute exists in this variant
     if !re.is_match(variant_content) {
-        anyhow::bail!("Attribute '{attr_name}' not found in variant '{variant_name}' ");
+        return Err(RewriteError::attr_not_found_in_variant(
+            attr_name,
+            variant_name,
+        ));
     }
 
     // Replace the attribute value within the variant content
@@ -103,7 +107,9 @@ pub fn update_variant_attr(
     // Validate the result parses correctly
     let result_parse = rnix::Root::parse(&result);
     if !result_parse.errors().is_empty() {
-        anyhow::bail!("Replacement would create invalid Nix syntax");
+        return Err(RewriteError::InvalidResult {
+            operation: "Replacement",
+        });
     }
 
     Ok(result)
@@ -117,10 +123,7 @@ pub fn update_variant_attr(
 ///   ...
 /// };
 /// ```
-fn find_variant_range_regex(
-    content: &str,
-    variant_name: &str,
-) -> anyhow::Result<std::ops::Range<usize>> {
+fn find_variant_range_regex(content: &str, variant_name: &str) -> Result<std::ops::Range<usize>> {
     // Pattern to match: variant_name = { ... }; or variant_name = rec { ... };
     // We need to match balanced braces
     let start_pattern = format!(
@@ -133,7 +136,7 @@ fn find_variant_range_regex(
     // Find the start of the variant attribute set
     let start_match = start_re
         .find(content)
-        .ok_or_else(|| anyhow::anyhow!("Variant '{variant_name}' not found in file"))?;
+        .ok_or_else(|| RewriteError::variant_not_found(variant_name))?;
 
     // Find the opening brace position
     let brace_start = content[start_match.end() - 1..]
@@ -147,7 +150,9 @@ fn find_variant_range_regex(
             }
         })
         .ok_or_else(|| {
-            anyhow::anyhow!("Failed to find opening brace for variant '{variant_name}'")
+            RewriteError::Structural(format!(
+                "Failed to find opening brace for variant '{variant_name}'"
+            ))
         })?;
 
     // Find the matching closing brace
@@ -157,7 +162,7 @@ fn find_variant_range_regex(
 }
 
 /// Find the position of the closing brace matching an opening brace
-fn find_matching_brace(content: &str, start_pos: usize) -> anyhow::Result<usize> {
+fn find_matching_brace(content: &str, start_pos: usize) -> Result<usize> {
     let mut depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
@@ -182,5 +187,7 @@ fn find_matching_brace(content: &str, start_pos: usize) -> anyhow::Result<usize>
         }
     }
 
-    anyhow::bail!("No matching closing brace found")
+    Err(RewriteError::Structural(
+        "No matching closing brace found".to_owned(),
+    ))
 }

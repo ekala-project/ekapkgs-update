@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
 use walkdir::WalkDir;
 
 use super::types::*;
@@ -66,8 +67,8 @@ pub fn compare_build_outputs(
 
         let (output_diff, size_changes) = compare_single_output(
             output_name,
-            old_path,
-            new_path,
+            old_path.map(PathBuf::as_path),
+            new_path.map(PathBuf::as_path),
             config,
             &mut total_files_listed,
             &mut truncated,
@@ -140,8 +141,8 @@ pub fn compare_build_outputs(
 /// Compare a single output between old and new versions
 fn compare_single_output(
     output_name: &str,
-    old_path: Option<&PathBuf>,
-    new_path: Option<&PathBuf>,
+    old_path: Option<&Path>,
+    new_path: Option<&Path>,
     config: &DiffConfig,
     total_files_listed: &mut usize,
     truncated: &mut bool,
@@ -197,8 +198,8 @@ fn compare_single_output(
     }
 
     // Separate regular changes from summary-only directories
-    let mut regular_dirs: BTreeMap<PathBuf, DirectoryChange> = BTreeMap::new();
-    let mut summary_stats: HashMap<PathBuf, (usize, usize, i64)> = HashMap::new();
+    let mut regular_dirs: BTreeMap<Utf8PathBuf, DirectoryChange> = BTreeMap::new();
+    let mut summary_stats: HashMap<Utf8PathBuf, (usize, usize, i64)> = HashMap::new();
 
     // Process added files
     for file in added {
@@ -216,7 +217,7 @@ fn compare_single_output(
             let dir = file
                 .relative_path
                 .parent()
-                .unwrap_or_else(|| Path::new(""))
+                .unwrap_or_else(|| Utf8Path::new(""))
                 .to_path_buf();
             regular_dirs
                 .entry(dir)
@@ -243,7 +244,7 @@ fn compare_single_output(
             let dir = file
                 .relative_path
                 .parent()
-                .unwrap_or_else(|| Path::new(""))
+                .unwrap_or_else(|| Utf8Path::new(""))
                 .to_path_buf();
             regular_dirs
                 .entry(dir)
@@ -280,7 +281,10 @@ fn compare_single_output(
 }
 
 /// Collect all files in a directory with their metadata
-fn collect_files(root: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
+///
+/// Files whose paths are not valid UTF-8 are skipped (with a debug log) since
+/// our diff types are UTF-8 throughout.
+fn collect_files(root: &Path) -> Result<HashMap<Utf8PathBuf, FileInfo>> {
     let mut files = HashMap::new();
 
     for entry in WalkDir::new(root).follow_links(true) {
@@ -294,16 +298,25 @@ fn collect_files(root: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
         }
 
         let metadata = entry.metadata()?;
-        let relative_path = path
-            .strip_prefix(root)
-            .with_context(|| {
-                format!(
-                    "Failed to strip prefix {} from {}",
+        let relative = path.strip_prefix(root).with_context(|| {
+            format!(
+                "Failed to strip prefix {} from {}",
+                root.display(),
+                path.display()
+            )
+        })?;
+
+        let relative_path = match Utf8PathBuf::from_path_buf(relative.to_path_buf()) {
+            Ok(p) => p,
+            Err(non_utf8) => {
+                tracing::debug!(
+                    "Skipping non-UTF-8 path in {}: {}",
                     root.display(),
-                    path.display()
-                )
-            })?
-            .to_path_buf();
+                    non_utf8.display()
+                );
+                continue;
+            },
+        };
 
         let is_executable = metadata.permissions().mode() & 0o111 != 0;
 
@@ -321,24 +334,25 @@ fn collect_files(root: &Path) -> Result<HashMap<PathBuf, FileInfo>> {
 }
 
 /// Get the top-level directory that should be summarized
-fn get_summary_dir(path: &Path) -> PathBuf {
+fn get_summary_dir(path: &Utf8Path) -> Utf8PathBuf {
     // Find the first component that matches a summary pattern
     let components: Vec<_> = path.components().collect();
 
     for (i, component) in components.iter().enumerate() {
-        if let Some(s) = component.as_os_str().to_str() {
-            if matches!(s, "share" | "doc" | "man" | "locale" | "info") {
-                // Return path up to and including this component
-                return components.iter().take(i + 1).collect();
-            }
+        if matches!(
+            component.as_str(),
+            "share" | "doc" | "man" | "locale" | "info"
+        ) {
+            // Return path up to and including this component
+            return components.iter().take(i + 1).collect();
         }
     }
 
     // Fallback: return the top-level directory
     components
         .first()
-        .map(|c| PathBuf::from(c.as_os_str()))
-        .unwrap_or_else(|| PathBuf::from(""))
+        .map(|c| Utf8PathBuf::from(c.as_str()))
+        .unwrap_or_else(|| Utf8PathBuf::from(""))
 }
 
 /// Calculate closure size for a store path using nix path-info
@@ -425,25 +439,25 @@ mod tests {
     #[test]
     fn test_get_summary_dir() {
         assert_eq!(
-            get_summary_dir(Path::new("share/doc/foo/bar.txt")),
-            PathBuf::from("share")
+            get_summary_dir(Utf8Path::new("share/doc/foo/bar.txt")),
+            Utf8PathBuf::from("share")
         );
         assert_eq!(
-            get_summary_dir(Path::new("usr/share/locale/en/LC_MESSAGES/foo.mo")),
-            PathBuf::from("usr/share")
+            get_summary_dir(Utf8Path::new("usr/share/locale/en/LC_MESSAGES/foo.mo")),
+            Utf8PathBuf::from("usr/share")
         );
         assert_eq!(
-            get_summary_dir(Path::new("share/man/man1/foo.1.gz")),
-            PathBuf::from("share")
+            get_summary_dir(Utf8Path::new("share/man/man1/foo.1.gz")),
+            Utf8PathBuf::from("share")
         );
     }
 
     #[test]
     fn test_should_summarize() {
         let config = DiffConfig::default();
-        assert!(config.should_summarize(Path::new("share/doc/foo.txt")));
-        assert!(config.should_summarize(Path::new("usr/share/man/man1/foo.1")));
-        assert!(!config.should_summarize(Path::new("bin/foo")));
-        assert!(!config.should_summarize(Path::new("lib/libfoo.so")));
+        assert!(config.should_summarize(Utf8Path::new("share/doc/foo.txt")));
+        assert!(config.should_summarize(Utf8Path::new("usr/share/man/man1/foo.1")));
+        assert!(!config.should_summarize(Utf8Path::new("bin/foo")));
+        assert!(!config.should_summarize(Utf8Path::new("lib/libfoo.so")));
     }
 }

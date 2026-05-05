@@ -41,7 +41,7 @@ fn test_find_and_update_attr_not_found() {
 
     let result = find_and_update_attr(content, "hash", "newvalue", None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    assert!(result.unwrap_err().is_not_found());
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn test_find_and_update_attr_wrong_old_value() {
 
     let result = find_and_update_attr(content, "version", "2.0.0", Some("9.9.9"));
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    assert!(result.unwrap_err().is_not_found());
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn test_remove_patch_from_array_not_found() {
 
     let result = remove_patch_from_array(content, "nonexistent.patch");
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    assert!(result.unwrap_err().is_not_found());
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn test_remove_patches_attribute_not_found() {
 
     let result = remove_patches_attribute(content);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    assert!(result.unwrap_err().is_not_found());
 }
 
 #[test]

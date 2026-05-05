@@ -13,7 +13,9 @@ async fn get_stderr_log_path() -> anyhow::Result<PathBuf> {
     let logs_dir = crate::paths::logs_dir()?;
     fs::create_dir_all(&logs_dir).await?;
 
-    Ok(logs_dir.join("nix-eval-jobs.stderr.log"))
+    Ok(logs_dir
+        .join("nix-eval-jobs.stderr.log")
+        .into_std_path_buf())
 }
 
 pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
