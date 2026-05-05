@@ -45,24 +45,18 @@ pub async fn analyze_cve_changes(
     }
 
     // Detect ecosystem
-    let ecosystem = match ecosystem::detect_ecosystem(metadata) {
-        Some(eco) => eco,
-        None => {
-            debug!(
-                "Could not detect ecosystem for package, skipping CVE check. src_url={:?}",
-                metadata.src_url
-            );
-            return Ok(CveAnalysis::default());
-        },
+    let Some(ecosystem) = ecosystem::detect_ecosystem(metadata) else {
+        debug!(
+            "Could not detect ecosystem for package, skipping CVE check. src_url={:?}",
+            metadata.src_url
+        );
+        return Ok(CveAnalysis::default());
     };
 
     // Get package name
-    let package_name = match ecosystem::get_package_name(metadata, &ecosystem) {
-        Some(name) => name,
-        None => {
-            debug!("No package name available, skipping CVE check");
-            return Ok(CveAnalysis::default());
-        },
+    let Some(package_name) = ecosystem::get_package_name(metadata, &ecosystem) else {
+        debug!("No package name available, skipping CVE check");
+        return Ok(CveAnalysis::default());
     };
 
     info!(

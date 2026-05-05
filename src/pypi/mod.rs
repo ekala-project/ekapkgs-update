@@ -78,9 +78,9 @@ mod tests {
 
     #[test]
     fn test_pypi_response_structure() {
-        // This test just verifies that the structures are defined correctly
-        // Actual API integration tests would require network access
+        // Compile-only smoke check: verifies the type can be named and is
+        // constructible from `None`. Actual API integration tests would require
+        // network access.
         let _response: Option<PypiResponse> = None;
-        assert!(true);
     }
 }

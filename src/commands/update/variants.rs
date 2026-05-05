@@ -279,9 +279,8 @@ pub async fn find_version_in_siblings(
     use std::path::Path;
 
     let path = Path::new(file_path);
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(parent) = path.parent() else {
+        return Ok(None);
     };
 
     debug!(
@@ -306,9 +305,8 @@ pub async fn find_version_in_siblings(
         }
 
         // Read the file content
-        let content = match tokio::fs::read_to_string(entry_path).await {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = tokio::fs::read_to_string(entry_path).await else {
+            continue;
         };
 
         // Count occurrences of version

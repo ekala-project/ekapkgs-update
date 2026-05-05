@@ -397,16 +397,7 @@ fn find_best_release(
                 }
             }
 
-            match is_version_acceptable(current_version, &version, strategy) {
-                Ok(accept) => accept,
-                Err(e) => {
-                    warn!(
-                        "Failed to evaluate version compatibility for {}: {}; skipping",
-                        version, e
-                    );
-                    false
-                },
-            }
+            is_version_acceptable(current_version, &version, strategy)
         })
         .collect();
 
@@ -582,32 +573,52 @@ pub fn normalize_version(version: &str) -> String {
 /// * `strategy` - The semver update strategy to apply
 ///
 /// # Returns
-/// `Ok(true)` if the new version satisfies the strategy constraints, `Ok(false)` otherwise
+/// `true` if the new version satisfies the strategy constraints, `false` otherwise.
 ///
-/// # Errors
-/// Returns an error if version comparison fails
+/// Versions that fail to parse as semver fall back to lexicographic string
+/// comparison for `Latest`/`Major`, and are rejected for `Minor`/`Patch`.
 ///
 /// # Examples
 /// ```
 /// use ekapkgs_update::vcs_sources::{SemverStrategy, is_version_acceptable};
 ///
 /// // Latest strategy accepts any newer version
-/// assert!(is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Latest).unwrap());
-/// assert!(is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Latest).unwrap());
+/// assert!(is_version_acceptable(
+///     "1.0.0",
+///     "2.0.0",
+///     SemverStrategy::Latest
+/// ));
+/// assert!(is_version_acceptable(
+///     "1.0.0",
+///     "1.1.0",
+///     SemverStrategy::Latest
+/// ));
 ///
 /// // Minor strategy only accepts same major version
-/// assert!(is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Minor).unwrap());
-/// assert!(!is_version_acceptable("1.0.0", "2.0.0", SemverStrategy::Minor).unwrap());
+/// assert!(is_version_acceptable(
+///     "1.0.0",
+///     "1.1.0",
+///     SemverStrategy::Minor
+/// ));
+/// assert!(!is_version_acceptable(
+///     "1.0.0",
+///     "2.0.0",
+///     SemverStrategy::Minor
+/// ));
 ///
 /// // Patch strategy only accepts same major.minor version
-/// assert!(is_version_acceptable("1.0.0", "1.0.1", SemverStrategy::Patch).unwrap());
-/// assert!(!is_version_acceptable("1.0.0", "1.1.0", SemverStrategy::Patch).unwrap());
+/// assert!(is_version_acceptable(
+///     "1.0.0",
+///     "1.0.1",
+///     SemverStrategy::Patch
+/// ));
+/// assert!(!is_version_acceptable(
+///     "1.0.0",
+///     "1.1.0",
+///     SemverStrategy::Patch
+/// ));
 /// ```
-pub fn is_version_acceptable(
-    current: &str,
-    new: &str,
-    strategy: SemverStrategy,
-) -> anyhow::Result<bool> {
+pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy) -> bool {
     // Strip common prefixes like 'v' or 'version-'
     let clean_current = current
         .trim_start_matches('v')
@@ -625,7 +636,7 @@ pub fn is_version_acceptable(
             "Rejecting version without major.minor components (current: {}, new: {})",
             clean_current, clean_new
         );
-        return Ok(false);
+        return false;
     }
 
     // Normalize versions to ensure they have 3 components for semver parsing
@@ -639,22 +650,18 @@ pub fn is_version_acceptable(
     ) {
         // First check if new version is actually newer
         if new_ver <= curr_ver {
-            return Ok(false);
+            return false;
         }
 
         // Apply strategy-specific constraints
         match strategy {
-            SemverStrategy::Latest | SemverStrategy::Major => {
-                // Accept any newer version
-                Ok(true)
-            },
-            SemverStrategy::Minor => {
-                // Only accept if major version matches
-                Ok(new_ver.major == curr_ver.major)
-            },
+            // Accept any newer version
+            SemverStrategy::Latest | SemverStrategy::Major => true,
+            // Only accept if major version matches
+            SemverStrategy::Minor => new_ver.major == curr_ver.major,
+            // Only accept if major and minor versions match
             SemverStrategy::Patch => {
-                // Only accept if major and minor versions match
-                Ok(new_ver.major == curr_ver.major && new_ver.minor == curr_ver.minor)
+                new_ver.major == curr_ver.major && new_ver.minor == curr_ver.minor
             },
         }
     } else {
@@ -666,13 +673,13 @@ pub fn is_version_acceptable(
         );
 
         match strategy {
-            SemverStrategy::Latest | SemverStrategy::Major => Ok(clean_new > clean_current),
+            SemverStrategy::Latest | SemverStrategy::Major => clean_new > clean_current,
             SemverStrategy::Minor | SemverStrategy::Patch => {
                 warn!(
                     "Version '{}' is not valid semver, cannot apply {} strategy. Skipping update.",
                     clean_current, strategy
                 );
-                Ok(false)
+                false
             },
         }
     }
