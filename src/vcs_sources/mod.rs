@@ -218,7 +218,7 @@ impl UpstreamSource {
 
                 // Filter and find best match
                 find_best_release(
-                    &releases,
+                    releases,
                     current_version,
                     strategy,
                     version_prefix,
@@ -262,7 +262,7 @@ impl UpstreamSource {
 
                 // Filter and find best match
                 find_best_release(
-                    &releases,
+                    releases,
                     current_version,
                     strategy,
                     version_prefix,
@@ -289,7 +289,7 @@ impl UpstreamSource {
 
                 // Filter and find best match
                 find_best_release(
-                    &releases,
+                    releases,
                     current_version,
                     strategy,
                     version_prefix,
@@ -345,14 +345,15 @@ impl UpstreamSource {
 /// # Errors
 /// Returns an error if no compatible releases are found
 fn find_best_release(
-    releases: &[Release],
+    releases: Vec<Release>,
     current_version: &str,
     strategy: SemverStrategy,
     version_prefix: Option<&str>,
     explicit_version: Option<&str>,
     version_regex: Option<&str>,
 ) -> anyhow::Result<Release> {
-    // If explicit version is specified, find and return that exact version
+    // If explicit version is specified, find and return that exact version.
+    // We consume the vector so the matched release is moved out instead of cloned.
     if let Some(target_version) = explicit_version {
         for release in releases {
             let version = if let Some(regex) = version_regex {
@@ -363,18 +364,17 @@ fn find_best_release(
 
             // Match either the tag directly or the extracted version
             if release.tag_name == target_version || version == target_version {
-                return Ok(Release {
-                    tag_name: release.tag_name.clone(),
-                    is_prerelease: release.is_prerelease,
-                });
+                return Ok(release);
             }
         }
 
         anyhow::bail!("Explicit version '{target_version}' not found in available releases");
     }
-    // Filter out prereleases and find compatible versions
-    let mut compatible_releases: Vec<&Release> = releases
-        .iter()
+
+    // Filter out prereleases and find compatible versions. Owning each
+    // `Release` here means the eventually-chosen one can be returned by move.
+    let mut compatible_releases: Vec<Release> = releases
+        .into_iter()
         .filter(|r| !r.is_prerelease)
         .filter(|r| {
             let version = if let Some(regex) = version_regex {
@@ -425,15 +425,12 @@ fn find_best_release(
         }
     });
 
-    // Return the best (first after sorting) release
-    let best = compatible_releases.first().ok_or_else(|| {
+    // Return the best (first after sorting) release by moving it out of the
+    // sorted Vec; no clone required.
+    compatible_releases.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
             "No compatible releases found for version {current_version} with strategy {strategy}"
         )
-    })?;
-    Ok(Release {
-        tag_name: best.tag_name.clone(),
-        is_prerelease: best.is_prerelease,
     })
 }
 

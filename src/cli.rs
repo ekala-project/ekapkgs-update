@@ -155,7 +155,13 @@ pub enum Commands {
 }
 
 impl Commands {
-    /// Execute the command
+    /// Execute the command.
+    ///
+    /// This is intentionally a thin dispatcher: each variant forwards to the
+    /// appropriate `from_args` constructor (or top-level function) and then
+    /// awaits `.execute()`. The argument plumbing for the more complex
+    /// `Run` and `Update` arms lives in their respective `*Config::from_args`
+    /// constructors.
     pub async fn execute(self) -> anyhow::Result<()> {
         match self {
             Commands::Run {
@@ -173,28 +179,23 @@ impl Commands {
                 skip_repology,
                 skip_directory_diff,
             } => {
-                use commands::pr_enhancements::PrEnhancementsConfig;
-                use commands::run::RunConfig;
-
-                let config = RunConfig {
+                commands::run::RunConfig::from_args(
                     file,
-                    database_path: database,
+                    database,
                     upstream,
                     fork,
                     run_passthru_tests,
                     dry_run,
                     concurrent_updates,
                     skip_unstable,
-                    pr_enhancements: PrEnhancementsConfig {
-                        directory_diff: !skip_directory_diff,
-                        skip_cve_check: skip_cve,
-                        skip_repology,
-                        analyze_rebuilds,
-                        max_rebuilds,
-                    },
-                };
-
-                config.execute().await
+                    analyze_rebuilds,
+                    max_rebuilds,
+                    skip_cve,
+                    skip_repology,
+                    skip_directory_diff,
+                )
+                .execute()
+                .await
             },
             Commands::Update {
                 file,
@@ -218,46 +219,30 @@ impl Commands {
                 system,
                 skip_directory_diff,
             } => {
-                use commands::pr_enhancements::PrEnhancementsConfig;
-                use commands::update::{
-                    FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig,
-                };
-
-                let params = UpdateParams {
+                commands::update::UpdateParams::from_args(
                     file,
                     attr_path,
+                    semver,
                     ignore_update_script,
+                    commit,
+                    create_pr,
+                    upstream,
+                    fork,
+                    run_passthru_tests,
+                    variant,
+                    all_variants,
+                    flake,
+                    flake_output,
+                    src_only,
+                    version,
+                    version_regex,
+                    format,
                     override_filename,
                     system,
-                    update_config: UpdateConfig {
-                        commit,
-                        create_pr,
-                        upstream,
-                        fork,
-                        run_passthru_tests,
-                        src_only,
-                        format,
-                        pr_enhancements: PrEnhancementsConfig {
-                            directory_diff: !skip_directory_diff,
-                            ..PrEnhancementsConfig::default()
-                        },
-                    },
-                    version_config: VersionConfig {
-                        strategy: semver,
-                        explicit_version: version,
-                        version_regex,
-                    },
-                    variant_config: VariantConfig {
-                        variant,
-                        all_variants,
-                    },
-                    flake_config: FlakeConfig {
-                        enabled: flake,
-                        output: flake_output,
-                    },
-                };
-
-                params.execute().await
+                    skip_directory_diff,
+                )
+                .execute()
+                .await
             },
             Commands::PruneMaintainers { directory, check } => {
                 commands::prune_maintainers::prune_maintainers(directory, check).await

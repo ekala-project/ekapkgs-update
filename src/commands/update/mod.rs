@@ -17,7 +17,7 @@ pub use build::{build_and_get_outputs, cleanup_result_symlinks};
 // Sibling-only re-exports kept narrow with `pub(super)` so child modules can
 // reach them via `super::`, but no other crate module sees them.
 pub(super) use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
-pub use config::{FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig};
+pub use config::{UpdateConfig, UpdateParams, VersionConfig};
 pub(super) use file_update::{
     update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
     update_nuget_deps_hash, update_vendor_hash,
