@@ -41,6 +41,46 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
+    /// Build a [`RunConfig`] from the flat set of CLI flags accepted by the
+    /// `Run` subcommand.
+    ///
+    /// This keeps `Commands::execute` in `cli.rs` to a tight dispatcher by
+    /// pushing the field-shuffling out of the CLI module.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn from_args(
+        file: String,
+        database_path: String,
+        upstream: Option<String>,
+        fork: String,
+        run_passthru_tests: bool,
+        dry_run: bool,
+        concurrent_updates: Option<usize>,
+        skip_unstable: bool,
+        analyze_rebuilds: bool,
+        max_rebuilds: Option<usize>,
+        skip_cve: bool,
+        skip_repology: bool,
+        skip_directory_diff: bool,
+    ) -> Self {
+        Self {
+            file,
+            database_path,
+            upstream,
+            fork,
+            run_passthru_tests,
+            dry_run,
+            concurrent_updates,
+            skip_unstable,
+            pr_enhancements: PrEnhancementsConfig {
+                directory_diff: !skip_directory_diff,
+                skip_cve_check: skip_cve,
+                skip_repology,
+                analyze_rebuilds,
+                max_rebuilds,
+            },
+        }
+    }
+
     /// Execute the automated update process
     pub async fn execute(self) -> anyhow::Result<()> {
         let RunConfig {

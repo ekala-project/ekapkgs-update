@@ -199,6 +199,69 @@ pub struct UpdateParams {
 }
 
 impl UpdateParams {
+    /// Build [`UpdateParams`] from the flat set of CLI flags accepted by the
+    /// `Update` subcommand.
+    ///
+    /// This keeps `Commands::execute` in `cli.rs` to a tight dispatcher by
+    /// pushing the nested-struct construction out of the CLI module.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn from_args(
+        file: String,
+        attr_path: String,
+        semver: SemverStrategy,
+        ignore_update_script: bool,
+        commit: bool,
+        create_pr: bool,
+        upstream: Option<String>,
+        fork: String,
+        run_passthru_tests: bool,
+        variant: Option<String>,
+        all_variants: bool,
+        flake: bool,
+        flake_output: Option<String>,
+        src_only: bool,
+        version: Option<String>,
+        version_regex: Option<String>,
+        format: bool,
+        override_filename: Option<String>,
+        system: Option<String>,
+        skip_directory_diff: bool,
+    ) -> Self {
+        Self {
+            file,
+            attr_path,
+            ignore_update_script,
+            override_filename,
+            system,
+            update_config: UpdateConfig {
+                commit,
+                create_pr,
+                upstream,
+                fork,
+                run_passthru_tests,
+                src_only,
+                format,
+                pr_enhancements: PrEnhancementsConfig {
+                    directory_diff: !skip_directory_diff,
+                    ..PrEnhancementsConfig::default()
+                },
+            },
+            version_config: VersionConfig {
+                strategy: semver,
+                explicit_version: version,
+                version_regex,
+            },
+            variant_config: VariantConfig {
+                variant,
+                all_variants,
+            },
+            flake_config: FlakeConfig {
+                enabled: flake,
+                output: flake_output,
+            },
+        }
+    }
+
     /// Execute the update operation
     pub async fn execute(self) -> anyhow::Result<()> {
         let UpdateParams {
