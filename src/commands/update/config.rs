@@ -214,7 +214,7 @@ impl UpdateParams {
         } = self;
 
         let strategy = version_config.strategy;
-        info!("Using semver strategy: {:?}", strategy);
+        info!("Using semver strategy: {}", strategy);
 
         // Handle flake mode
         if flake_config.enabled {
@@ -267,14 +267,14 @@ impl UpdateParams {
                 let variant_strategy = match infer_strategy_from_variant(&variant_name) {
                     Some(inferred) => {
                         info!(
-                            "Inferred {:?} strategy for variant '{}'",
+                            "Inferred {} strategy for variant '{}'",
                             inferred, variant_name
                         );
                         inferred
                     },
                     None => {
                         info!(
-                            "No strategy inferred for variant '{}', using explicit strategy: {:?}",
+                            "No strategy inferred for variant '{}', using explicit strategy: {}",
                             variant_name, strategy
                         );
                         strategy
@@ -283,7 +283,7 @@ impl UpdateParams {
 
                 // Update this variant
                 info!(
-                    "Updating variant '{}' with strategy {:?}",
+                    "Updating variant '{}' with strategy {}",
                     variant_name, variant_strategy
                 );
                 match update_config
