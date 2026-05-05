@@ -10,12 +10,7 @@ use super::nix_eval_jobs::NixEvalItem;
 
 /// Get the path to the nix-eval-jobs stderr log file in XDG cache directory
 async fn get_stderr_log_path() -> anyhow::Result<PathBuf> {
-    let cache_dir = directories::ProjectDirs::from("", "", "ekapkgs-update")
-        .ok_or_else(|| anyhow::anyhow!("Failed to determine cache directory"))?
-        .cache_dir()
-        .to_path_buf();
-
-    let logs_dir = cache_dir.join("logs");
+    let logs_dir = crate::paths::logs_dir()?;
     fs::create_dir_all(&logs_dir).await?;
 
     Ok(logs_dir.join("nix-eval-jobs.stderr.log"))

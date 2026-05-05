@@ -49,17 +49,9 @@ fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
 
 /// Create a git worktree for an isolated update
 pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
-    // Get XDG cache directory
-    let cache_dir = directories::ProjectDirs::from("", "", "ekapkgs-update")
-        .ok_or_else(|| anyhow::anyhow!("Failed to determine cache directory"))?
-        .cache_dir()
-        .to_path_buf();
-
     // Create a safe worktree directory name from attr_path
     let worktree_name = attr_path.replace(['.', '/'], "-");
-    let worktree_path = cache_dir
-        .join("worktrees")
-        .join(format!("update-{worktree_name}"));
+    let worktree_path = crate::paths::worktrees_dir()?.join(format!("update-{worktree_name}"));
 
     // Remove existing worktree if it exists
     if worktree_path.exists() {

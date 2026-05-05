@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::commands;
+use crate::paths::DEFAULT_DATABASE_PATH;
 use crate::vcs_sources::SemverStrategy;
 
 #[derive(Parser)]
@@ -23,7 +24,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "default.nix")]
         file: String,
         /// Path to SQLite database for tracking updates
-        #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
         /// Upstream git remote. Inferred if left unset. E.g. nixpkgs
         #[arg(long)]
@@ -140,7 +141,7 @@ pub enum Commands {
         /// python.pkgs.setuptools)
         identifier: String,
         /// Path to SQLite database for tracking updates
-        #[arg(short, long, default_value = "~/.cache/ekapkgs-update/updates.db")]
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
     },
     /// Migrate a package from nixpkgs to ekapkgs paradigms

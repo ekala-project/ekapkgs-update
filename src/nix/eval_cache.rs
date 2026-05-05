@@ -144,17 +144,10 @@ impl CachedEvaluation {
 
     /// Get the cache file path for a given commit and eval file
     fn cache_file_path(commit: &str, eval_file: &str) -> anyhow::Result<PathBuf> {
-        let cache_dir = directories::ProjectDirs::from("", "", "ekapkgs-update")
-            .ok_or_else(|| anyhow::anyhow!("Failed to determine cache directory"))?
-            .cache_dir()
-            .to_path_buf();
-
         // Use a hash of the eval file path to create a stable filename
         let file_hash = hash_string(eval_file);
 
-        Ok(cache_dir
-            .join("eval-cache")
-            .join(format!("{commit}-{file_hash}.json")))
+        Ok(crate::paths::eval_cache_dir()?.join(format!("{commit}-{file_hash}.json")))
     }
 }
 
