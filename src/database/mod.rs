@@ -10,6 +10,24 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};
 pub use types::{UpdateLog, UpdateRecord};
 
+/// Parse an optional RFC 3339 timestamp string into UTC, ignoring parse errors.
+///
+/// Used by row-mapping code where invalid stored timestamps degrade to `None`
+/// rather than aborting record loading.
+fn parse_rfc3339(s: Option<String>) -> Option<DateTime<Utc>> {
+    s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// First-failure backoff: how many days before re-checking after the first
+/// failed update attempt.
+const FIRST_BACKOFF_DAYS: i64 = 2;
+/// Second-failure backoff: applied when the previous attempt was within
+/// `FIRST_BACKOFF_DAYS` days.
+const SECOND_BACKOFF_DAYS: i64 = 4;
+/// Maximum backoff: applied for any subsequent failure.
+const MAX_BACKOFF_DAYS: i64 = 6;
+
 /// Database connection wrapper for tracking package updates
 #[derive(Clone)]
 pub struct Database {
@@ -82,23 +100,16 @@ impl Database {
         .await
         .with_context(|| format!("get update record for {}", attr_path))?;
 
-        match row {
-            Some(row) => {
-                let last_attempted: Option<String> = row.try_get("last_attempted")?;
-                let next_attempt: Option<String> = row.try_get("next_attempt")?;
-
-                Ok(Some(UpdateRecord {
-                    last_attempted: last_attempted
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc)),
-                    next_attempt: next_attempt
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc)),
-                    proposed_version: row.try_get("proposed_version")?,
-                }))
-            },
-            None => Ok(None),
-        }
+        row.map(|row| {
+            let last_attempted: Option<String> = row.try_get("last_attempted")?;
+            let next_attempt: Option<String> = row.try_get("next_attempt")?;
+            Ok(UpdateRecord {
+                last_attempted: parse_rfc3339(last_attempted),
+                next_attempt: parse_rfc3339(next_attempt),
+                proposed_version: row.try_get("proposed_version")?,
+            })
+        })
+        .transpose()
     }
 
     /// Check if a package should be checked for updates
@@ -107,36 +118,30 @@ impl Database {
     /// - next_attempt is null
     /// - next_attempt is in the past
     pub async fn should_check_update(&self, attr_path: &str) -> Result<bool> {
-        let record = self.get_update_record(attr_path).await?;
+        let Some(record) = self.get_update_record(attr_path).await? else {
+            debug!("{}: No record found, should check", attr_path);
+            return Ok(true);
+        };
 
-        match record {
-            None => {
-                debug!("{}: No record found, should check", attr_path);
-                Ok(true)
-            },
-            Some(record) => match record.next_attempt {
-                None => {
-                    debug!("{}: No next_attempt set, should check", attr_path);
-                    Ok(true)
-                },
-                Some(next_attempt) => {
-                    let now = Utc::now();
-                    let should_check = next_attempt <= now;
-                    if should_check {
-                        debug!(
-                            "{}: next_attempt ({}) is in the past, should check",
-                            attr_path, next_attempt
-                        );
-                    } else {
-                        debug!(
-                            "{}: next_attempt ({}) is in the future, skip",
-                            attr_path, next_attempt
-                        );
-                    }
-                    Ok(should_check)
-                },
-            },
+        let Some(next_attempt) = record.next_attempt else {
+            debug!("{}: No next_attempt set, should check", attr_path);
+            return Ok(true);
+        };
+
+        let now = Utc::now();
+        let should_check = next_attempt <= now;
+        if should_check {
+            debug!(
+                "{}: next_attempt ({}) is in the past, should check",
+                attr_path, next_attempt
+            );
+        } else {
+            debug!(
+                "{}: next_attempt ({}) is in the future, skip",
+                attr_path, next_attempt
+            );
         }
+        Ok(should_check)
     }
 
     /// Record that no update was available for a package
@@ -150,22 +155,16 @@ impl Database {
         let now = Utc::now();
         let record = self.get_update_record(attr_path).await?;
 
-        // Calculate next backoff
-        let backoff_days = match record {
-            None => 2, // First failed check: 2 days
-            Some(ref rec) => {
-                // Calculate days since last attempt
-                match rec.last_attempted {
-                    None => 2,
-                    Some(last) => {
-                        let days_since = (now - last).num_days();
-                        // Increment backoff: 2 -> 4 -> 6 (max)
-                        match days_since {
-                            0..=2 => 4,
-                            3..=4 => 6,
-                            _ => 6, // Max at 6 days
-                        }
-                    },
+        // Calculate next backoff: first failure -> FIRST, recent retry -> SECOND,
+        // any older retry -> MAX.
+        let backoff_days = match record.as_ref().and_then(|r| r.last_attempted) {
+            None => FIRST_BACKOFF_DAYS,
+            Some(last) => {
+                let days_since = (now - last).num_days();
+                if days_since <= FIRST_BACKOFF_DAYS {
+                    SECOND_BACKOFF_DAYS
+                } else {
+                    MAX_BACKOFF_DAYS
                 }
             },
         };

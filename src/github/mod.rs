@@ -1,5 +1,7 @@
 //! GitHub API integration and utilities
 
+use std::sync::OnceLock;
+
 use anyhow::Context;
 use regex::Regex;
 use serde::Deserialize;
@@ -54,7 +56,11 @@ pub struct GithubPullRequest {
 /// assert_eq!(repo.repo, "repo");
 /// ```
 pub fn parse_github_url(url: &str) -> Option<GithubRepo> {
-    let github_regex = Regex::new(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git|/|$)").ok()?;
+    static GITHUB_URL_REGEX: OnceLock<Regex> = OnceLock::new();
+    let github_regex = GITHUB_URL_REGEX.get_or_init(|| {
+        Regex::new(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git|/|$)")
+            .expect("hard-coded GitHub URL regex must compile")
+    });
     let caps = github_regex.captures(url)?;
 
     Some(GithubRepo {

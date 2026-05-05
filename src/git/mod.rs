@@ -8,6 +8,10 @@ use tracing::{debug, warn};
 
 use crate::github::parse_github_url;
 
+/// Branches tried (in order) when a remote does not advertise a symbolic HEAD
+/// and `ls-remote --symref` cannot determine the default branch.
+const DEFAULT_BRANCH_FALLBACKS: &[&str] = &["master", "main"];
+
 /// Run a `git` subcommand and capture both args and cwd in any error context.
 ///
 /// Returns the raw `Output` (caller must check `status.success()`).
@@ -359,7 +363,7 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     // Final fallback: try common branch names
     debug!("Could not determine default branch from remote, trying fallbacks");
 
-    for candidate in &["master", "main"] {
+    for candidate in DEFAULT_BRANCH_FALLBACKS {
         let output = run_git(None, ["ls-remote", "--heads", remote, candidate]).await?;
 
         if output.status.success() && !output.stdout.is_empty() {

@@ -1,5 +1,7 @@
 //! GitLab API integration and utilities
 
+use std::sync::OnceLock;
+
 use anyhow::Context;
 use regex::Regex;
 use serde::Deserialize;
@@ -50,7 +52,11 @@ pub struct GitlabTag {
 /// ```
 pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
     // Match gitlab.com with support for nested groups (but we'll only take last two parts)
-    let gitlab_regex = Regex::new(r"gitlab\.com[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)").ok()?;
+    static GITLAB_URL_REGEX: OnceLock<Regex> = OnceLock::new();
+    let gitlab_regex = GITLAB_URL_REGEX.get_or_init(|| {
+        Regex::new(r"gitlab\.com[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)")
+            .expect("hard-coded GitLab URL regex must compile")
+    });
     let caps = gitlab_regex.captures(url)?;
 
     Some(GitlabProject {
