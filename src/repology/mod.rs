@@ -6,7 +6,7 @@ use anyhow::Result;
 pub use api::RepologyClient;
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
-pub use types::RepologyInfo;
+use types::RepologyInfo;
 
 /// Check Repology for the latest version of a package
 ///

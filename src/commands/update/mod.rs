@@ -12,26 +12,27 @@ mod variants;
 use std::path::Path;
 
 use anyhow::Context;
-pub use build::{
-    build_and_get_outputs, build_flake_package, build_nix_expr, cleanup_result_symlinks,
-    detect_reversed_patch,
-};
+// Externally-consumed re-exports (cli.rs, commands::pr_enhancements, integration tests).
+pub use build::{build_and_get_outputs, cleanup_result_symlinks};
+// Sibling-only re-exports kept narrow with `pub(super)` so child modules can
+// reach them via `super::`, but no other crate module sees them.
+pub(super) use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
 pub use config::{FlakeConfig, UpdateConfig, UpdateParams, VariantConfig, VersionConfig};
-pub use file_update::{
+pub(super) use file_update::{
     update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
     update_nuget_deps_hash, update_vendor_hash,
 };
-pub use flake::update_flake_package;
-pub use format::format_nix_file;
-pub use git::create_git_commit;
-pub use hash_workflows::{
+pub(super) use flake::update_flake_package;
+pub(super) use format::format_nix_file;
+pub(super) use git::create_git_commit;
+pub(super) use hash_workflows::{
     build_with_patch_recovery, run_package_tests, update_cargo_hash_if_needed,
     update_composer_deps_hash_if_needed, update_npm_deps_hash_if_needed,
     update_nuget_deps_hash_if_needed, update_source_hash, update_vendor_hash_if_needed,
 };
-pub use script::run_update_script;
+pub(super) use script::run_update_script;
 use tracing::info;
-pub use variants::{get_default_variant, update_single_variant};
+pub(super) use variants::{get_default_variant, update_single_variant};
 
 use crate::package::PackageMetadata;
 use crate::vcs_sources::UpstreamSource;
