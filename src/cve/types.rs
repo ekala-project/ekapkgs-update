@@ -151,11 +151,11 @@ mod tests {
     #[test]
     fn test_vulnerability_markdown() {
         let vuln = Vulnerability {
-            id: "CVE-2024-1234".to_string(),
+            id: "CVE-2024-1234".to_owned(),
             severity: Severity::Critical,
-            summary: "Remote code execution".to_string(),
-            details_url: "https://osv.dev/CVE-2024-1234".to_string(),
-            fixed_in: vec!["1.2.3".to_string()],
+            summary: "Remote code execution".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-1234".to_owned(),
+            fixed_in: vec!["1.2.3".to_owned()],
         };
 
         assert_eq!(
@@ -170,10 +170,10 @@ mod tests {
         assert!(!analysis.has_cves());
 
         analysis.resolved.push(Vulnerability {
-            id: "CVE-2024-1234".to_string(),
+            id: "CVE-2024-1234".to_owned(),
             severity: Severity::High,
-            summary: "Test".to_string(),
-            details_url: "https://osv.dev/CVE-2024-1234".to_string(),
+            summary: "Test".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-1234".to_owned(),
             fixed_in: vec![],
         });
         assert!(analysis.has_cves());
@@ -189,11 +189,11 @@ mod tests {
     fn test_cve_analysis_markdown_with_resolved() {
         let mut analysis = CveAnalysis::default();
         analysis.resolved.push(Vulnerability {
-            id: "CVE-2024-1234".to_string(),
+            id: "CVE-2024-1234".to_owned(),
             severity: Severity::Critical,
-            summary: "Buffer overflow".to_string(),
-            details_url: "https://osv.dev/CVE-2024-1234".to_string(),
-            fixed_in: vec!["1.2.3".to_string()],
+            summary: "Buffer overflow".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-1234".to_owned(),
+            fixed_in: vec!["1.2.3".to_owned()],
         });
 
         let markdown = analysis.to_markdown().unwrap();

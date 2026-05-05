@@ -13,9 +13,9 @@ pub async fn build_nix_expr(
     attr_suffix: Option<&str>,
 ) -> anyhow::Result<(bool, String, String)> {
     let full_attr = if let Some(suffix) = attr_suffix {
-        format!("{}.{}", attr_path, suffix)
+        format!("{attr_path}.{suffix}")
     } else {
-        attr_path.to_string()
+        attr_path.to_owned()
     };
 
     debug!("Building {}", full_attr);
@@ -49,9 +49,9 @@ pub async fn build_flake_package(
     attr_suffix: Option<&str>,
 ) -> anyhow::Result<(bool, String, String)> {
     let full_installable = if let Some(suffix) = attr_suffix {
-        format!("{}.{}", installable, suffix)
+        format!("{installable}.{suffix}")
     } else {
-        installable.to_string()
+        installable.to_owned()
     };
 
     debug!("Building flake package: {}", full_installable);
@@ -91,7 +91,7 @@ pub fn detect_reversed_patch(stderr: &str) -> Option<String> {
                 patch_regex
                     .captures(line)
                     .and_then(|caps| caps.get(1))
-                    .map(|m| m.as_str().to_string())
+                    .map(|m| m.as_str().to_owned())
             })
         })
 }
@@ -114,9 +114,9 @@ pub async fn build_and_get_outputs(
     attr_suffix: Option<&str>,
 ) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let full_attr = if let Some(suffix) = attr_suffix {
-        format!("{}.{}", attr_path, suffix)
+        format!("{attr_path}.{suffix}")
     } else {
-        attr_path.to_string()
+        attr_path.to_owned()
     };
 
     debug!("Building {} and extracting outputs", full_attr);
@@ -133,7 +133,7 @@ pub async fn build_and_get_outputs(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Build failed for {}: {}", full_attr, stderr);
+        anyhow::bail!("Build failed for {full_attr}: {stderr}");
     }
 
     // Get all output paths by reading result symlinks
@@ -142,13 +142,13 @@ pub async fn build_and_get_outputs(
     // Check for the main "result" symlink
     if std::path::Path::new("result").exists() {
         let store_path = std::fs::canonicalize("result")?;
-        outputs.push(("out".to_string(), store_path));
+        outputs.push(("out".to_owned(), store_path));
     }
 
     // Check for additional outputs (result-dev, result-lib, etc.)
     let output_suffixes = ["dev", "lib", "debug", "doc", "man", "info", "bin"];
     for suffix in &output_suffixes {
-        let link_name = format!("result-{}", suffix);
+        let link_name = format!("result-{suffix}");
         if std::path::Path::new(&link_name).exists() {
             let store_path = std::fs::canonicalize(&link_name)?;
             outputs.push((suffix.to_string(), store_path));

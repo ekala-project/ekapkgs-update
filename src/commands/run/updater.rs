@@ -28,8 +28,8 @@ pub(super) async fn perform_update(
     // If dry-run mode, report the update without performing it
     if dry_run {
         return Ok(UpdateResult::DryRun {
-            current_version: current_version.to_string(),
-            new_version: new_version.to_string(),
+            current_version: current_version.clone(),
+            new_version: new_version.clone(),
         });
     }
 
@@ -39,8 +39,7 @@ pub(super) async fn perform_update(
         Err(e) => {
             warn!("{}: Failed to create worktree: {}", attr_path, e);
             return Ok(UpdateResult::Skipped(format!(
-                "Worktree creation failed: {}",
-                e
+                "Worktree creation failed: {e}"
             )));
         },
     };
@@ -51,7 +50,7 @@ pub(super) async fn perform_update(
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
             cleanup_worktree(&worktree_path).await.ok();
-            return Ok(UpdateResult::Skipped("Could not locate file".to_string()));
+            return Ok(UpdateResult::Skipped("Could not locate file".to_owned()));
         },
     };
 
@@ -64,10 +63,10 @@ pub(super) async fn perform_update(
     // Attempt the update in the worktree
     let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
     let update_config = crate::commands::update::UpdateConfig {
-        commit: false,              // Don't auto-commit in run mode
-        create_pr: false,           // Don't create PR here (handled separately)
-        upstream: None,             // upstream - not needed in run mode
-        fork: "origin".to_string(), // fork - not used since create_pr is false
+        commit: false,             // Don't auto-commit in run mode
+        create_pr: false,          // Don't create PR here (handled separately)
+        upstream: None,            // upstream - not needed in run mode
+        fork: "origin".to_owned(), // fork - not used since create_pr is false
         run_passthru_tests,
         src_only: false, // Update all dependencies (not src-only)
         format: false,   // No formatting in run mode (worktree cleanup would lose it)
@@ -77,8 +76,8 @@ pub(super) async fn perform_update(
 
     let update_result = update_config
         .update_from_file_path(
-            eval_entry_point.to_string(),
-            attr_path.to_string(),
+            eval_entry_point.to_owned(),
+            attr_path.clone(),
             worktree_file_str,
             version_config,
             run_passthru_tests, // Fail on test errors in run mode
@@ -186,13 +185,13 @@ pub(super) async fn perform_update(
             }
 
             Ok(UpdateResult::Updated {
-                old_version: current_version.to_string(),
-                new_version: new_version.to_string(),
+                old_version: current_version.clone(),
+                new_version: new_version.clone(),
             })
         },
         Err(e) => {
             // Update failed - record the failure log
-            let error_message = format!("{:#}", e);
+            let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
 
             // Clean up the worktree
@@ -217,7 +216,7 @@ pub(super) async fn perform_update(
             }
 
             // Return as skipped so it doesn't count as a successful update
-            Ok(UpdateResult::Skipped(format!("Update failed: {}", e)))
+            Ok(UpdateResult::Skipped(format!("Update failed: {e}")))
         },
     }
 }
@@ -255,10 +254,7 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
 /// Get the file location for a package from meta.position
 async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let position_expr = format!(
-        "with import {} {{ }}; {}.meta.position",
-        normalized_entry, attr_path
-    );
+    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
 
     let position = eval_nix_expr(&position_expr).await?;
 
@@ -269,9 +265,9 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
     // Parse position string (format: "file:line")
     let (file_path, _line_str) = position
         .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
 
-    Ok(file_path.to_string())
+    Ok(file_path.to_owned())
 }
 
 /// Create a pull request for a successful update
@@ -329,14 +325,10 @@ async fn create_pr_for_update(
         .flatten();
 
     // Create PR title and body
-    let title = format!(
-        "Update {} from {} to {}",
-        attr_path, old_version, new_version
-    );
+    let title = format!("Update {attr_path} from {old_version} to {new_version}");
     let mut body = format!(
-        "## Summary\n\nThis PR updates `{}` from version {} to {}.\n\n## Changes\n\n- Updated \
-         package version\n- Updated source hash",
-        attr_path, old_version, new_version
+        "## Summary\n\nThis PR updates `{attr_path}` from version {old_version} to \
+         {new_version}.\n\n## Changes\n\n- Updated package version\n- Updated source hash"
     );
 
     // Add optional metadata fields if available
@@ -344,15 +336,15 @@ async fn create_pr_for_update(
         body.push_str("\n\n## Package Information");
 
         if let Some(description) = &meta.description {
-            body.push_str(&format!("\n\n**Description:** {}", description));
+            body.push_str(&format!("\n\n**Description:** {description}"));
         }
 
         if let Some(homepage) = &meta.homepage {
-            body.push_str(&format!("\n\n**Homepage:** {}", homepage));
+            body.push_str(&format!("\n\n**Homepage:** {homepage}"));
         }
 
         if let Some(changelog) = &meta.changelog {
-            body.push_str(&format!("\n\n**Changelog:** {}", changelog));
+            body.push_str(&format!("\n\n**Changelog:** {changelog}"));
         }
     }
 
@@ -387,7 +379,7 @@ async fn create_pr_for_update(
         if analysis.rebuild_count > 0 && analysis.rebuild_count <= 20 {
             body.push_str("\n### Affected packages:\n");
             for pkg in &analysis.rebuilt_packages {
-                body.push_str(&format!("- `{}`\n", pkg));
+                body.push_str(&format!("- `{pkg}`\n"));
             }
         } else if analysis.rebuild_count > 20 {
             body.push_str(&format!(
@@ -395,7 +387,7 @@ async fn create_pr_for_update(
                 analysis.rebuild_count
             ));
             for pkg in &analysis.rebuilt_packages {
-                body.push_str(&format!("- `{}`\n", pkg));
+                body.push_str(&format!("- `{pkg}`\n"));
             }
             body.push_str("\n</details>\n");
         }

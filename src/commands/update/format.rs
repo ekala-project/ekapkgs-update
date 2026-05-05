@@ -34,14 +34,14 @@ pub async fn format_nix_file(file_path: &Path) -> anyhow::Result<()> {
                     "nixfmt not found. Please install it: nix-env -iA nixpkgs.nixfmt-rfc-style"
                 )
             } else {
-                anyhow::anyhow!("Failed to run nixfmt: {}", e)
+                anyhow::anyhow!("Failed to run nixfmt: {e}")
             }
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!("nixfmt failed: {}", stderr);
-        anyhow::bail!("nixfmt formatting failed: {}", stderr);
+        anyhow::bail!("nixfmt formatting failed: {stderr}");
     }
 
     debug!("Successfully formatted {}", file_path.display());

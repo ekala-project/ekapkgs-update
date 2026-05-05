@@ -26,8 +26,7 @@ pub fn add_run_unit_tests_argument(content: &str) -> anyhow::Result<String> {
         let indent_str = " ".repeat(indent);
 
         Ok(format!(
-            "{}{}{}runUnitTests,{}{}{}",
-            before, whitespace, indent_str, whitespace, closing, after
+            "{before}{whitespace}{indent_str}runUnitTests,{whitespace}{closing}{after}"
         ))
     } else {
         anyhow::bail!("Could not find function argument pattern in file")

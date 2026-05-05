@@ -29,10 +29,7 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
         // Target is an attr path - resolve it to a file
         info!("Target is an attribute path: {}", target);
         let normalized_entry = crate::nix::normalize_entry_point(&file);
-        let position_expr = format!(
-            "with import {} {{ }}; {}.meta.position",
-            normalized_entry, target
-        );
+        let position_expr = format!("with import {normalized_entry} {{ }}; {target}.meta.position");
 
         let position = crate::nix::eval_nix_expr(&position_expr)
             .await
@@ -40,10 +37,10 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
 
         let (file_path, _line) = position
             .rsplit_once(':')
-            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
+            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
 
         info!("Resolved to file: {}", file_path);
-        file_path.to_string()
+        file_path.to_owned()
     };
 
     // Read the file
@@ -57,7 +54,11 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
     // Validate the result parses correctly
     let parse = rnix::Root::parse(&migrated_content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         anyhow::bail!(
             "Migration would create invalid Nix syntax: {}",
             errors.join(", ")
@@ -70,7 +71,7 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
         .context("Failed to write migrated file")?;
 
     info!("✓ Successfully migrated {}", file_path);
-    println!("Migrated: {}", file_path);
+    println!("Migrated: {file_path}");
 
     Ok(())
 }
@@ -88,11 +89,15 @@ pub(crate) fn apply_run_unit_tests_migration(content: &str) -> anyhow::Result<St
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
     }
 
-    let mut result = content.to_string();
+    let mut result = content.to_owned();
 
     // Step 1: Add runUnitTests to function arguments if not already present
     if !result.contains("runUnitTests") {

@@ -8,7 +8,7 @@ use super::types::Vulnerability;
 /// Cache key format for storing CVE data
 /// Format: "{ecosystem}:{package_name}:{version}"
 fn make_cache_key(ecosystem: &str, package_name: &str, version: &str) -> String {
-    format!("{}:{}:{}", ecosystem, package_name, version)
+    format!("{ecosystem}:{package_name}:{version}")
 }
 
 /// Get cached CVE data if available and not expired
@@ -194,11 +194,11 @@ mod tests {
         let pool = setup_test_db().await;
 
         let vulnerabilities = vec![Vulnerability {
-            id: "CVE-2024-1234".to_string(),
+            id: "CVE-2024-1234".to_owned(),
             severity: Severity::High,
-            summary: "Test vulnerability".to_string(),
-            details_url: "https://osv.dev/CVE-2024-1234".to_string(),
-            fixed_in: vec!["1.2.3".to_string()],
+            summary: "Test vulnerability".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-1234".to_owned(),
+            fixed_in: vec!["1.2.3".to_owned()],
         }];
 
         // Cache the data
@@ -293,10 +293,10 @@ mod tests {
 
         // Cache initial data
         let vulns1 = vec![Vulnerability {
-            id: "CVE-2024-1111".to_string(),
+            id: "CVE-2024-1111".to_owned(),
             severity: Severity::Low,
-            summary: "First".to_string(),
-            details_url: "https://osv.dev/CVE-2024-1111".to_string(),
+            summary: "First".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-1111".to_owned(),
             fixed_in: vec![],
         }];
 
@@ -306,10 +306,10 @@ mod tests {
 
         // Update with new data
         let vulns2 = vec![Vulnerability {
-            id: "CVE-2024-2222".to_string(),
+            id: "CVE-2024-2222".to_owned(),
             severity: Severity::High,
-            summary: "Second".to_string(),
-            details_url: "https://osv.dev/CVE-2024-2222".to_string(),
+            summary: "Second".to_owned(),
+            details_url: "https://osv.dev/CVE-2024-2222".to_owned(),
             fixed_in: vec![],
         }];
 

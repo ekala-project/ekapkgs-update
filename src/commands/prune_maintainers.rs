@@ -22,11 +22,11 @@ pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result
     let dir_path = Path::new(&directory);
 
     if !dir_path.exists() {
-        anyhow::bail!("Directory does not exist: {}", directory);
+        anyhow::bail!("Directory does not exist: {directory}");
     }
 
     if !dir_path.is_dir() {
-        anyhow::bail!("Path is not a directory: {}", directory);
+        anyhow::bail!("Path is not a directory: {directory}");
     }
 
     if check {
@@ -46,7 +46,7 @@ pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result
     for entry in WalkDir::new(dir_path)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         let path = entry.path();
 
@@ -99,8 +99,7 @@ pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result
             modified_count
         );
         anyhow::bail!(
-            "Check failed: {} files would be modified by prune-maintainers",
-            modified_count
+            "Check failed: {modified_count} files would be modified by prune-maintainers"
         );
     }
 

@@ -29,14 +29,14 @@ impl PackageQuery {
     pub fn new(eval_entry_point: &str, attr_path: &str) -> Self {
         // Normalize the entry point to a valid Nix filepath
         let eval_path = if eval_entry_point.starts_with('/') || eval_entry_point.starts_with('.') {
-            eval_entry_point.to_string()
+            eval_entry_point.to_owned()
         } else {
-            format!("./{}", eval_entry_point)
+            format!("./{eval_entry_point}")
         };
 
         Self {
             eval_entry_point: eval_path,
-            attr_path: attr_path.to_string(),
+            attr_path: attr_path.to_owned(),
         }
     }
 

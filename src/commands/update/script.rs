@@ -12,10 +12,8 @@ pub async fn run_update_script(file: &str, attr_path: &str) -> anyhow::Result<bo
 
     // Check if an update script is defined for this package
     let normalized_entry = normalize_entry_point(file);
-    let nix_expr = format!(
-        "with import {} {{ }}; toString {}.updateScript",
-        normalized_entry, attr_path
-    );
+    let nix_expr =
+        format!("with import {normalized_entry} {{ }}; toString {attr_path}.updateScript");
 
     let script_path_result = eval_nix_expr(&nix_expr).await;
 

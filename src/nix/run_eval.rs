@@ -27,7 +27,7 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
         let log_path = match get_stderr_log_path().await {
             Ok(path) => path,
             Err(e) => {
-                yield Err(anyhow::anyhow!("Failed to get stderr log path: {}", e));
+                yield Err(anyhow::anyhow!("Failed to get stderr log path: {e}"));
                 return;
             }
         };
@@ -39,7 +39,7 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
         {
             Ok(file) => file,
             Err(e) => {
-                yield Err(anyhow::anyhow!("Failed to open stderr log file: {}", e));
+                yield Err(anyhow::anyhow!("Failed to open stderr log file: {e}"));
                 return;
             }
         };
@@ -55,7 +55,7 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
         {
             Ok(cmd) => cmd,
             Err(e) => {
-                yield Err(anyhow::anyhow!("Failed to spawn nix-eval-jobs: {}", e));
+                yield Err(anyhow::anyhow!("Failed to spawn nix-eval-jobs: {e}"));
                 return;
             }
         };
@@ -72,7 +72,7 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
             let line = match line {
                 Ok(line) => line,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("Error reading line: {}", e));
+                    yield Err(anyhow::anyhow!("Error reading line: {e}"));
                     continue;
                 }
             };

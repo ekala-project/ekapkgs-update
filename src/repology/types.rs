@@ -155,8 +155,8 @@ mod tests {
 
     fn create_test_package(repo: &str, version: &str, status: PackageStatus) -> RepologyPackage {
         RepologyPackage {
-            repo: repo.to_string(),
-            version: version.to_string(),
+            repo: repo.to_owned(),
+            version: version.to_owned(),
             status: Some(status),
             srcname: None,
             binname: None,
@@ -171,44 +171,44 @@ mod tests {
     #[test]
     fn test_get_newest_version() {
         let info = RepologyInfo {
-            project_name: "test".to_string(),
+            project_name: "test".to_owned(),
             packages: vec![
                 create_test_package("arch", "1.2.3", PackageStatus::Newest),
                 create_test_package("debian", "1.2.3", PackageStatus::Newest),
                 create_test_package("fedora", "1.2.3", PackageStatus::Newest),
                 create_test_package("ubuntu", "1.2.0", PackageStatus::Outdated),
             ],
-            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_owned(),
         };
 
-        assert_eq!(info.get_newest_version(), Some("1.2.3".to_string()));
+        assert_eq!(info.get_newest_version(), Some("1.2.3".to_owned()));
     }
 
     #[test]
     fn test_get_newest_version_multiple() {
         let info = RepologyInfo {
-            project_name: "test".to_string(),
+            project_name: "test".to_owned(),
             packages: vec![
                 create_test_package("arch", "1.2.3", PackageStatus::Newest),
                 create_test_package("debian", "1.2.2", PackageStatus::Newest),
                 create_test_package("fedora", "1.2.3", PackageStatus::Newest),
             ],
-            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_owned(),
         };
 
         // Should return the most common newest version
-        assert_eq!(info.get_newest_version(), Some("1.2.3".to_string()));
+        assert_eq!(info.get_newest_version(), Some("1.2.3".to_owned()));
     }
 
     #[test]
     fn test_is_version_newest() {
         let info = RepologyInfo {
-            project_name: "test".to_string(),
+            project_name: "test".to_owned(),
             packages: vec![
                 create_test_package("arch", "1.2.3", PackageStatus::Newest),
                 create_test_package("ubuntu", "1.2.0", PackageStatus::Outdated),
             ],
-            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_owned(),
         };
 
         assert!(info.is_version_newest("1.2.3"));
@@ -218,17 +218,17 @@ mod tests {
     #[test]
     fn test_get_distributions() {
         let info = RepologyInfo {
-            project_name: "test".to_string(),
+            project_name: "test".to_owned(),
             packages: vec![
                 create_test_package("arch", "1.2.3", PackageStatus::Newest),
                 create_test_package("debian", "1.2.3", PackageStatus::Newest),
             ],
-            fetched_at: "2026-05-02T00:00:00Z".to_string(),
+            fetched_at: "2026-05-02T00:00:00Z".to_owned(),
         };
 
         let distros = info.get_distributions();
         assert_eq!(distros.len(), 2);
-        assert!(distros.contains(&"arch".to_string()));
-        assert!(distros.contains(&"debian".to_string()));
+        assert!(distros.contains(&"arch".to_owned()));
+        assert!(distros.contains(&"debian".to_owned()));
     }
 }

@@ -43,7 +43,11 @@ pub fn remove_patches_attribute(content: &str) -> anyhow::Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         anyhow::bail!("Failed to parse Nix file: {}", errors.join(", "));
     }
 
@@ -88,7 +92,11 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         return Err(anyhow::anyhow!(
             "Failed to parse Nix file: {}",
             errors.join(", ")
@@ -142,5 +150,5 @@ pub fn remove_patch_from_array(content: &str, patch_name: &str) -> anyhow::Resul
     }
 
     // If we didn't find the patch, return an error
-    anyhow::bail!("Patch '{}' not found in patches array", patch_name)
+    anyhow::bail!("Patch '{patch_name}' not found in patches array")
 }

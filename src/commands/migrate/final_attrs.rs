@@ -11,9 +11,9 @@ pub fn convert_to_final_attrs_pattern(content: &str) -> anyhow::Result<String> {
         let has_rec = caps.get(2).is_some();
 
         if has_rec {
-            format!("{}(finalAttrs: rec {{", prefix)
+            format!("{prefix}(finalAttrs: rec {{")
         } else {
-            format!("{}(finalAttrs: {{", prefix)
+            format!("{prefix}(finalAttrs: {{")
         }
     });
 
@@ -32,11 +32,11 @@ pub fn fix_closing_brace(content: &str) -> anyhow::Result<String> {
 
         // Check if it already ends with })
         if before.trim_end().ends_with(')') {
-            return Ok(content.to_string());
+            return Ok(content.to_owned());
         }
 
-        Ok(format!("{}{})\n", before, closing))
+        Ok(format!("{before}{closing})\n"))
     } else {
-        Ok(content.to_string())
+        Ok(content.to_owned())
     }
 }

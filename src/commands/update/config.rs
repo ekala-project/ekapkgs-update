@@ -46,7 +46,7 @@ impl Default for UpdateConfig {
             commit: false,
             create_pr: false,
             upstream: None,
-            fork: "origin".to_string(),
+            fork: "origin".to_owned(),
             run_passthru_tests: false,
             src_only: false,
             format: false,
@@ -321,10 +321,8 @@ impl UpdateParams {
         } else {
             debug!("Attempting to locate package definition...");
             let normalized_entry = normalize_entry_point(&file);
-            let position_expr = format!(
-                "with import {} {{ }}; {}.meta.position",
-                normalized_entry, attr_path
-            );
+            let position_expr =
+                format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
 
             eval_nix_expr(&position_expr).await.and_then(|position| {
                 if position.is_empty() {
@@ -333,8 +331,8 @@ impl UpdateParams {
                 // Parse position string (format: "file:line")
                 let (file_path, _line_str) = position
                     .rsplit_once(':')
-                    .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {}", position))?;
-                Ok(file_path.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
+                Ok(file_path.to_owned())
             })?
         };
 

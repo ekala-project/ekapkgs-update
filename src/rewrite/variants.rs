@@ -49,7 +49,11 @@ pub fn update_variant_attr(
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {
-        let errors: Vec<String> = parse.errors().iter().map(|e| e.to_string()).collect();
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         return Err(anyhow::anyhow!(
             "Failed to parse Nix file: {}",
             errors.join(", ")
@@ -82,11 +86,7 @@ pub fn update_variant_attr(
 
     // Check if the attribute exists in this variant
     if !re.is_match(variant_content) {
-        anyhow::bail!(
-            "Attribute '{}' not found in variant '{}' ",
-            attr_name,
-            variant_name
-        );
+        anyhow::bail!("Attribute '{attr_name}' not found in variant '{variant_name}' ");
     }
 
     // Replace the attribute value within the variant content
@@ -133,7 +133,7 @@ fn find_variant_range_regex(
     // Find the start of the variant attribute set
     let start_match = start_re
         .find(content)
-        .ok_or_else(|| anyhow::anyhow!("Variant '{}' not found in file", variant_name))?;
+        .ok_or_else(|| anyhow::anyhow!("Variant '{variant_name}' not found in file"))?;
 
     // Find the opening brace position
     let brace_start = content[start_match.end() - 1..]
@@ -147,10 +147,7 @@ fn find_variant_range_regex(
             }
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to find opening brace for variant '{}'",
-                variant_name
-            )
+            anyhow::anyhow!("Failed to find opening brace for variant '{variant_name}'")
         })?;
 
     // Find the matching closing brace

@@ -151,7 +151,7 @@ async fn evaluate_in_worktree(
     let eval_file_str = worktree_eval_file
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in worktree path"))?
-        .to_string();
+        .to_owned();
 
     debug!("Evaluating in worktree: {}", eval_file_str);
 
@@ -196,10 +196,10 @@ async fn get_current_commit() -> anyhow::Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to get current commit: {}", stderr);
+        anyhow::bail!("Failed to get current commit: {stderr}");
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[cfg(test)]

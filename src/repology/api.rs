@@ -50,7 +50,7 @@ impl RepologyClient {
         Self {
             client: reqwest::Client::new(),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
-            user_agent: "ekapkgs-update (https://github.com/your-org/ekapkgs-update)".to_string(),
+            user_agent: "ekapkgs-update (https://github.com/your-org/ekapkgs-update)".to_owned(),
         }
     }
 
@@ -74,7 +74,7 @@ impl RepologyClient {
             limiter.wait_if_needed().await;
         }
 
-        let url = format!("https://repology.org/api/v1/project/{}", project_name);
+        let url = format!("https://repology.org/api/v1/project/{project_name}");
 
         debug!("Fetching Repology data for project: {}", project_name);
 
@@ -84,14 +84,14 @@ impl RepologyClient {
             .header("User-Agent", &self.user_agent)
             .send()
             .await
-            .with_context(|| format!("GET {}", url))?;
+            .with_context(|| format!("GET {url}"))?;
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
                 // Project not found in Repology
                 debug!("Project not found in Repology: {}", project_name);
                 return Ok(RepologyInfo {
-                    project_name: project_name.to_string(),
+                    project_name: project_name.to_owned(),
                     packages: Vec::new(),
                     fetched_at: chrono::Utc::now().to_rfc3339(),
                 });
@@ -105,7 +105,7 @@ impl RepologyClient {
         let packages: Vec<RepologyPackage> = response
             .json()
             .await
-            .with_context(|| format!("decode JSON from {}", url))?;
+            .with_context(|| format!("decode JSON from {url}"))?;
 
         debug!(
             "Found {} packages for {} in Repology",
@@ -114,7 +114,7 @@ impl RepologyClient {
         );
 
         Ok(RepologyInfo {
-            project_name: project_name.to_string(),
+            project_name: project_name.to_owned(),
             packages,
             fetched_at: chrono::Utc::now().to_rfc3339(),
         })
@@ -130,12 +130,12 @@ impl RepologyClient {
     /// - Convert underscores to hyphens in some cases
     /// - Remove version suffixes: foo_1_2 -> foo
     pub fn normalize_package_name(nixpkgs_name: &str) -> Vec<String> {
-        let mut candidates = vec![nixpkgs_name.to_string()];
+        let mut candidates = vec![nixpkgs_name.to_owned()];
 
         // Try without common prefixes
         for prefix in &["python3-", "python-", "node-", "ruby-", "perl-"] {
             if let Some(stripped) = nixpkgs_name.strip_prefix(prefix) {
-                candidates.push(stripped.to_string());
+                candidates.push(stripped.to_owned());
             }
         }
 
@@ -166,12 +166,12 @@ mod tests {
     #[test]
     fn test_normalize_package_name() {
         let candidates = RepologyClient::normalize_package_name("python3-requests");
-        assert!(candidates.contains(&"python3-requests".to_string()));
-        assert!(candidates.contains(&"requests".to_string()));
+        assert!(candidates.contains(&"python3-requests".to_owned()));
+        assert!(candidates.contains(&"requests".to_owned()));
 
         let candidates = RepologyClient::normalize_package_name("foo_bar");
-        assert!(candidates.contains(&"foo_bar".to_string()));
-        assert!(candidates.contains(&"foo-bar".to_string()));
+        assert!(candidates.contains(&"foo_bar".to_owned()));
+        assert!(candidates.contains(&"foo-bar".to_owned()));
     }
 
     #[tokio::test]

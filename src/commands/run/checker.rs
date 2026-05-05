@@ -282,10 +282,10 @@ async fn check_for_update(
     );
 
     let update_req = UpdateRequest {
-        attr_path: attr_path.to_string(),
+        attr_path: attr_path.to_owned(),
         drv: drv.clone(),
-        current_version: current_version.to_string(),
-        new_version: latest_version.to_string(),
+        current_version: current_version.clone(),
+        new_version: latest_version.clone(),
     };
 
     if let Err(e) = tx.send(update_req) {

@@ -77,10 +77,7 @@ impl PrEnhancementsConfig {
         let new_outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
             .await
             .with_context(|| {
-                format!(
-                    "Failed to build new version of {} for directory diff",
-                    attr_path
-                )
+                format!("Failed to build new version of {attr_path} for directory diff")
             })?;
 
         cleanup_result_symlinks()?;
@@ -95,7 +92,7 @@ impl PrEnhancementsConfig {
 
         if !checkout_output.status.success() {
             let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-            anyhow::bail!("Failed to checkout previous commit: {}", stderr);
+            anyhow::bail!("Failed to checkout previous commit: {stderr}");
         }
 
         // Step 3: Build old version
@@ -114,22 +111,19 @@ impl PrEnhancementsConfig {
 
         if !restore_output.status.success() {
             let stderr = String::from_utf8_lossy(&restore_output.stderr);
-            anyhow::bail!("Failed to restore to current commit: {}", stderr);
+            anyhow::bail!("Failed to restore to current commit: {stderr}");
         }
 
         // Check if old build succeeded
         let old_outputs = old_outputs_result.with_context(|| {
-            format!(
-                "Failed to build old version of {} for directory diff",
-                attr_path
-            )
+            format!("Failed to build old version of {attr_path} for directory diff")
         })?;
 
         // Step 5: Compare outputs
         debug!("{}: Comparing build outputs", attr_path);
         let config = DiffConfig::default();
         let diff = compare_build_outputs(&old_outputs, &new_outputs, &config)
-            .with_context(|| format!("Failed to compare directory outputs for {}", attr_path))?;
+            .with_context(|| format!("Failed to compare directory outputs for {attr_path}"))?;
 
         // Step 6: Format as markdown
         let markdown = format_for_pr_body(&diff);
@@ -186,7 +180,7 @@ impl PrEnhancementsConfig {
 
         if !stash_output.status.success() {
             let stderr = String::from_utf8_lossy(&stash_output.stderr);
-            anyhow::bail!("Failed to stash changes: {}", stderr);
+            anyhow::bail!("Failed to stash changes: {stderr}");
         }
 
         // Step 3: Build the old version
@@ -201,7 +195,7 @@ impl PrEnhancementsConfig {
 
         if !pop_output.status.success() {
             let stderr = String::from_utf8_lossy(&pop_output.stderr);
-            anyhow::bail!("Failed to restore stashed changes: {}", stderr);
+            anyhow::bail!("Failed to restore stashed changes: {stderr}");
         }
 
         let old_outputs =

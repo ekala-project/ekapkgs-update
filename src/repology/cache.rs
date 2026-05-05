@@ -167,10 +167,10 @@ mod tests {
         let pool = setup_test_db().await;
 
         let info = RepologyInfo {
-            project_name: "test-project".to_string(),
+            project_name: "test-project".to_owned(),
             packages: vec![RepologyPackage {
-                repo: "arch".to_string(),
-                version: "1.2.3".to_string(),
+                repo: "arch".to_owned(),
+                version: "1.2.3".to_owned(),
                 status: Some(crate::repology::types::PackageStatus::Newest),
                 srcname: None,
                 binname: None,
@@ -205,7 +205,7 @@ mod tests {
         // Insert an expired entry manually
         let expired_time = Utc::now() - Duration::hours(73); // Expired 73 hours ago
         let info = RepologyInfo {
-            project_name: "expired-project".to_string(),
+            project_name: "expired-project".to_owned(),
             packages: Vec::new(),
             fetched_at: expired_time.to_rfc3339(),
         };
@@ -257,7 +257,7 @@ mod tests {
 
         // Insert a valid entry
         let info = RepologyInfo {
-            project_name: "new-project".to_string(),
+            project_name: "new-project".to_owned(),
             packages: Vec::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };

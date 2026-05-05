@@ -15,7 +15,7 @@ pub fn parse_variant_components(variant_name: &str) -> Option<Vec<u32>> {
     let name = variant_name.strip_prefix('v').unwrap_or(variant_name);
 
     // Try to parse components separated by underscores
-    let components: Result<Vec<u32>, _> = name.split('_').map(|s| s.parse::<u32>()).collect();
+    let components: Result<Vec<u32>, _> = name.split('_').map(str::parse::<u32>).collect();
 
     components.ok()
 }
@@ -67,7 +67,7 @@ pub fn extract_version_prefix(variant_name: &str) -> Option<String> {
     parse_variant_components(variant_name).map(|components| {
         components
             .iter()
-            .map(|c| c.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(".")
     })
@@ -97,18 +97,18 @@ mod tests {
     #[test]
     fn test_is_variant_pinned() {
         // Pinned (3+ components)
-        assert_eq!(is_variant_pinned("v1_2_3"), true);
-        assert_eq!(is_variant_pinned("v0_20_1"), true);
-        assert_eq!(is_variant_pinned("v1_2_3_4"), true);
+        assert!(is_variant_pinned("v1_2_3"));
+        assert!(is_variant_pinned("v0_20_1"));
+        assert!(is_variant_pinned("v1_2_3_4"));
 
         // Not pinned (1-2 components)
-        assert_eq!(is_variant_pinned("v1_2"), false);
-        assert_eq!(is_variant_pinned("v0_20"), false);
-        assert_eq!(is_variant_pinned("v1"), false);
+        assert!(!is_variant_pinned("v1_2"));
+        assert!(!is_variant_pinned("v0_20"));
+        assert!(!is_variant_pinned("v1"));
 
         // Non-version names
-        assert_eq!(is_variant_pinned("latest"), false);
-        assert_eq!(is_variant_pinned("default"), false);
+        assert!(!is_variant_pinned("latest"));
+        assert!(!is_variant_pinned("default"));
     }
 
     #[test]
@@ -144,10 +144,10 @@ mod tests {
 
     #[test]
     fn test_extract_version_prefix() {
-        assert_eq!(extract_version_prefix("v1_2"), Some("1.2".to_string()));
-        assert_eq!(extract_version_prefix("v0_20"), Some("0.20".to_string()));
-        assert_eq!(extract_version_prefix("v1"), Some("1".to_string()));
-        assert_eq!(extract_version_prefix("v1_2_3"), Some("1.2.3".to_string()));
+        assert_eq!(extract_version_prefix("v1_2"), Some("1.2".to_owned()));
+        assert_eq!(extract_version_prefix("v0_20"), Some("0.20".to_owned()));
+        assert_eq!(extract_version_prefix("v1"), Some("1".to_owned()));
+        assert_eq!(extract_version_prefix("v1_2_3"), Some("1.2.3".to_owned()));
         assert_eq!(extract_version_prefix("latest"), None);
     }
 }
