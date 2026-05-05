@@ -2,16 +2,60 @@
 //!
 //! This module contains all clap-related structs and command execution logic.
 
-use clap::{Parser, Subcommand};
+use clap::builder::styling::{AnsiColor, Effects, Styles};
+use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 
 use crate::commands;
 use crate::paths::DEFAULT_DATABASE_PATH;
 use crate::vcs_sources::SemverStrategy;
 
+pub const CLI_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default())
+    .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+    .valid(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD));
+
+/// When to emit ANSI color in help/usage output.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+#[value(rename_all = "lower")]
+pub enum ColorWhen {
+    /// Color when stdout/stderr is a terminal.
+    #[default]
+    Auto,
+    /// Always emit color, even when not a terminal.
+    Always,
+    /// Never emit color.
+    Never,
+}
+
+impl From<ColorWhen> for ColorChoice {
+    fn from(value: ColorWhen) -> Self {
+        match value {
+            ColorWhen::Auto => Self::Auto,
+            ColorWhen::Always => Self::Always,
+            ColorWhen::Never => Self::Never,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "ekapkgs-update")]
 #[command(about = "Update ekapkgs packages", long_about = None)]
+#[command(styles = CLI_STYLES)]
 pub struct Args {
+    /// Coloring
+    #[arg(
+        long = "color",
+        value_name = "WHEN",
+        global = true,
+        default_value = "auto",
+        value_enum
+    )]
+    pub color: ColorWhen,
+
     #[command(subcommand)]
     pub command: Commands,
 }
