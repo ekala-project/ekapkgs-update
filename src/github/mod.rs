@@ -1,5 +1,6 @@
 //! GitHub API integration and utilities
 
+use anyhow::Context;
 use regex::Regex;
 use serde::Deserialize;
 use tracing::debug;
@@ -95,7 +96,10 @@ pub async fn fetch_github_tags(
         request = request.header("Authorization", format!("Bearer {}", token_str));
     }
 
-    let response = request.send().await?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -104,7 +108,10 @@ pub async fn fetch_github_tags(
         );
     }
 
-    let tags: Vec<GithubTag> = response.json().await?;
+    let tags: Vec<GithubTag> = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     Ok(tags)
 }
 
@@ -141,7 +148,10 @@ pub async fn fetch_github_releases(
         request = request.header("Authorization", format!("Bearer {}", token_str));
     }
 
-    let response = request.send().await?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -150,7 +160,10 @@ pub async fn fetch_github_releases(
         );
     }
 
-    let releases: Vec<GithubRelease> = response.json().await?;
+    let releases: Vec<GithubRelease> = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     Ok(releases)
 }
 
@@ -196,11 +209,15 @@ pub async fn create_pull_request(
         .header("Authorization", format!("Bearer {}", token))
         .json(&request_body)
         .send()
-        .await?;
+        .await
+        .with_context(|| format!("POST {}", url))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await?;
+        let error_text = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {}", url))?;
         anyhow::bail!(
             "GitHub PR creation failed with status {}: {}",
             status,
@@ -208,7 +225,10 @@ pub async fn create_pull_request(
         );
     }
 
-    let pr: GithubPullRequest = response.json().await?;
+    let pr: GithubPullRequest = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     debug!("Created PR #{}: {}", pr.number, pr.html_url);
 
     Ok(pr)

@@ -1,5 +1,6 @@
 //! GitLab API integration and utilities
 
+use anyhow::Context;
 use regex::Regex;
 use serde::Deserialize;
 use tracing::debug;
@@ -91,7 +92,10 @@ pub async fn fetch_gitlab_tags(
         request = request.header("PRIVATE-TOKEN", token_str);
     }
 
-    let response = request.send().await?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -100,7 +104,10 @@ pub async fn fetch_gitlab_tags(
         );
     }
 
-    let tags: Vec<GitlabTag> = response.json().await?;
+    let tags: Vec<GitlabTag> = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     Ok(tags)
 }
 
@@ -137,7 +144,10 @@ pub async fn fetch_gitlab_releases(
         request = request.header("PRIVATE-TOKEN", token_str);
     }
 
-    let response = request.send().await?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -146,7 +156,10 @@ pub async fn fetch_gitlab_releases(
         );
     }
 
-    let releases: Vec<GitlabRelease> = response.json().await?;
+    let releases: Vec<GitlabRelease> = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {}", url))?;
     Ok(releases)
 }
 
