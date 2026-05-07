@@ -240,7 +240,8 @@ impl PrEnhancementsConfig {
                 "ekapkgs-update: temporary stash for directory diff",
             ])
             .output()
-            .await?;
+            .await
+            .context("git stash push")?;
 
         if !stash_output.status.success() {
             let stderr = String::from_utf8_lossy(&stash_output.stderr);
@@ -255,7 +256,11 @@ impl PrEnhancementsConfig {
 
         // Step 4: Restore changes (pop stash)
         debug!("Restoring changes");
-        let pop_output = Command::new("git").args(["stash", "pop"]).output().await?;
+        let pop_output = Command::new("git")
+            .args(["stash", "pop"])
+            .output()
+            .await
+            .context("git stash pop")?;
 
         if !pop_output.status.success() {
             let stderr = String::from_utf8_lossy(&pop_output.stderr);

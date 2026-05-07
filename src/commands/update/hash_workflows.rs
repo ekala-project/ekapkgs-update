@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::{
@@ -174,11 +175,17 @@ pub async fn build_with_patch_recovery(
 
         if success {
             // Build succeeded - check if patches array is now empty
-            let content = tokio::fs::read_to_string(file_location).await?;
+            let content = tokio::fs::read_to_string(file_location)
+                .await
+                .with_context(|| format!("read nix file {}", file_location.display()))?;
             if is_patches_array_empty(&content) {
                 match remove_patches_attribute(&content) {
                     Ok(updated_content) => {
-                        tokio::fs::write(file_location, updated_content).await?;
+                        tokio::fs::write(file_location, updated_content)
+                            .await
+                            .with_context(|| {
+                                format!("write nix file {}", file_location.display())
+                            })?;
                         info!("Removed empty patches attribute");
                     },
                     Err(e) => {
@@ -195,13 +202,17 @@ pub async fn build_with_patch_recovery(
             info!("Detected reversed/already-applied patch: {}", patch_name);
 
             // Read the file
-            let content = tokio::fs::read_to_string(file_location).await?;
+            let content = tokio::fs::read_to_string(file_location)
+                .await
+                .with_context(|| format!("read nix file {}", file_location.display()))?;
 
             // Remove the patch
             match remove_patch_from_array(&content, &patch_name) {
                 Ok(updated_content) => {
                     // Write the updated content back
-                    tokio::fs::write(file_location, updated_content).await?;
+                    tokio::fs::write(file_location, updated_content)
+                        .await
+                        .with_context(|| format!("write nix file {}", file_location.display()))?;
                     info!("Removed obsolete patch: {}", patch_name);
                     removed_patches.push(patch_name.clone());
                     // Continue loop to retry the build

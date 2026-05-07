@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::variants::find_version_in_siblings;
@@ -22,7 +23,9 @@ pub async fn update_nix_file(
         "Updating Nix file at {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     // Try to update the version attribute
     let (updated_content, actual_file_path) =
@@ -49,7 +52,9 @@ pub async fn update_nix_file(
                     match find_version_in_siblings(file_path_str, old_version, old_hash).await? {
                         Some(sibling_path) => {
                             info!("Using mkManyVariants file: {}", sibling_path);
-                            let sibling_content = tokio::fs::read_to_string(&sibling_path).await?;
+                            let sibling_content = tokio::fs::read_to_string(&sibling_path)
+                                .await
+                                .with_context(|| format!("read sibling file {sibling_path}"))?;
 
                             // Try simple string replacement for mkManyVariants files
                             let updated = sibling_content.replace(old_version, new_version);
@@ -103,7 +108,9 @@ pub async fn update_nix_file(
     };
 
     // Write back to file
-    tokio::fs::write(&actual_file_path, final_content).await?;
+    tokio::fs::write(&actual_file_path, final_content)
+        .await
+        .with_context(|| format!("write nix file {}", actual_file_path.display()))?;
     Ok(actual_file_path)
 }
 
@@ -117,12 +124,16 @@ pub async fn update_cargo_hash(
         "Updating cargoHash in {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     let updated_content = find_and_update_attr(&content, "cargoHash", new_hash, Some(old_hash))?;
     debug!("Updated cargoHash attribute: {} -> {}", old_hash, new_hash);
 
-    tokio::fs::write(file_path, updated_content).await?;
+    tokio::fs::write(file_path, updated_content)
+        .await
+        .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
 }
 
@@ -136,12 +147,16 @@ pub async fn update_vendor_hash(
         "Updating vendorHash in {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     let updated_content = find_and_update_attr(&content, "vendorHash", new_hash, Some(old_hash))?;
     debug!("Updated vendorHash attribute: {} -> {}", old_hash, new_hash);
 
-    tokio::fs::write(file_path, updated_content).await?;
+    tokio::fs::write(file_path, updated_content)
+        .await
+        .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
 }
 
@@ -155,7 +170,9 @@ pub async fn update_npm_deps_hash(
         "Updating npmDepsHash in {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     let updated_content = find_and_update_attr(&content, "npmDepsHash", new_hash, Some(old_hash))?;
     debug!(
@@ -163,7 +180,9 @@ pub async fn update_npm_deps_hash(
         old_hash, new_hash
     );
 
-    tokio::fs::write(file_path, updated_content).await?;
+    tokio::fs::write(file_path, updated_content)
+        .await
+        .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
 }
 
@@ -177,13 +196,17 @@ pub async fn update_nuget_deps_hash(
         "Updating nugetDeps hash in {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     // nugetDeps typically has an outputHash attribute
     let updated_content = find_and_update_attr(&content, "nugetDeps", new_hash, Some(old_hash))?;
     debug!("Updated nugetDeps attribute: {} -> {}", old_hash, new_hash);
 
-    tokio::fs::write(file_path, updated_content).await?;
+    tokio::fs::write(file_path, updated_content)
+        .await
+        .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
 }
 
@@ -197,7 +220,9 @@ pub async fn update_composer_deps_hash(
         "Updating composerDepsHash in {} using AST manipulation",
         file_path.display()
     );
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read nix file {}", file_path.display()))?;
 
     let updated_content =
         find_and_update_attr(&content, "composerDepsHash", new_hash, Some(old_hash))?;
@@ -206,6 +231,8 @@ pub async fn update_composer_deps_hash(
         old_hash, new_hash
     );
 
-    tokio::fs::write(file_path, updated_content).await?;
+    tokio::fs::write(file_path, updated_content)
+        .await
+        .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
 }

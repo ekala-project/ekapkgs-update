@@ -1,5 +1,6 @@
 use std::process::Stdio;
 
+use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -131,7 +132,9 @@ pub async fn update_single_variant(
     info!("Variants file: {}", variants_file_path);
 
     // Read the variants.nix file
-    let variants_content = tokio::fs::read_to_string(&variants_file_path).await?;
+    let variants_content = tokio::fs::read_to_string(&variants_file_path)
+        .await
+        .with_context(|| format!("read variants file {variants_file_path}"))?;
 
     // Update the version in the variant
     let updated_content = update_variant_attr(
@@ -161,7 +164,9 @@ pub async fn update_single_variant(
         };
 
     // Write the updated file
-    tokio::fs::write(&variants_file_path, &final_content).await?;
+    tokio::fs::write(&variants_file_path, &final_content)
+        .await
+        .with_context(|| format!("write variants file {variants_file_path}"))?;
     info!(
         "Updated variant '{}' in {}",
         variant_name, variants_file_path
@@ -221,7 +226,9 @@ async fn discover_hash_for_variant(
 ) -> anyhow::Result<Option<String>> {
     // Write temporary variants.nix
     let variants_file_path = find_variants_file(file, attr_path).await?;
-    let backup_content = tokio::fs::read_to_string(&variants_file_path).await?;
+    let backup_content = tokio::fs::read_to_string(&variants_file_path)
+        .await
+        .with_context(|| format!("read variants file {variants_file_path}"))?;
 
     // Set a known invalid hash
     let temp_with_bad_hash = update_variant_attr(
@@ -232,7 +239,9 @@ async fn discover_hash_for_variant(
         None,
     )?;
 
-    tokio::fs::write(&variants_file_path, &temp_with_bad_hash).await?;
+    tokio::fs::write(&variants_file_path, &temp_with_bad_hash)
+        .await
+        .with_context(|| format!("write variants file {variants_file_path}"))?;
 
     let variant_attr_path = format!("{attr_path}.variants.{variant_name}");
 
@@ -246,7 +255,9 @@ async fn discover_hash_for_variant(
         .await?;
 
     // Restore original content
-    tokio::fs::write(&variants_file_path, &backup_content).await?;
+    tokio::fs::write(&variants_file_path, &backup_content)
+        .await
+        .with_context(|| format!("restore variants file {variants_file_path}"))?;
 
     if build_result.status.success() {
         // Shouldn't happen with a wrong hash, but handle it
