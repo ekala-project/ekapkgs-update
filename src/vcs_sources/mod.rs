@@ -489,14 +489,14 @@ pub fn extract_version_from_tag(tag: &str) -> &str {
 /// # Example
 /// ```
 /// # use ekapkgs_update::vcs_sources::extract_version_with_regex;
+/// # fn main() -> anyhow::Result<()> {
+/// assert_eq!(extract_version_with_regex("jq-1.6", r"jq-(.*)")?, "1.6");
 /// assert_eq!(
-///     extract_version_with_regex("jq-1.6", r"jq-(.*)").unwrap(),
-///     "1.6"
-/// );
-/// assert_eq!(
-///     extract_version_with_regex("release/v2.3.4", r"release/v(.*)").unwrap(),
+///     extract_version_with_regex("release/v2.3.4", r"release/v(.*)")?,
 ///     "2.3.4"
 /// );
+/// # Ok(())
+/// # }
 /// ```
 pub fn extract_version_with_regex(tag: &str, regex_pattern: &str) -> anyhow::Result<String> {
     use regex::Regex;
