@@ -171,21 +171,21 @@ pub fn extract_hash_from_drv_path(drv_path: &str) -> String {
         .to_owned()
 }
 
-/// Initial seed for the djb2 string hash (Bernstein's classic constant).
-const DJB2_SEED: u64 = 5381;
-/// Multiplier for the djb2 string hash.
-const DJB2_MULTIPLIER: u64 = 33;
-
-/// Simple deterministic djb2 hash for strings (used for cache-file naming).
+/// Hash a string into a stable hex token used for cache-file naming.
 ///
-/// Not cryptographically secure; only meant to derive a stable filename token
-/// from short inputs like Nix file paths.
+/// Uses [`std::hash::DefaultHasher`] which is deterministic within a single
+/// Rust version. The output is **not** stable across Rust toolchain upgrades;
+/// the cache directory may accumulate orphan entries after a toolchain bump,
+/// which `cleanup_old_caches` will eventually evict. The cache itself is only
+/// an optimization, so a miss falls through to a fresh evaluation.
+///
+/// Not cryptographically secure.
 fn hash_string(s: &str) -> String {
-    let mut hash: u64 = DJB2_SEED;
-    for byte in s.bytes() {
-        hash = hash.wrapping_mul(DJB2_MULTIPLIER).wrapping_add(byte as u64);
-    }
-    format!("{hash:016x}")
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(test)]
