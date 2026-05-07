@@ -103,6 +103,14 @@ pub enum Commands {
         /// Skip directory diff comparison in PR body
         #[arg(long)]
         skip_directory_diff: bool,
+        /// Skip pushing build outputs to Cachix
+        #[arg(long)]
+        skip_cachix: bool,
+        /// Cachix cache name to push successful builds to. Falls back to the
+        /// `CACHIX_CACHE_NAME` environment variable. Requires
+        /// `CACHIX_AUTH_TOKEN` to be set.
+        #[arg(long, value_name = "NAME")]
+        cachix_cache: Option<String>,
     },
     /// Update a package in a Nix file
     Update {
@@ -222,6 +230,8 @@ impl Commands {
                 skip_cve,
                 skip_repology,
                 skip_directory_diff,
+                skip_cachix,
+                cachix_cache,
             } => {
                 commands::run::RunConfig::from_args(
                     file,
@@ -237,6 +247,8 @@ impl Commands {
                     skip_cve,
                     skip_repology,
                     skip_directory_diff,
+                    skip_cachix,
+                    cachix_cache,
                 )
                 .execute()
                 .await

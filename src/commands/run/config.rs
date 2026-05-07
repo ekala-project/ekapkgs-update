@@ -61,7 +61,16 @@ impl RunConfig {
         skip_cve: bool,
         skip_repology: bool,
         skip_directory_diff: bool,
+        skip_cachix: bool,
+        cachix_cache: Option<String>,
     ) -> Self {
+        // Resolve cache precedence: CLI flag → env var → None. The CLI value
+        // is moved when present; any whitespace-only value is treated as
+        // unset and falls through to `CACHIX_CACHE_NAME`.
+        let cachix_cache = match cachix_cache {
+            Some(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+            _ => crate::cachix::resolve_cache_name(None),
+        };
         Self {
             file,
             database_path,
@@ -77,6 +86,8 @@ impl RunConfig {
                 skip_repology,
                 analyze_rebuilds,
                 max_rebuilds,
+                skip_cachix,
+                cachix_cache,
             },
         }
     }

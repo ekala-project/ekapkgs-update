@@ -29,6 +29,14 @@ pub struct PrEnhancementsConfig {
 
     /// Skip updates that would cause more than N rebuilds
     pub max_rebuilds: Option<usize>,
+
+    /// Whether to skip pushing build outputs to Cachix
+    pub skip_cachix: bool,
+
+    /// Cachix cache name to push successful builds to. `None` disables
+    /// Cachix push entirely. Resolved from CLI flag → `CACHIX_CACHE_NAME`
+    /// env var by [`crate::cachix::resolve_cache_name`].
+    pub cachix_cache: Option<String>,
 }
 
 impl PrEnhancementsConfig {
@@ -37,6 +45,62 @@ impl PrEnhancementsConfig {
     pub fn should_skip_for_rebuilds(&self, rebuild_count: usize) -> bool {
         self.max_rebuilds
             .is_some_and(|threshold| rebuild_count > threshold)
+    }
+
+    /// Build the package in the worktree and push all of its outputs to the
+    /// configured Cachix cache. The push is a side effect — the result is
+    /// intentionally not surfaced anywhere in the PR body (reviewers don't
+    /// need the raw store paths). Push failures are logged inside
+    /// [`crate::cachix::push_outputs`] and not propagated.
+    ///
+    /// Returns `Ok(())` when the feature is disabled or no cache is
+    /// configured. Returns `Err(_)` only for build failures, which the
+    /// caller logs but does not propagate.
+    pub async fn perform_worktree_cachix_push(
+        &self,
+        worktree_path: &Path,
+        eval_entry_point: &str,
+        attr_path: &str,
+    ) -> anyhow::Result<()> {
+        if self.skip_cachix {
+            return Ok(());
+        }
+        let Some(cache_name) = self.cachix_cache.as_deref() else {
+            return Ok(());
+        };
+
+        use anyhow::Context;
+        use tracing::{debug, info};
+
+        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+
+        info!(
+            "{}: Building for Cachix push to '{}'",
+            attr_path, cache_name
+        );
+
+        // Run the build from inside the worktree so any worktree-local Nix
+        // imports resolve correctly. The Nix store deduplicates with any
+        // build performed earlier (e.g. by `update_from_file_path` or the
+        // directory-diff pass), so this is typically near-instant.
+        std::env::set_current_dir(worktree_path)?;
+
+        let outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
+            .await
+            .with_context(|| format!("Failed to build {attr_path} for Cachix push"))?;
+
+        // Best-effort symlink cleanup; not fatal if it fails.
+        cleanup_result_symlinks().ok();
+
+        debug!(
+            "{}: Built {} output(s) for Cachix push",
+            attr_path,
+            outputs.len()
+        );
+
+        // Discard the push result: PR rendering does not use it.
+        let _ = crate::cachix::push_outputs(Some(cache_name), &outputs, false).await;
+        Ok(())
     }
 
     /// Perform a directory diff against the previous commit in the given

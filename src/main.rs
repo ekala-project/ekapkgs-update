@@ -20,6 +20,7 @@ fn increase_fd_limit() -> anyhow::Result<()> {
     Ok(())
 }
 
+mod cachix;
 mod commands;
 mod config;
 mod cve;
