@@ -42,5 +42,8 @@
     })
     // {
       overlays.default = localOverlay;
+
+      nixosModules.default = import ./nix/module.nix;
+      nixosModules.ekapkgs-update = import ./nix/module.nix;
     };
 }

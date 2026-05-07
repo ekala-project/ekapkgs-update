@@ -317,6 +317,20 @@ async fn create_pr_for_update(
         None
     };
 
+    // Push build outputs to Cachix (if enabled) before the directory diff
+    // step, since the diff pass runs `git checkout HEAD~1` and would
+    // invalidate the worktree state we want to push from. Failures are
+    // swallowed: Cachix is a non-blocking enhancement, and the result is
+    // intentionally not surfaced in the PR body — reviewers of nixpkgs-style
+    // updates don't typically need the raw store paths or `cachix use`
+    // boilerplate, and the cache name is already visible in the deployment.
+    if let Err(e) = pr_enhancements
+        .perform_worktree_cachix_push(worktree_path, &eval_entry_point, attr_path)
+        .await
+    {
+        warn!("{}: Cachix push raised an error: {:#}", attr_path, e);
+    }
+
     // Perform directory diff if requested
     let diff_markdown = pr_enhancements
         .perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path)

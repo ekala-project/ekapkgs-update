@@ -5,6 +5,7 @@
   openssl,
   sqlite,
   nix-eval-jobs,
+  cachix,
 }:
 
 stdenv.mkDerivation {
@@ -12,6 +13,7 @@ stdenv.mkDerivation {
 
   nativeBuildInputs = [
     nix-eval-jobs
+    cachix
     (fenix.default.withComponents [
       "cargo"
       "clippy"
