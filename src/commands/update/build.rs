@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::debug;
@@ -175,7 +176,7 @@ pub fn cleanup_result_symlinks() -> anyhow::Result<()> {
 
     for link in &symlinks {
         if std::path::Path::new(link).exists() {
-            std::fs::remove_file(link)?;
+            std::fs::remove_file(link).with_context(|| format!("remove build symlink {link}"))?;
         }
     }
 

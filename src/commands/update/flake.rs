@@ -245,9 +245,13 @@ async fn update_flake_file_attr(
     old_value: Option<&str>,
     new_value: &str,
 ) -> anyhow::Result<()> {
-    let content = tokio::fs::read_to_string(file_path).await?;
+    let content = tokio::fs::read_to_string(file_path)
+        .await
+        .with_context(|| format!("read flake file {file_path}"))?;
     let updated = find_and_update_attr(&content, attr_name, new_value, old_value)?;
-    tokio::fs::write(file_path, updated).await?;
+    tokio::fs::write(file_path, updated)
+        .await
+        .with_context(|| format!("write flake file {file_path}"))?;
     Ok(())
 }
 
