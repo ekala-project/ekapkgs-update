@@ -294,15 +294,17 @@ async fn get_current_branch() -> anyhow::Result<String> {
         anyhow::bail!("Failed to get current branch: {stderr}");
     }
 
-    let branch = decode_git_stdout(output, "rev-parse --abbrev-ref HEAD")?
-        .trim()
-        .to_owned();
+    let raw = decode_git_stdout(output, "rev-parse --abbrev-ref HEAD")?;
+    let branch = raw.trim();
 
+    if branch.is_empty() {
+        anyhow::bail!("git rev-parse --abbrev-ref HEAD returned empty branch name");
+    }
     if branch == "HEAD" {
         anyhow::bail!("Currently in detached HEAD state");
     }
 
-    Ok(branch)
+    Ok(branch.to_owned())
 }
 
 /// Get the upstream remote name for a branch

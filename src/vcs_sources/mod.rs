@@ -435,15 +435,8 @@ fn find_best_release(
     compatible_releases.sort_by(|a, b| {
         let version_a = extract_version_from_tag(&a.tag_name);
         let version_b = extract_version_from_tag(&b.tag_name);
-
-        // Try to parse as semver for proper sorting
-        match (
-            Version::parse(version_a.trim_start_matches('v')),
-            Version::parse(version_b.trim_start_matches('v')),
-        ) {
-            (Ok(va), Ok(vb)) => vb.cmp(&va), // Reverse order for newest first
-            _ => version_b.cmp(version_a),   // Fallback to string comparison
-        }
+        // Reverse order for newest first
+        version_cmp_desc(version_a, version_b)
     });
 
     // Return the best (first after sorting) release by moving it out of the
@@ -453,6 +446,22 @@ fn find_best_release(
             "No compatible releases found for version {current_version} with strategy {strategy}"
         )
     })
+}
+
+/// Compare two version strings descendingly (newest first).
+///
+/// Tries to parse both sides as semver (after stripping a leading `v`) and
+/// returns `b.cmp(&a)` so that the larger version sorts first. Falls back to
+/// lexicographic comparison if either side fails to parse, in which case the
+/// fallback is also reversed (`b.cmp(a)`) to preserve newest-first ordering.
+fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        Version::parse(a.trim_start_matches('v')),
+        Version::parse(b.trim_start_matches('v')),
+    ) {
+        (Ok(va), Ok(vb)) => vb.cmp(&va),
+        _ => b.cmp(a),
+    }
 }
 
 /// Extract version from tag name by pruning leading non-numerical characters
