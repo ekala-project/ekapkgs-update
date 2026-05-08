@@ -4,28 +4,22 @@ use super::*;
 fn test_from_url_github() {
     let url = "https://github.com/owner/repo";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::GitHub { owner, repo } => {
-            assert_eq!(owner, "owner");
-            assert_eq!(repo, "repo");
-        },
-        _ => panic!("Expected GitHub source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::GitHub { ref owner, ref repo })
+            if owner == "owner" && repo == "repo"
+    ));
 }
 
 #[test]
 fn test_from_url_gitlab() {
     let url = "https://gitlab.com/owner/project";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::GitLab { owner, project } => {
-            assert_eq!(owner, "owner");
-            assert_eq!(project, "project");
-        },
-        _ => panic!("Expected GitLab source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::GitLab { ref owner, ref project })
+            if owner == "owner" && project == "project"
+    ));
 }
 
 #[test]
@@ -39,65 +33,50 @@ fn test_from_url_invalid() {
 fn test_from_url_pypi_project() {
     let url = "https://pypi.org/project/requests/";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::PyPI { pname } => {
-            assert_eq!(pname, "requests");
-        },
-        _ => panic!("Expected PyPI source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::PyPI { ref pname }) if pname == "requests"
+    ));
 }
 
 #[test]
 fn test_from_url_pypi_python_org() {
     let url = "https://pypi.python.org/project/django/";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::PyPI { pname } => {
-            assert_eq!(pname, "django");
-        },
-        _ => panic!("Expected PyPI source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::PyPI { ref pname }) if pname == "django"
+    ));
 }
 
 #[test]
 fn test_from_url_pypi_files() {
     let url = "https://files.pythonhosted.org/packages/abc/def/requests-2.28.1.tar.gz";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::PyPI { pname } => {
-            assert_eq!(pname, "requests");
-        },
-        _ => panic!("Expected PyPI source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::PyPI { ref pname }) if pname == "requests"
+    ));
 }
 
 #[test]
 fn test_from_url_pypi_mirror() {
     let url = "mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::PyPI { pname } => {
-            assert_eq!(pname, "azure-mgmt-advisor");
-        },
-        _ => panic!("Expected PyPI source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::PyPI { ref pname }) if pname == "azure-mgmt-advisor"
+    ));
 }
 
 #[test]
 fn test_from_url_pypi_mirror_single_letter() {
     let url = "mirror://pypi/r/requests/requests-2.28.1.tar.gz";
     let source = UpstreamSource::from_url(url);
-    assert!(source.is_some());
-    match source.unwrap() {
-        UpstreamSource::PyPI { pname } => {
-            assert_eq!(pname, "requests");
-        },
-        _ => panic!("Expected PyPI source"),
-    }
+    assert!(matches!(
+        source,
+        Some(UpstreamSource::PyPI { ref pname }) if pname == "requests"
+    ));
 }
 
 #[test]
