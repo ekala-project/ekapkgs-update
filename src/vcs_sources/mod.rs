@@ -170,18 +170,18 @@ impl UpstreamSource {
     /// `Some(UpstreamSource)` if the URL matches a known VCS platform, `None` otherwise
     pub fn from_url(url: &str) -> Option<Self> {
         if let Some(github_repo) = parse_github_url(url) {
-            Some(UpstreamSource::GitHub {
+            return Some(UpstreamSource::GitHub {
                 owner: github_repo.owner,
                 repo: github_repo.repo,
-            })
-        } else if let Some(gitlab_project) = parse_gitlab_url(url) {
-            Some(UpstreamSource::GitLab {
+            });
+        }
+        if let Some(gitlab_project) = parse_gitlab_url(url) {
+            return Some(UpstreamSource::GitLab {
                 owner: gitlab_project.owner,
                 project: gitlab_project.project,
-            })
-        } else {
-            parse_pypi_url(url).map(|pypi_pname| UpstreamSource::PyPI { pname: pypi_pname })
+            });
         }
+        parse_pypi_url(url).map(|pypi_pname| UpstreamSource::PyPI { pname: pypi_pname })
     }
 
     /// Get the best compatible release based on semver strategy
