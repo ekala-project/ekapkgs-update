@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_expiration() {
+    async fn test_cache_expiration() -> anyhow::Result<()> {
         let pool = setup_test_db().await;
 
         // Insert an expired entry manually
@@ -209,7 +209,7 @@ mod tests {
             packages: Vec::new(),
             fetched_at: expired_time.to_rfc3339(),
         };
-        let info_json = serde_json::to_string(&info).unwrap();
+        let info_json = serde_json::to_string(&info)?;
 
         sqlx::query(
             r#"
@@ -222,15 +222,13 @@ mod tests {
         .bind(expired_time.to_rfc3339())
         .bind(expired_time.to_rfc3339())
         .execute(&pool)
-        .await
-        .unwrap();
+        .await?;
 
         // Try to retrieve - should return None due to expiration
-        let result = get_cached_repology_data(&pool, "expired-project")
-            .await
-            .unwrap();
+        let result = get_cached_repology_data(&pool, "expired-project").await?;
 
         assert_eq!(result, None);
+        Ok(())
     }
 
     #[tokio::test]
