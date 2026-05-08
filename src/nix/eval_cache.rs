@@ -175,9 +175,9 @@ pub fn extract_hash_from_drv_path(drv_path: &str) -> String {
 ///
 /// Uses [`std::hash::DefaultHasher`] which is deterministic within a single
 /// Rust version. The output is **not** stable across Rust toolchain upgrades;
-/// the cache directory may accumulate orphan entries after a toolchain bump,
-/// which `cleanup_old_caches` will eventually evict. The cache itself is only
-/// an optimization, so a miss falls through to a fresh evaluation.
+/// the cache directory may accumulate orphan entries after a toolchain bump.
+/// The cache itself is only an optimization, so a miss falls through to a
+/// fresh evaluation, and orphan entries are inert until manually pruned.
 ///
 /// Not cryptographically secure.
 fn hash_string(s: &str) -> String {
