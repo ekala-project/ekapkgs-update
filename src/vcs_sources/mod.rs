@@ -20,6 +20,68 @@ pub struct Release {
     pub is_prerelease: bool,
 }
 
+impl Release {
+    /// Resolve this release's version string, optionally via a regex extractor.
+    ///
+    /// When `version_regex` is `None`, falls back to [`extract_version_from_tag`]
+    /// which strips common tag prefixes.
+    ///
+    /// # Errors
+    /// Returns an error if `version_regex` is `Some` and the regex either fails
+    /// to compile or fails to match the tag.
+    pub fn resolved_version(&self, version_regex: Option<&str>) -> anyhow::Result<String> {
+        match version_regex {
+            Some(regex) => extract_version_with_regex(&self.tag_name, regex),
+            None => Ok(extract_version_from_tag(&self.tag_name).to_owned()),
+        }
+    }
+
+    /// Check whether this release passes the version-prefix and semver filters.
+    ///
+    /// A release matches when all of the following hold:
+    /// 1. it is not a prerelease,
+    /// 2. its resolved version starts with `version_prefix` (when supplied),
+    /// 3. its resolved version is acceptable per `strategy` relative to `current_version`.
+    ///
+    /// A regex-extraction failure is treated as "does not match" (logged at
+    /// debug, not propagated): the release is simply skipped, mirroring the
+    /// previous closure-based behavior.
+    pub fn matches(
+        &self,
+        current_version: &str,
+        strategy: SemverStrategy,
+        version_prefix: Option<&str>,
+        version_regex: Option<&str>,
+    ) -> bool {
+        if self.is_prerelease {
+            return false;
+        }
+
+        let version = match self.resolved_version(version_regex) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "Skipping release {} - version extraction failed: {}",
+                    self.tag_name, e
+                );
+                return false;
+            },
+        };
+
+        if let Some(prefix) = version_prefix {
+            if !version.starts_with(prefix) {
+                debug!(
+                    "Skipping release {} - doesn't match version prefix {}",
+                    version, prefix
+                );
+                return false;
+            }
+        }
+
+        is_version_acceptable(current_version, &version, strategy)
+    }
+}
+
 /// Semver update strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemverStrategy {
@@ -386,11 +448,7 @@ fn find_best_release(
     // We consume the vector so the matched release is moved out instead of cloned.
     if let Some(target_version) = explicit_version {
         for release in releases {
-            let version = if let Some(regex) = version_regex {
-                extract_version_with_regex(&release.tag_name, regex)?
-            } else {
-                extract_version_from_tag(&release.tag_name).to_owned()
-            };
+            let version = release.resolved_version(version_regex)?;
 
             // Match either the tag directly or the extracted version
             if release.tag_name == target_version || version == target_version {
@@ -405,30 +463,7 @@ fn find_best_release(
     // `Release` here means the eventually-chosen one can be returned by move.
     let mut compatible_releases: Vec<Release> = releases
         .into_iter()
-        .filter(|r| !r.is_prerelease)
-        .filter(|r| {
-            let version = if let Some(regex) = version_regex {
-                match extract_version_with_regex(&r.tag_name, regex) {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                }
-            } else {
-                extract_version_from_tag(&r.tag_name).to_owned()
-            };
-
-            // If version_prefix is specified, only consider releases that start with that prefix
-            if let Some(prefix) = version_prefix {
-                if !version.starts_with(prefix) {
-                    debug!(
-                        "Skipping release {} - doesn't match version prefix {}",
-                        version, prefix
-                    );
-                    return false;
-                }
-            }
-
-            is_version_acceptable(current_version, &version, strategy)
-        })
+        .filter(|r| r.matches(current_version, strategy, version_prefix, version_regex))
         .collect();
 
     // Sort by version (newest first)
