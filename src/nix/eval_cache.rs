@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{debug, info};
 
-use super::nix_eval_jobs::NixEvalItem;
+use super::nix_eval_jobs::{NixEvalDrv, NixEvalItem};
 use super::run_eval::run_nix_eval_jobs;
 
 /// Cached evaluation result for a specific commit and eval file
@@ -75,12 +75,14 @@ impl CachedEvaluation {
             );
             let packages = Self::evaluate_fresh(eval_file).await?;
 
-            // Save to cache
+            // Save to cache. We move `packages` into `cached` for serialization,
+            // then return ownership by destructuring `cached.packages` afterwards
+            // to avoid cloning the entire map.
             let cached = CachedEvaluation {
                 commit_hash: commit.to_owned(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 file_path: eval_file.to_owned(),
-                packages: packages.clone(),
+                packages,
             };
 
             let Some(cache_parent) = cache_path.parent() else {
@@ -99,11 +101,11 @@ impl CachedEvaluation {
 
             info!(
                 "Cached {} packages to {}",
-                packages.len(),
+                cached.packages.len(),
                 cache_path.display()
             );
 
-            Ok(packages)
+            Ok(cached.packages)
         }
     }
 
@@ -117,12 +119,17 @@ impl CachedEvaluation {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(NixEvalItem::Drv(drv)) => {
-                    let drv_hash = extract_hash_from_drv_path(&drv.drv_path);
+                    // Unbox and destructure to move `attr` and `drv_path` out
+                    // without cloning. The remaining clone is unavoidable: the
+                    // map key requires its own owned `String` distinct from the
+                    // `attr_path` field stored in `DrvInfo`.
+                    let NixEvalDrv { attr, drv_path, .. } = *drv;
+                    let drv_hash = extract_hash_from_drv_path(&drv_path);
                     packages.insert(
-                        drv.attr.clone(),
+                        attr.clone(),
                         DrvInfo {
-                            attr_path: drv.attr.clone(),
-                            drv_path: drv.drv_path.clone(),
+                            attr_path: attr,
+                            drv_path,
                             drv_hash,
                         },
                     );
