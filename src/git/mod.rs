@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -213,43 +214,75 @@ pub struct PrConfig {
     pub base_branch: String,
 }
 
+impl PrConfig {
+    /// Build a [`PrConfig`] by inspecting a specific git remote.
+    ///
+    /// Reads the remote URL with `git remote get-url`, parses owner/repo via
+    /// [`parse_github_url`], and queries the remote's default branch with
+    /// `git remote show`. Errors when the remote URL does not point at GitHub
+    /// or when any underlying git invocation fails.
+    pub async fn from_remote(remote: &str) -> anyhow::Result<Self> {
+        debug!("Getting PR configuration from remote: {}", remote);
+
+        // Get remote URL
+        let remote_url = get_remote_url(remote).await?;
+        debug!("Remote URL: {}", remote_url);
+
+        // Parse GitHub owner/repo from URL
+        let github_repo = parse_github_url(&remote_url).ok_or_else(|| {
+            anyhow::anyhow!("Remote URL is not a GitHub repository: {remote_url}")
+        })?;
+
+        // Get default/base branch
+        let base_branch = get_default_branch(remote).await?;
+        debug!("Base branch: {}", base_branch);
+
+        Ok(Self {
+            owner: github_repo.owner,
+            repo: github_repo.repo,
+            base_branch,
+        })
+    }
+
+    /// Auto-detect a [`PrConfig`] by walking the current branch's upstream
+    /// tracking ref back to the configured remote, then deferring to
+    /// [`PrConfig::from_remote`].
+    pub async fn from_git_upstream() -> anyhow::Result<Self> {
+        debug!("Auto-detecting PR configuration from git upstream");
+
+        // Get current branch
+        let current_branch = get_current_branch().await?;
+        debug!("Current branch: {}", current_branch);
+
+        // Get upstream remote name
+        let remote = get_upstream_remote(&current_branch).await?;
+        debug!("Upstream remote: {}", remote);
+
+        Self::from_remote(&remote).await
+    }
+}
+
+impl fmt::Display for PrConfig {
+    /// Render `PrConfig` as `owner/repo@base_branch`, suitable for log lines
+    /// and PR-body footers.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}@{}", self.owner, self.repo, self.base_branch)
+    }
+}
+
 /// Get PR configuration from a specific remote
+///
+/// Thin wrapper around [`PrConfig::from_remote`] kept for call-site stability.
 pub async fn get_pr_config_from_remote(remote: &str) -> anyhow::Result<PrConfig> {
-    debug!("Getting PR configuration from remote: {}", remote);
-
-    // Get remote URL
-    let remote_url = get_remote_url(remote).await?;
-    debug!("Remote URL: {}", remote_url);
-
-    // Parse GitHub owner/repo from URL
-    let github_repo = parse_github_url(&remote_url)
-        .ok_or_else(|| anyhow::anyhow!("Remote URL is not a GitHub repository: {remote_url}"))?;
-
-    // Get default/base branch
-    let base_branch = get_default_branch(remote).await?;
-    debug!("Base branch: {}", base_branch);
-
-    Ok(PrConfig {
-        owner: github_repo.owner,
-        repo: github_repo.repo,
-        base_branch,
-    })
+    PrConfig::from_remote(remote).await
 }
 
 /// Automatically detect PR configuration from git upstream
+///
+/// Thin wrapper around [`PrConfig::from_git_upstream`] kept for call-site
+/// stability.
 pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
-    debug!("Auto-detecting PR configuration from git upstream");
-
-    // Get current branch
-    let current_branch = get_current_branch().await?;
-    debug!("Current branch: {}", current_branch);
-
-    // Get upstream remote name
-    let remote = get_upstream_remote(&current_branch).await?;
-    debug!("Upstream remote: {}", remote);
-
-    // Use the helper function
-    get_pr_config_from_remote(&remote).await
+    PrConfig::from_git_upstream().await
 }
 
 /// Get the current git branch name
