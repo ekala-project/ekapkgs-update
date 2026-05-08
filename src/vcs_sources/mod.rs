@@ -7,7 +7,7 @@ use std::{env, fmt};
 use anyhow::Context;
 use regex::Regex;
 use semver::Version;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
@@ -77,7 +77,19 @@ pub enum UpstreamSource {
 /// - `https://pypi.python.org/packages/.../package-1.0.0.tar.gz`
 /// - `mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip`
 ///
-/// Returns the package name if found
+/// Returns the package name if found.
+///
+/// # Failure modes
+///
+/// All shapes that fail to parse collapse to `None`. The distinct branches
+/// (malformed `mirror://pypi/` path, no regex match, heuristic miss on
+/// `pythonhosted.org`, completely unrelated URL) are emitted at
+/// `tracing::trace` level so the silent failure can be diagnosed without
+/// changing the return type.
+///
+/// The hard-coded PyPI regex is compiled at most once via [`OnceLock`]; a
+/// regex-compile bug surfaces as a panic at first call (via `expect`) rather
+/// than as a silent `None`.
 fn parse_pypi_url(url: &str) -> Option<String> {
     // Match mirror://pypi/{first-letter}/{package-name}/{filename}
     // Format: mirror://pypi/a/azure-mgmt-advisor/azure-mgmt-advisor-9.0.0.zip
@@ -88,6 +100,10 @@ fn parse_pypi_url(url: &str) -> Option<String> {
         if let Some(package) = parts.get(4) {
             return Some((*package).to_owned());
         }
+        trace!(
+            "parse_pypi_url: mirror://pypi/ URL too short (got {} segments): {url}",
+            parts.len()
+        );
     }
 
     // Match pypi.org/project/{pname}
@@ -120,9 +136,23 @@ fn parse_pypi_url(url: &str) -> Option<String> {
                     {
                         return Some(potential_name.to_owned());
                     }
+                    trace!(
+                        "parse_pypi_url: pythonhosted heuristic: text after '-' is not a \
+                         version-like token in {filename}"
+                    );
+                } else {
+                    trace!(
+                        "parse_pypi_url: pythonhosted heuristic: no '-' separator in {filename}"
+                    );
                 }
+            } else {
+                trace!("parse_pypi_url: pythonhosted heuristic: empty filename component in {url}");
             }
+        } else {
+            trace!("parse_pypi_url: pythonhosted heuristic: URL has no path segments: {url}");
         }
+    } else {
+        trace!("parse_pypi_url: URL does not match any PyPI shape: {url}");
     }
 
     None
