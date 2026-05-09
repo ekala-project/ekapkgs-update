@@ -33,9 +33,9 @@ walkdir = "2.5"
 # "deny", so they surface refactor opportunities without blocking workflows.
 [lints.rust]
 unsafe_code        = "forbid"
-# `unreachable_pub` is intentionally not enabled: this crate is a pure
-# binary (no [lib] target), so every `pub` item is "unreachable" by
-# definition. Revisit if a library target is added.
+# `unreachable_pub` is intentionally not enabled: while this crate has a
+# [lib] target (primarily for doctests), it is not a public library crate,
+# so `pub` items are "unreachable" outside the crate boundary.
 rust_2018_idioms   = { level = "warn", priority = -1 }
 
 [lints.clippy]
