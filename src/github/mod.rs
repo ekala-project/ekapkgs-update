@@ -4,8 +4,48 @@ use std::sync::OnceLock;
 
 use anyhow::Context;
 use regex::Regex;
+use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 use tracing::debug;
+
+/// User-Agent value sent with every GitHub API request.
+const GITHUB_USER_AGENT: &str = "ekapkgs-update";
+/// Value of the `Accept` header recommended by the GitHub REST API docs.
+const GITHUB_ACCEPT: &str = "application/vnd.github+json";
+/// Value of the `X-GitHub-Api-Version` header pinning the API version.
+const GITHUB_API_VERSION: &str = "2022-11-28";
+
+/// Build a `RequestBuilder` pre-configured with the GitHub-specific headers
+/// (`User-Agent`, `Accept`, `X-GitHub-Api-Version`) and, when supplied, a
+/// `Bearer` `Authorization` header.
+///
+/// This consolidates the three repeated header sets into one place so the
+/// API-version and accept-type strings only ever live in one location.
+///
+/// # Arguments
+/// * `client` - HTTP client to use
+/// * `method` - GitHub-style method selector (`Method::Get` or `Method::Post`)
+/// * `url` - Fully-qualified request URL
+/// * `token` - Optional GitHub personal access token; when `Some`, an `Authorization: Bearer
+///   <token>` header is attached
+fn github_request_builder(
+    client: &Client,
+    method: reqwest::Method,
+    url: &str,
+    token: Option<&str>,
+) -> RequestBuilder {
+    let mut request = client
+        .request(method, url)
+        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("Accept", GITHUB_ACCEPT)
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+
+    if let Some(token_str) = token {
+        request = request.header("Authorization", format!("Bearer {token_str}"));
+    }
+
+    request
+}
 
 /// GitHub release information from the API
 #[derive(Debug, Deserialize)]
@@ -90,19 +130,11 @@ pub async fn fetch_github_tags(
 
     debug!("Fetching tags from {}", url);
 
-    let client = reqwest::Client::new();
-    let mut request = client
-        .get(&url)
-        .header("User-Agent", "ekapkgs-update")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-
-    // Add authorization header if token is provided
-    if let Some(token_str) = token {
-        request = request.header("Authorization", format!("Bearer {token_str}"));
-    }
-
-    let response = request.send().await.with_context(|| format!("GET {url}"))?;
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -139,19 +171,11 @@ pub async fn fetch_github_releases(
 
     debug!("Fetching all releases from {}", url);
 
-    let client = reqwest::Client::new();
-    let mut request = client
-        .get(&url)
-        .header("User-Agent", "ekapkgs-update")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-
-    // Add authorization header if token is provided
-    if let Some(token_str) = token {
-        request = request.header("Authorization", format!("Bearer {token_str}"));
-    }
-
-    let response = request.send().await.with_context(|| format!("GET {url}"))?;
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -193,7 +217,7 @@ pub async fn create_pull_request(
 
     debug!("Creating PR at {}", url);
 
-    let client = reqwest::Client::new();
+    let client = Client::new();
     let request_body = serde_json::json!({
         "title": title,
         "body": body,
@@ -201,12 +225,7 @@ pub async fn create_pull_request(
         "base": base,
     });
 
-    let response = client
-        .post(&url)
-        .header("User-Agent", "ekapkgs-update")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("Authorization", format!("Bearer {token}"))
+    let response = github_request_builder(&client, reqwest::Method::POST, &url, Some(token))
         .json(&request_body)
         .send()
         .await
