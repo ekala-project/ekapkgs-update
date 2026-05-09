@@ -163,34 +163,33 @@ pub async fn fetch_gitlab_releases(
 mod tests {
     use super::*;
 
+    /// Helper for testing URL parsing with expected owner/project values.
+    ///
+    /// Asserts that the URL parses successfully and returns the parsed project
+    /// for further assertions.
+    fn assert_parses_to(url: &str, expected_owner: &str, expected_project: &str) {
+        let project = parse_gitlab_url(url).expect("URL should parse successfully");
+        assert_eq!(project.owner, expected_owner);
+        assert_eq!(project.project, expected_project);
+    }
+
     #[test]
     fn test_parse_gitlab_url_https() {
-        let url = "https://gitlab.com/owner/project";
-        let result = parse_gitlab_url(url);
-        assert!(result.is_some());
-        let project = result.unwrap();
-        assert_eq!(project.owner, "owner");
-        assert_eq!(project.project, "project");
+        assert_parses_to("https://gitlab.com/owner/project", "owner", "project");
     }
 
     #[test]
     fn test_parse_gitlab_url_git() {
-        let url = "git@gitlab.com:owner/project.git";
-        let result = parse_gitlab_url(url);
-        assert!(result.is_some());
-        let project = result.unwrap();
-        assert_eq!(project.owner, "owner");
-        assert_eq!(project.project, "project");
+        assert_parses_to("git@gitlab.com:owner/project.git", "owner", "project");
     }
 
     #[test]
     fn test_parse_gitlab_url_with_path() {
-        let url = "https://gitlab.com/owner/project/-/archive/v1.0.0/project-v1.0.0.tar.gz";
-        let result = parse_gitlab_url(url);
-        assert!(result.is_some());
-        let project = result.unwrap();
-        assert_eq!(project.owner, "owner");
-        assert_eq!(project.project, "project");
+        assert_parses_to(
+            "https://gitlab.com/owner/project/-/archive/v1.0.0/project-v1.0.0.tar.gz",
+            "owner",
+            "project",
+        );
     }
 
     #[test]

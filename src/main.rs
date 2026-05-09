@@ -23,9 +23,6 @@ mod rewrite;
 mod variant_strategy;
 mod vcs_sources;
 
-#[cfg(test)]
-mod tests;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Increase file descriptor limit to avoid "Too many open files" errors

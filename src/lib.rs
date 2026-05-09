@@ -23,6 +23,3 @@ pub mod repology;
 pub mod rewrite;
 pub mod variant_strategy;
 pub mod vcs_sources;
-
-#[cfg(test)]
-mod tests;

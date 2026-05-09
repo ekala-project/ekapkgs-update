@@ -85,7 +85,7 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
 /// 4. Add unittests = runUnitTests finalAttrs.finalPackage; to passthru.tests
 /// 5. Update closing brace from } to })
 /// 6. Update test-related comments
-pub(crate) fn apply_run_unit_tests_migration(content: &str) -> anyhow::Result<String> {
+pub fn apply_run_unit_tests_migration(content: &str) -> anyhow::Result<String> {
     // First, validate that the file parses correctly
     let parse = rnix::Root::parse(content);
     if !parse.errors().is_empty() {

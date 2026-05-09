@@ -1,4 +1,4 @@
-use crate::commands::migrate::apply_run_unit_tests_migration;
+use ekapkgs_update::commands::migrate::apply_run_unit_tests_migration;
 
 #[test]
 fn test_migrate_cmocka() {
