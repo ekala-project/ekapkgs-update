@@ -13,9 +13,9 @@ mod variants;
 #[cfg(test)]
 mod tests_attributes;
 #[cfg(test)]
-mod tests_patches;
-#[cfg(test)]
 mod tests_maintainers;
+#[cfg(test)]
+mod tests_patches;
 
 pub use attributes::find_and_update_attr;
 // `RewriteError` is intentionally kept private to the `rewrite` module: callers

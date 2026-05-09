@@ -2,12 +2,12 @@
 //!
 //! This module provides high-level git operations used during the update workflow:
 //!
-//! - **Worktree management**: [`create_worktree`] and [`cleanup_worktree`] isolate
-//!   update work in separate working directories.
-//! - **Branch operations**: [`create_and_push_branch`] creates update branches with
-//!   standardized naming (`update/<attr>/<version>`) and pushes them to a remote.
-//! - **PR configuration**: [`PrConfig`] encapsulates the owner/repo/base-branch
-//!   tuple needed to create pull requests via the GitHub API.
+//! - **Worktree management**: [`create_worktree`] and [`cleanup_worktree`] isolate update work in
+//!   separate working directories.
+//! - **Branch operations**: [`create_and_push_branch`] creates update branches with standardized
+//!   naming (`update/<attr>/<version>`) and pushes them to a remote.
+//! - **PR configuration**: [`PrConfig`] encapsulates the owner/repo/base-branch tuple needed to
+//!   create pull requests via the GitHub API.
 //!
 //! ## Error Handling
 //!
