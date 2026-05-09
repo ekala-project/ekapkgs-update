@@ -105,6 +105,7 @@ mod tests {
             skip: None,
             semver_strategy: None,
             include_prereleases: None,
+            version_regex: None,
         }
     }
 

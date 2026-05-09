@@ -25,6 +25,8 @@ pub struct PackageMetadata {
     pub semver_strategy: Option<SemverStrategy>,
     /// Whether to include prerelease versions (from passthru.ekapkgs-update.include-prereleases)
     pub include_prereleases: Option<bool>,
+    /// Custom regex for extracting version from tags (from passthru.ekapkgs-update.version-regex)
+    pub version_regex: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -130,6 +132,19 @@ impl PackageMetadata {
                 _ => None,
             });
 
+        // Query passthru.ekapkgs-update.version-regex attribute
+        let version_regex = package
+            .get_attr("passthru.ekapkgs-update.version-regex or null")
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim().trim_matches('"');
+                if trimmed.is_empty() || trimmed == "null" {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -146,6 +161,7 @@ impl PackageMetadata {
             skip,
             semver_strategy,
             include_prereleases,
+            version_regex,
         })
     }
 }
@@ -175,6 +191,7 @@ mod tests {
             skip: Some(true),
             semver_strategy: None,
             include_prereleases: None,
+            version_regex: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -195,6 +212,7 @@ mod tests {
             skip: Some(false),
             semver_strategy: None,
             include_prereleases: None,
+            version_regex: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -215,6 +233,7 @@ mod tests {
             skip: None,
             semver_strategy: None,
             include_prereleases: None,
+            version_regex: None,
         };
 
         assert_eq!(metadata_none.skip, None);
@@ -240,9 +259,11 @@ mod tests {
             skip: None,
             semver_strategy: Some(SemverStrategy::Minor),
             include_prereleases: Some(true),
+            version_regex: Some("v(.*)".to_string()),
         };
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));
         assert_eq!(metadata.include_prereleases, Some(true));
+        assert_eq!(metadata.version_regex, Some("v(.*)".to_string()));
     }
 }

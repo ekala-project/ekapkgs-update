@@ -103,6 +103,9 @@ pub async fn update_single_variant(
     // Use include-prereleases from passthru, or default to false
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
 
+    // Use version-regex from passthru if available
+    let version_regex = metadata.version_regex.as_deref();
+
     // Fetch new version based on strategy
     let release = upstream_source
         .get_compatible_release(
@@ -110,7 +113,7 @@ pub async fn update_single_variant(
             strategy,
             version_prefix.as_deref(),
             None, // No explicit version for variants
-            None, // No version regex for variants
+            version_regex,
             include_prereleases,
         )
         .await?;
