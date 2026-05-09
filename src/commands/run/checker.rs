@@ -154,9 +154,26 @@ async fn check_for_update(
         return Ok(());
     };
 
+    // Use semver strategy from passthru, or default to Latest
+    let semver_strategy = metadata.semver_strategy.unwrap_or(SemverStrategy::Latest);
+    debug!("{}: Using semver strategy: {}", attr_path, semver_strategy);
+
+    // Use include-prereleases from passthru, or default to false
+    let include_prereleases = metadata.include_prereleases.unwrap_or(false);
+    if include_prereleases {
+        debug!("{}: Including prerelease versions", attr_path);
+    }
+
     // Fetch latest compatible release
     let best_release = match upstream_source
-        .get_compatible_release(current_version, SemverStrategy::Latest, None, None, None)
+        .get_compatible_release(
+            current_version,
+            semver_strategy,
+            None,
+            None,
+            None,
+            include_prereleases,
+        )
         .await
     {
         Ok(release) => release,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use tracing::debug;
 
 use crate::nix::eval_nix_expr;
+use crate::vcs_sources::SemverStrategy;
 
 // Data structure for package metadata
 #[derive(Debug)]
@@ -20,6 +21,10 @@ pub struct PackageMetadata {
     pub changelog: Option<String>,
     /// Whether automatic updates should be skipped (from passthru.ekapkgs-update.skip)
     pub skip: Option<bool>,
+    /// Semver strategy for version selection (from passthru.ekapkgs-update.semver-strategy)
+    pub semver_strategy: Option<SemverStrategy>,
+    /// Whether to include prerelease versions (from passthru.ekapkgs-update.include-prereleases)
+    pub include_prereleases: Option<bool>,
 }
 
 pub struct PackageQuery {
@@ -102,6 +107,29 @@ impl PackageMetadata {
                 _ => None,
             });
 
+        // Query passthru.ekapkgs-update.semver-strategy attribute
+        let semver_strategy = package
+            .get_attr("passthru.ekapkgs-update.semver-strategy or null")
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim().trim_matches('"');
+                if trimmed.is_empty() || trimmed == "null" {
+                    None
+                } else {
+                    trimmed.parse::<SemverStrategy>().ok()
+                }
+            });
+
+        // Query passthru.ekapkgs-update.include-prereleases attribute
+        let include_prereleases = package
+            .get_attr("passthru.ekapkgs-update.include-prereleases or null")
+            .await
+            .and_then(|s| match s.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -116,6 +144,8 @@ impl PackageMetadata {
             homepage,
             changelog,
             skip,
+            semver_strategy,
+            include_prereleases,
         })
     }
 }
@@ -143,6 +173,8 @@ mod tests {
             homepage: None,
             changelog: None,
             skip: Some(true),
+            semver_strategy: None,
+            include_prereleases: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -161,6 +193,8 @@ mod tests {
             homepage: None,
             changelog: None,
             skip: Some(false),
+            semver_strategy: None,
+            include_prereleases: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -179,8 +213,36 @@ mod tests {
             homepage: None,
             changelog: None,
             skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
         };
 
         assert_eq!(metadata_none.skip, None);
+    }
+
+    #[test]
+    fn test_package_metadata_has_semver_strategy_field() {
+        use crate::vcs_sources::SemverStrategy;
+
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: None,
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: Some(SemverStrategy::Minor),
+            include_prereleases: Some(true),
+        };
+
+        assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));
+        assert_eq!(metadata.include_prereleases, Some(true));
     }
 }
