@@ -143,6 +143,9 @@ pub enum Commands {
         /// Ignore update script and use generic update method
         #[arg(long, default_value = "false")]
         ignore_update_script: bool,
+        /// Force update even if package has passthru.ekapkgs-update.skip = true
+        #[arg(long)]
+        force: bool,
         /// Create a git commit after successful update
         #[arg(long)]
         commit: bool,
@@ -276,6 +279,7 @@ impl Commands {
                 attr_path,
                 semver,
                 ignore_update_script,
+                force,
                 commit,
                 create_pr,
                 upstream,
@@ -298,6 +302,7 @@ impl Commands {
                     attr_path,
                     semver,
                     ignore_update_script,
+                    force,
                     commit,
                     create_pr,
                     upstream,

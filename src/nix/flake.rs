@@ -198,6 +198,7 @@ pub async fn get_flake_package_metadata(
         description,
         homepage,
         changelog,
+        skip: None, // Flake packages don't support passthru.ekapkgs-update yet
     })
 }
 
