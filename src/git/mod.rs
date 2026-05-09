@@ -1,3 +1,20 @@
+//! Git operations for managing worktrees, branches, and pull requests.
+//!
+//! This module provides high-level git operations used during the update workflow:
+//!
+//! - **Worktree management**: [`create_worktree`] and [`cleanup_worktree`] isolate
+//!   update work in separate working directories.
+//! - **Branch operations**: [`create_and_push_branch`] creates update branches with
+//!   standardized naming (`update/<attr>/<version>`) and pushes them to a remote.
+//! - **PR configuration**: [`PrConfig`] encapsulates the owner/repo/base-branch
+//!   tuple needed to create pull requests via the GitHub API.
+//!
+//! ## Error Handling
+//!
+//! All public functions return `anyhow::Result`. Any git command failure (non-zero
+//! exit status, I/O error, or UTF-8 decode failure) propagates as an error with
+//! contextual information about which command failed.
+
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -49,6 +66,11 @@ fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
 }
 
 /// Create a git worktree for an isolated update
+///
+/// # Errors
+///
+/// Returns an error if the worktree directory cannot be created, if the `git worktree add`
+/// command fails, or if any I/O operation on the filesystem fails.
 pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
     // Create a safe worktree directory name from attr_path
     let worktree_name = attr_path.replace(['.', '/'], "-");
@@ -95,6 +117,11 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Clean up a git worktree
+///
+/// # Errors
+///
+/// Returns an error if the `git worktree remove` command fails and fallback
+/// directory removal also fails.
 pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
     if !worktree_path.exists() {
         return Ok(());
@@ -134,6 +161,11 @@ pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
 
 /// Create a git branch, commit changes, and push to remote
 /// Returns the branch name
+///
+/// # Errors
+///
+/// Returns an error if any git command (`checkout -b`, `add -A`, `commit`, or `push`)
+/// fails with a non-zero exit status.
 pub async fn create_and_push_branch(
     worktree_path: &Path,
     attr_path: &str,
@@ -273,6 +305,11 @@ impl fmt::Display for PrConfig {
 /// Get PR configuration from a specific remote
 ///
 /// Thin wrapper around [`PrConfig::from_remote`] kept for call-site stability.
+///
+/// # Errors
+///
+/// Returns an error if the remote URL cannot be retrieved, if the URL does not point
+/// to a GitHub repository, or if the default branch cannot be determined.
 pub async fn get_pr_config_from_remote(remote: &str) -> anyhow::Result<PrConfig> {
     PrConfig::from_remote(remote).await
 }
@@ -281,6 +318,12 @@ pub async fn get_pr_config_from_remote(remote: &str) -> anyhow::Result<PrConfig>
 ///
 /// Thin wrapper around [`PrConfig::from_git_upstream`] kept for call-site
 /// stability.
+///
+/// # Errors
+///
+/// Returns an error if the current branch cannot be determined, if the upstream
+/// remote is not configured, if the remote URL is not a GitHub URL, or if the
+/// default branch cannot be determined.
 pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
     PrConfig::from_git_upstream().await
 }

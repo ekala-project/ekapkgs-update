@@ -1,3 +1,25 @@
+//! CVE (Common Vulnerabilities and Exposures) analysis for package updates.
+//!
+//! This module integrates with the OSV (Open Source Vulnerabilities) database to
+//! analyze security implications of package updates. It determines which CVEs are
+//! resolved, introduced, or persist across version changes.
+//!
+//! ## Main Entry Point
+//!
+//! [`analyze_cve_changes`] compares vulnerability data between old and new package
+//! versions, returning a [`CveAnalysis`] that categorizes CVEs by their status.
+//!
+//! ## Caching
+//!
+//! CVE data is cached in the SQLite database (see [`cache`]) to minimize repeated
+//! API requests. Cache entries expire after a configured duration and are cleaned
+//! up during database initialization.
+//!
+//! ## Ecosystem Support
+//!
+//! The [`ecosystem`] submodule maps package metadata (language, build system) to
+//! OSV ecosystem identifiers (e.g., "PyPI", "crates.io", "npm").
+
 mod cache;
 mod ecosystem;
 mod osv;

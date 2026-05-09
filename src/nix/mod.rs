@@ -1,3 +1,22 @@
+//! Nix expression evaluation and package metadata extraction.
+//!
+//! This module provides utilities for interacting with the Nix package manager:
+//!
+//! - **Expression evaluation**: [`eval_nix_expr`] runs `nix eval` to compute Nix
+//!   expressions and returns their JSON-serialized output.
+//! - **Attribute introspection**: [`has_attr`] checks whether a Nix file defines
+//!   a specific attribute path.
+//! - **Entry point normalization**: [`normalize_entry_point`] ensures paths used
+//!   in `import` expressions are correctly prefixed.
+//!
+//! Submodules handle more specialized tasks:
+//!
+//! - [`flake`]: Flake-based package building and evaluation
+//! - [`nix_eval_jobs`]: Parallel evaluation via `nix-eval-jobs`
+//! - [`eval_cache`]: Caching of evaluation results keyed by git commit
+//! - [`rebuild_count`]: Derivation impact analysis (how many packages rebuild)
+//! - [`run_eval`]: Streaming evaluation output parsing
+
 pub mod eval_cache;
 pub mod flake;
 pub mod nix_eval_jobs;
