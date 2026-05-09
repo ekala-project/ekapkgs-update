@@ -164,6 +164,12 @@ async fn check_for_update(
         debug!("{}: Including prerelease versions", attr_path);
     }
 
+    // Use version-regex from passthru if available
+    let version_regex = metadata.version_regex.as_deref();
+    if let Some(regex) = version_regex {
+        debug!("{}: Using version regex: {}", attr_path, regex);
+    }
+
     // Fetch latest compatible release
     let best_release = match upstream_source
         .get_compatible_release(
@@ -171,7 +177,7 @@ async fn check_for_update(
             semver_strategy,
             None,
             None,
-            None,
+            version_regex,
             include_prereleases,
         )
         .await

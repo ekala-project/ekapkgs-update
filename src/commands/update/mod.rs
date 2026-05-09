@@ -75,6 +75,12 @@ pub async fn update_from_file_path(
     // Use include-prereleases from passthru, or default to false
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
 
+    // Prefer version-regex from passthru over CLI argument
+    let version_regex = metadata
+        .version_regex
+        .as_deref()
+        .or(version_config.version_regex.as_deref());
+
     // Step 3: Fetch best compatible release
     let best_release = upstream_source
         .get_compatible_release(
@@ -82,7 +88,7 @@ pub async fn update_from_file_path(
             version_config.strategy,
             None,
             version_config.explicit_version.as_deref(),
-            version_config.version_regex.as_deref(),
+            version_regex,
             include_prereleases,
         )
         .await?;

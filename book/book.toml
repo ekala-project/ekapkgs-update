@@ -1,0 +1,19 @@
+[book]
+title = "ekapkgs-update Documentation"
+authors = ["Jonathan Ringer", "Ekala Project Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/ekala-project/ekapkgs-update"
+edit-url-template = "https://github.com/ekala-project/ekapkgs-update/edit/master/book/{path}"
+
+[output.html.search]
+enable = true
