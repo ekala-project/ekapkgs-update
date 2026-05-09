@@ -4,13 +4,12 @@
 //!
 //! The database manages two primary tables:
 //!
-//! - **`updates`**: Tracks the state of each package, including when it was last
-//!   checked, when it should be re-checked, current version, proposed version,
-//!   and rebuild impact (if known). The `attr_path` column is the primary key.
+//! - **`updates`**: Tracks the state of each package, including when it was last checked, when it
+//!   should be re-checked, current version, proposed version, and rebuild impact (if known). The
+//!   `attr_path` column is the primary key.
 //!
-//! - **`update_logs`**: Records failures for post-mortem analysis, indexed by
-//!   derivation path. Each log entry captures the error message, old/new versions,
-//!   and timestamp.
+//! - **`update_logs`**: Records failures for post-mortem analysis, indexed by derivation path. Each
+//!   log entry captures the error message, old/new versions, and timestamp.
 //!
 //! ## Backoff Semantics
 //!
