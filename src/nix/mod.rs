@@ -25,6 +25,7 @@ pub mod run_eval;
 
 use std::borrow::Cow;
 
+use anyhow::Context;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -92,7 +93,8 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
         .arg(expr)
         .arg("--raw")
         .output()
-        .await?;
+        .await
+        .context("Failed to execute nix-instantiate")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

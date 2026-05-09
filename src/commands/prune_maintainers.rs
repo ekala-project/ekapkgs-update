@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Context;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
@@ -117,14 +118,18 @@ pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result
 /// Ok(false) if no changes were made, or an error if the file cannot be processed
 async fn process_file(path: &Path) -> anyhow::Result<bool> {
     // Read the file
-    let content = fs::read_to_string(path).await?;
+    let content = fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read file {}", path.display()))?;
 
     // Replace maintainers
     let (updated_content, changed) = replace_maintainers_with_empty(&content)?;
 
     if changed {
         // Write back the modified content only if not in check mode
-        fs::write(path, updated_content).await?;
+        fs::write(path, updated_content)
+            .await
+            .with_context(|| format!("write file {}", path.display()))?;
         Ok(true)
     } else {
         Ok(false)

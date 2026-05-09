@@ -3,6 +3,7 @@
 //! This module provides functions for evaluating and interacting with Nix flakes,
 //! including querying package metadata and building flake outputs.
 
+use anyhow::Context;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -24,7 +25,8 @@ pub async fn detect_system() -> anyhow::Result<String> {
         .arg("builtins.currentSystem")
         .arg("--raw")
         .output()
-        .await?;
+        .await
+        .context("Failed to execute nix eval for system detection")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -96,7 +98,8 @@ pub async fn eval_flake_attr(installable: &str, field: &str) -> anyhow::Result<S
         .arg(&attr_path)
         .arg("--raw")
         .output()
-        .await?;
+        .await
+        .with_context(|| format!("Failed to execute nix eval for '{}'", attr_path))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

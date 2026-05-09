@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use futures::{StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -192,7 +193,8 @@ async fn get_current_commit() -> anyhow::Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
-        .await?;
+        .await
+        .context("Failed to execute git rev-parse HEAD")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
