@@ -35,6 +35,18 @@ pub struct Database {
     pool: SqlitePool,
 }
 
+impl From<SqlitePool> for Database {
+    /// Construct a `Database` from a pre-built `SqlitePool`.
+    ///
+    /// This is primarily useful for tests, which want to bind to
+    /// `SqlitePool::connect("sqlite::memory:")` and skip
+    /// [`Database::new`]'s schema-bootstrap steps when the test fixture
+    /// has already run them.
+    fn from(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
 impl Database {
     /// Initialize the database connection and create tables if needed
     pub async fn new(db_path: &str) -> Result<Self> {

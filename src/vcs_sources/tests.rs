@@ -103,7 +103,7 @@ fn test_get_version() {
         tag_name: "v1.2.3".to_owned(),
         is_prerelease: false,
     };
-    assert_eq!(UpstreamSource::get_version(&release), "1.2.3");
+    assert_eq!(release.version(), "1.2.3");
 }
 
 // SemverStrategy tests

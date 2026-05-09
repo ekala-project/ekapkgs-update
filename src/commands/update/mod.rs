@@ -83,7 +83,7 @@ pub async fn update_from_file_path(
         )
         .await?;
 
-    let new_version = UpstreamSource::get_version(&best_release);
+    let new_version = best_release.version();
     info!(
         "Found compatible version ({:?}): {} -> {}",
         version_config.strategy, metadata.version, new_version
@@ -95,7 +95,7 @@ pub async fn update_from_file_path(
         &attr_path,
         Path::new(&file_location),
         &metadata.version,
-        &new_version,
+        new_version,
         metadata.output_hash.as_deref(),
     )
     .await?;
@@ -177,7 +177,7 @@ pub async fn update_from_file_path(
     pr::PostUpdateParams {
         attr_path: &attr_path,
         metadata: &metadata,
-        new_version: &new_version,
+        new_version,
         commit: update_config.commit,
         create_pr: update_config.create_pr,
         upstream: update_config.upstream.clone(),

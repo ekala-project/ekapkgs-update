@@ -21,6 +21,18 @@ pub struct Release {
 }
 
 impl Release {
+    /// Extract the clean version string from this release.
+    ///
+    /// Removes common tag prefixes like `v`, `release-`, etc. by delegating to
+    /// [`extract_version_from_tag`]. The returned slice is borrowed from
+    /// [`Release::tag_name`], so no allocation is performed.
+    ///
+    /// # Returns
+    /// The version substring of [`Release::tag_name`].
+    pub fn version(&self) -> &str {
+        extract_version_from_tag(&self.tag_name)
+    }
+
     /// Resolve this release's version string, optionally via a regex extractor.
     ///
     /// When `version_regex` is `None`, falls back to [`extract_version_from_tag`]
@@ -390,19 +402,6 @@ impl UpstreamSource {
                 )
             },
         }
-    }
-
-    /// Extract clean version string from a release
-    ///
-    /// Removes common prefixes like 'v', 'release-', etc. from tag names.
-    ///
-    /// # Arguments
-    /// * `release` - The release to extract version from
-    ///
-    /// # Returns
-    /// Clean version string
-    pub fn get_version(release: &Release) -> String {
-        extract_version_from_tag(&release.tag_name).to_owned()
     }
 
     /// Get a human-readable description of this source

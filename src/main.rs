@@ -2,25 +2,8 @@ use clap::{CommandFactory, FromArgMatches};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
-mod cli;
-
-/// Increase the file descriptor limit to avoid "Too many open files" errors
-fn increase_fd_limit() -> anyhow::Result<()> {
-    use rlimit::Resource;
-
-    // Get current limits
-    let (soft, hard) = Resource::NOFILE.get()?;
-
-    // Try to set soft limit to hard limit (maximum allowed)
-    if soft < hard {
-        Resource::NOFILE.set(hard, hard)?;
-        tracing::debug!("Increased file descriptor limit from {} to {}", soft, hard);
-    }
-
-    Ok(())
-}
-
 mod cachix;
+mod cli;
 mod commands;
 mod config;
 mod cve;
@@ -30,6 +13,7 @@ mod git;
 mod github;
 mod gitlab;
 mod hash_discovery;
+mod init;
 mod nix;
 mod package;
 mod paths;
@@ -46,7 +30,7 @@ mod tests;
 async fn main() -> anyhow::Result<()> {
     // Increase file descriptor limit to avoid "Too many open files" errors
     // when processing many packages concurrently
-    if let Err(e) = increase_fd_limit() {
+    if let Err(e) = init::increase_fd_limit() {
         tracing::warn!("Failed to increase file descriptor limit: {}", e);
     }
 
