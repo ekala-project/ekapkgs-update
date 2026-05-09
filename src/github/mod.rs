@@ -254,34 +254,33 @@ mod tests {
     use super::*;
     pub use crate::vcs_sources::extract_version_from_tag;
 
+    /// Helper for testing URL parsing with expected owner/repo values.
+    ///
+    /// Asserts that the URL parses successfully and returns the parsed repo
+    /// for further assertions.
+    fn assert_parses_to(url: &str, expected_owner: &str, expected_repo: &str) {
+        let repo = parse_github_url(url).expect("URL should parse successfully");
+        assert_eq!(repo.owner, expected_owner);
+        assert_eq!(repo.repo, expected_repo);
+    }
+
     #[test]
     fn test_parse_github_url_https() {
-        let url = "https://github.com/owner/repo";
-        let result = parse_github_url(url);
-        assert!(result.is_some());
-        let repo = result.unwrap();
-        assert_eq!(repo.owner, "owner");
-        assert_eq!(repo.repo, "repo");
+        assert_parses_to("https://github.com/owner/repo", "owner", "repo");
     }
 
     #[test]
     fn test_parse_github_url_git() {
-        let url = "git@github.com:owner/repo.git";
-        let result = parse_github_url(url);
-        assert!(result.is_some());
-        let repo = result.unwrap();
-        assert_eq!(repo.owner, "owner");
-        assert_eq!(repo.repo, "repo");
+        assert_parses_to("git@github.com:owner/repo.git", "owner", "repo");
     }
 
     #[test]
     fn test_parse_github_url_with_path() {
-        let url = "https://github.com/owner/repo/archive/v1.0.0.tar.gz";
-        let result = parse_github_url(url);
-        assert!(result.is_some());
-        let repo = result.unwrap();
-        assert_eq!(repo.owner, "owner");
-        assert_eq!(repo.repo, "repo");
+        assert_parses_to(
+            "https://github.com/owner/repo/archive/v1.0.0.tar.gz",
+            "owner",
+            "repo",
+        );
     }
 
     #[test]
