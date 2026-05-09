@@ -18,6 +18,8 @@ pub struct PackageMetadata {
     pub description: Option<String>,
     pub homepage: Option<String>,
     pub changelog: Option<String>,
+    /// Whether automatic updates should be skipped (from passthru.ekapkgs-update.skip)
+    pub skip: Option<bool>,
 }
 
 pub struct PackageQuery {
@@ -90,6 +92,16 @@ impl PackageMetadata {
         let homepage = package.get_attr("meta.homepage").await;
         let changelog = package.get_attr("meta.changelog").await;
 
+        // Query passthru.ekapkgs-update.skip attribute
+        let skip = package
+            .get_attr("passthru.ekapkgs-update.skip or null")
+            .await
+            .and_then(|s| match s.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -103,6 +115,72 @@ impl PackageMetadata {
             description,
             homepage,
             changelog,
+            skip,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_package_metadata_has_skip_field() {
+        // This test verifies that PackageMetadata has a skip field
+        // We can't easily test the Nix evaluation without a full Nix setup,
+        // but we can at least verify the struct has the field
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: None,
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: Some(true),
+        };
+
+        assert_eq!(metadata.skip, Some(true));
+
+        let metadata_false = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: None,
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: Some(false),
+        };
+
+        assert_eq!(metadata_false.skip, Some(false));
+
+        let metadata_none = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: None,
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+        };
+
+        assert_eq!(metadata_none.skip, None);
     }
 }

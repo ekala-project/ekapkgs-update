@@ -118,6 +118,15 @@ async fn check_for_update(
     let current_version = &metadata.version;
     debug!("{}: Current version: {}", attr_path, current_version);
 
+    // Skip packages with passthru.ekapkgs-update.skip = true
+    if metadata.skip == Some(true) {
+        debug!(
+            "{}: Skipping due to passthru.ekapkgs-update.skip = true",
+            attr_path
+        );
+        return Ok(());
+    }
+
     // Skip packages with 'unstable' in version if flag is set
     if skip_unstable && current_version.contains("unstable") {
         debug!(

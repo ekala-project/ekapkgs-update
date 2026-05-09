@@ -191,6 +191,7 @@ mod tests {
             description: None,
             homepage: None,
             changelog: None,
+            skip: None,
         };
 
         match ecosystem_type {

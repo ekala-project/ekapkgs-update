@@ -102,6 +102,7 @@ mod tests {
             description: None,
             homepage: None,
             changelog: None,
+            skip: None,
         }
     }
 

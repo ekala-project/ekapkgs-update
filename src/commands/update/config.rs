@@ -179,6 +179,9 @@ pub struct UpdateParams {
     /// Whether to ignore update scripts (passthru.updateScript)
     pub ignore_update_script: bool,
 
+    /// Whether to force update even if passthru.ekapkgs-update.skip = true
+    pub force: bool,
+
     /// Override filename for package definition (ignores meta.position)
     pub override_filename: Option<String>,
 
@@ -210,6 +213,7 @@ impl UpdateParams {
         attr_path: String,
         semver: SemverStrategy,
         ignore_update_script: bool,
+        force: bool,
         commit: bool,
         create_pr: bool,
         upstream: Option<String>,
@@ -231,6 +235,7 @@ impl UpdateParams {
             file,
             attr_path,
             ignore_update_script,
+            force,
             override_filename,
             system,
             update_config: UpdateConfig {
@@ -268,6 +273,7 @@ impl UpdateParams {
             file,
             attr_path,
             ignore_update_script,
+            force,
             override_filename,
             system: _system,
             update_config,
@@ -291,6 +297,34 @@ impl UpdateParams {
                     override_filename,
                 )
                 .await;
+        }
+
+        // Check passthru.ekapkgs-update.skip attribute
+        use crate::package::PackageMetadata;
+        match PackageMetadata::from_attr_path(&file, &attr_path).await {
+            Ok(metadata) => {
+                if metadata.skip == Some(true) {
+                    if !force {
+                        warn!(
+                            "Package '{}' has passthru.ekapkgs-update.skip = true",
+                            attr_path
+                        );
+                        anyhow::bail!("Update skipped. Use --force to override this setting.");
+                    } else {
+                        warn!(
+                            "Package '{}' has passthru.ekapkgs-update.skip = true, but proceeding \
+                             due to --force flag",
+                            attr_path
+                        );
+                    }
+                }
+            },
+            Err(e) => {
+                debug!(
+                    "Could not extract metadata to check skip flag (continuing anyway): {}",
+                    e
+                );
+            },
         }
 
         // Check if this is a mkManyVariants package
