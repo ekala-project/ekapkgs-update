@@ -199,7 +199,7 @@ async fn check_for_update(
         },
     };
 
-    let latest_version = UpstreamSource::get_version(&best_release);
+    let latest_version = best_release.version().to_owned();
     debug!("{}: Latest version: {}", attr_path, latest_version);
 
     // Cross-check with Repology for validation (if enabled)

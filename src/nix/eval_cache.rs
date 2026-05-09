@@ -17,7 +17,7 @@ use super::nix_eval_jobs::{NixEvalDrv, NixEvalItem};
 use super::run_eval::run_nix_eval_jobs;
 
 /// Cached evaluation result for a specific commit and eval file
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CachedEvaluation {
     /// Git commit hash this evaluation was performed at
     pub commit_hash: String,
@@ -30,7 +30,7 @@ pub struct CachedEvaluation {
 }
 
 /// Essential derivation information for rebuild analysis
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DrvInfo {
     /// Full attribute path (e.g., "python.pkgs.setuptools")
     pub attr_path: String,
