@@ -94,6 +94,7 @@ pub async fn update_flake_package(
             None,
             version_config.explicit_version.as_deref(),
             version_config.version_regex.as_deref(),
+            false, // Flake packages don't support passthru.ekapkgs-update yet
         )
         .await
         .context("Failed to find compatible release")?;

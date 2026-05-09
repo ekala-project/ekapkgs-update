@@ -72,6 +72,9 @@ pub async fn update_from_file_path(
 
     info!("{}", upstream_source.description());
 
+    // Use include-prereleases from passthru, or default to false
+    let include_prereleases = metadata.include_prereleases.unwrap_or(false);
+
     // Step 3: Fetch best compatible release
     let best_release = upstream_source
         .get_compatible_release(
@@ -80,6 +83,7 @@ pub async fn update_from_file_path(
             None,
             version_config.explicit_version.as_deref(),
             version_config.version_regex.as_deref(),
+            include_prereleases,
         )
         .await?;
 

@@ -51,7 +51,7 @@ impl Release {
     /// Check whether this release passes the version-prefix and semver filters.
     ///
     /// A release matches when all of the following hold:
-    /// 1. it is not a prerelease,
+    /// 1. it is not a prerelease (unless `include_prereleases` is true),
     /// 2. its resolved version starts with `version_prefix` (when supplied),
     /// 3. its resolved version is acceptable per `strategy` relative to `current_version`.
     ///
@@ -64,8 +64,9 @@ impl Release {
         strategy: SemverStrategy,
         version_prefix: Option<&str>,
         version_regex: Option<&str>,
+        include_prereleases: bool,
     ) -> bool {
-        if self.is_prerelease {
+        if self.is_prerelease && !include_prereleases {
             return false;
         }
 
@@ -284,6 +285,7 @@ impl UpstreamSource {
         version_prefix: Option<&str>,
         explicit_version: Option<&str>,
         version_regex: Option<&str>,
+        include_prereleases: bool,
     ) -> anyhow::Result<Release> {
         match self {
             UpstreamSource::GitHub { owner, repo } => {
@@ -328,6 +330,7 @@ impl UpstreamSource {
                     version_prefix,
                     explicit_version,
                     version_regex,
+                    include_prereleases,
                 )
             },
             UpstreamSource::GitLab { owner, project } => {
@@ -372,6 +375,7 @@ impl UpstreamSource {
                     version_prefix,
                     explicit_version,
                     version_regex,
+                    include_prereleases,
                 )
             },
             UpstreamSource::PyPI { pname } => {
@@ -399,6 +403,7 @@ impl UpstreamSource {
                     version_prefix,
                     explicit_version,
                     version_regex,
+                    include_prereleases,
                 )
             },
         }
@@ -429,6 +434,7 @@ impl UpstreamSource {
 /// * `current_version` - Current version to compare against
 /// * `strategy` - Semver strategy to apply
 /// * `version_prefix` - Optional version prefix to filter releases (e.g., "1.2" for v1_2 variants)
+/// * `include_prereleases` - Whether to include prerelease versions
 ///
 /// # Returns
 /// The best matching release
@@ -442,6 +448,7 @@ fn find_best_release(
     version_prefix: Option<&str>,
     explicit_version: Option<&str>,
     version_regex: Option<&str>,
+    include_prereleases: bool,
 ) -> anyhow::Result<Release> {
     // If explicit version is specified, find and return that exact version.
     // We consume the vector so the matched release is moved out instead of cloned.
@@ -458,11 +465,19 @@ fn find_best_release(
         anyhow::bail!("Explicit version '{target_version}' not found in available releases");
     }
 
-    // Filter out prereleases and find compatible versions. Owning each
-    // `Release` here means the eventually-chosen one can be returned by move.
+    // Filter releases by semver strategy and optionally include prereleases.
+    // Owning each `Release` here means the eventually-chosen one can be returned by move.
     let mut compatible_releases: Vec<Release> = releases
         .into_iter()
-        .filter(|r| r.matches(current_version, strategy, version_prefix, version_regex))
+        .filter(|r| {
+            r.matches(
+                current_version,
+                strategy,
+                version_prefix,
+                version_regex,
+                include_prereleases,
+            )
+        })
         .collect();
 
     // Sort by version (newest first)

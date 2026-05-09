@@ -103,6 +103,8 @@ mod tests {
             homepage: None,
             changelog: None,
             skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
         }
     }
 
