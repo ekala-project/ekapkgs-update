@@ -29,6 +29,57 @@ const SECOND_BACKOFF_DAYS: i64 = 4;
 /// Maximum backoff: applied for any subsequent failure.
 const MAX_BACKOFF_DAYS: i64 = 6;
 
+/// Upper bound (inclusive) of the "small" rebuild bucket.
+const REBUILD_BUCKET_SMALL_MAX: i64 = 10;
+/// Upper bound (inclusive) of the "medium" rebuild bucket.
+const REBUILD_BUCKET_MEDIUM_MAX: i64 = 50;
+/// Upper bound (inclusive) of the "large" rebuild bucket.
+const REBUILD_BUCKET_LARGE_MAX: i64 = 100;
+
+/// Histogram bucket for `rebuild_count` distributions.
+///
+/// The label values returned by [`RebuildBucket::label`] match exactly the
+/// strings the rebuild-distribution SQL `CASE` expression emits, so they are
+/// also used as map keys when consumers need a stable ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RebuildBucket {
+    /// `0..=REBUILD_BUCKET_SMALL_MAX`
+    Small,
+    /// `(REBUILD_BUCKET_SMALL_MAX..=REBUILD_BUCKET_MEDIUM_MAX]`
+    Medium,
+    /// `(REBUILD_BUCKET_MEDIUM_MAX..=REBUILD_BUCKET_LARGE_MAX]`
+    Large,
+    /// `> REBUILD_BUCKET_LARGE_MAX`
+    Huge,
+}
+
+impl RebuildBucket {
+    /// Render the human-readable bucket label (e.g. `"0-10"`, `"101+"`).
+    ///
+    /// The string matches the SQL `CASE` branches in
+    /// [`Database::get_rebuild_distribution`].
+    pub fn label(self) -> String {
+        match self {
+            RebuildBucket::Small => format!("0-{REBUILD_BUCKET_SMALL_MAX}"),
+            RebuildBucket::Medium => format!(
+                "{}-{REBUILD_BUCKET_MEDIUM_MAX}",
+                REBUILD_BUCKET_SMALL_MAX + 1
+            ),
+            RebuildBucket::Large => format!(
+                "{}-{REBUILD_BUCKET_LARGE_MAX}",
+                REBUILD_BUCKET_MEDIUM_MAX + 1
+            ),
+            RebuildBucket::Huge => format!("{}+", REBUILD_BUCKET_LARGE_MAX + 1),
+        }
+    }
+}
+
+impl std::fmt::Display for RebuildBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label())
+    }
+}
+
 /// Database connection wrapper for tracking package updates
 #[derive(Clone)]
 pub struct Database {
@@ -477,14 +528,21 @@ impl Database {
     /// - 101+ rebuilds
     #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_rebuild_distribution(&self) -> Result<Vec<(String, i64)>> {
-        let results: Vec<(String, i64)> = sqlx::query_as(
+        // Build SQL with bucket boundaries from named constants. The
+        // bucket-label strings in the inner and outer `CASE` must match,
+        // so we render them once via `RebuildBucket::label`.
+        let small_label = RebuildBucket::Small.label();
+        let medium_label = RebuildBucket::Medium.label();
+        let large_label = RebuildBucket::Large.label();
+        let huge_label = RebuildBucket::Huge.label();
+        let sql = format!(
             r#"
             SELECT
                 CASE
-                    WHEN rebuild_count <= 10 THEN '0-10'
-                    WHEN rebuild_count <= 50 THEN '11-50'
-                    WHEN rebuild_count <= 100 THEN '51-100'
-                    ELSE '101+'
+                    WHEN rebuild_count <= {small_max} THEN '{small_label}'
+                    WHEN rebuild_count <= {medium_max} THEN '{medium_label}'
+                    WHEN rebuild_count <= {large_max} THEN '{large_label}'
+                    ELSE '{huge_label}'
                 END as range,
                 COUNT(*) as count
             FROM updates
@@ -492,16 +550,20 @@ impl Database {
             GROUP BY range
             ORDER BY
                 CASE range
-                    WHEN '0-10' THEN 1
-                    WHEN '11-50' THEN 2
-                    WHEN '51-100' THEN 3
+                    WHEN '{small_label}' THEN 1
+                    WHEN '{medium_label}' THEN 2
+                    WHEN '{large_label}' THEN 3
                     ELSE 4
                 END
             "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("get rebuild distribution")?;
+            small_max = REBUILD_BUCKET_SMALL_MAX,
+            medium_max = REBUILD_BUCKET_MEDIUM_MAX,
+            large_max = REBUILD_BUCKET_LARGE_MAX,
+        );
+        let results: Vec<(String, i64)> = sqlx::query_as(&sql)
+            .fetch_all(&self.pool)
+            .await
+            .context("get rebuild distribution")?;
 
         Ok(results)
     }
