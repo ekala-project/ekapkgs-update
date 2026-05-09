@@ -60,6 +60,24 @@ pub struct Args {
     pub command: Commands,
 }
 
+/// Command dispatch and execution logic.
+///
+/// ## Command Flow
+///
+/// Each subcommand follows this pattern:
+///
+/// | Subcommand         | Config Type      | Execution Path                       |
+/// |--------------------|------------------|--------------------------------------|
+/// | `Run`              | `RunConfig`      | `commands::run::execute`             |
+/// | `Update`           | `UpdateConfig` + `VersionConfig` | `commands::update::execute` (or `update_flake::update_flake_package` if `--flake`) |
+/// | `PruneMaintainers` | (direct args)    | `commands::prune_maintainers::execute` |
+/// | `Log`              | (direct args)    | `commands::log::execute`             |
+/// | `Migrate`          | (direct args)    | `commands::migrate::execute`         |
+///
+/// The `execute()` method acts as a thin dispatcher: it extracts flags from the
+/// clap-parsed enum, builds the appropriate config struct (when applicable), and
+/// calls the downstream execute function. This keeps `cli.rs` focused on argument
+/// parsing while delegating business logic to the `commands` module.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run the update process

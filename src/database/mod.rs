@@ -1,3 +1,38 @@
+//! SQLite database interface for tracking package update attempts and history.
+//!
+//! ## Schema
+//!
+//! The database manages two primary tables:
+//!
+//! - **`updates`**: Tracks the state of each package, including when it was last
+//!   checked, when it should be re-checked, current version, proposed version,
+//!   and rebuild impact (if known). The `attr_path` column is the primary key.
+//!
+//! - **`update_logs`**: Records failures for post-mortem analysis, indexed by
+//!   derivation path. Each log entry captures the error message, old/new versions,
+//!   and timestamp.
+//!
+//! ## Backoff Semantics
+//!
+//! When an update check finds no new version, the system backs off exponentially:
+//!
+//! - **First failure**: re-check in 2 days ([`FIRST_BACKOFF_DAYS`])
+//! - **Second failure** (within 2 days of the first): re-check in 4 days ([`SECOND_BACKOFF_DAYS`])
+//! - **Subsequent failures**: re-check in 6 days ([`MAX_BACKOFF_DAYS`])
+//!
+//! Successful updates reset the backoff to 2 days. This prevents excessive API
+//! traffic while ensuring packages are eventually re-checked.
+//!
+//! ## Connection Pool and Cleanup
+//!
+//! [`Database::new`] establishes a connection pool and runs schema migrations via
+//! `sqlx::migrate!`. After migrations, it opportunistically cleans up expired cache
+//! entries for both CVE and Repology data by calling their respective `cleanup_cache`
+//! functions. Cleanup failures are logged but do not fail database initialization.
+//!
+//! The connection pool remains alive as long as the `Database` struct is in scope.
+//! `Database` is `Clone`, so multiple handles can share the same underlying pool.
+
 mod types;
 
 use std::path::Path;
