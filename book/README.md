@@ -78,11 +78,33 @@ Contributions to expand these chapters are welcome!
 
 ## Deployment
 
-The documentation can be published to GitHub Pages:
+The documentation is automatically deployed to GitHub Pages when changes are merged to the `master` branch.
+
+**Published documentation**: https://ekala-project.github.io/ekapkgs-update/
+
+### Automatic Deployment
+
+The `.github/workflows/deploy-docs.yml` workflow automatically:
+1. Builds the documentation with mdBook
+2. Deploys to GitHub Pages
+
+This runs on every push to `master` that modifies files in `book/` or the workflow itself.
+
+### Manual Deployment
+
+You can also trigger deployment manually:
+1. Go to Actions tab in GitHub
+2. Select "Deploy Documentation" workflow
+3. Click "Run workflow"
+
+### Local Preview
+
+To preview the documentation locally before pushing:
 
 ```bash
-mdbook build
-# Deploy book/book/ to gh-pages branch
+cd book
+mdbook serve
+# Open http://localhost:3000
 ```
 
 ## Questions?
