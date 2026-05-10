@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::variants::find_version_in_siblings;
 use crate::nix::is_many_variants_package;
-use crate::rewrite::find_and_update_attr;
+use crate::rewrite::{find_and_update_attr, try_update_rev_attr};
 
 /// Update version and hash in a Nix file
 ///
@@ -72,6 +72,31 @@ pub async fn update_nix_file(
             },
             Err(e) => return Err(e.into()),
         };
+
+    // Try to update the rev attribute if it exists (non-blocking)
+    // Only for normal files, not mkManyVariants (which use string replacement)
+    let updated_content = if actual_file_path.as_path() == file_path {
+        match try_update_rev_attr(&updated_content, old_version, new_version) {
+            Ok(content) => {
+                debug!(
+                    "Updated rev attribute based on version change: {} -> {}",
+                    old_version, new_version
+                );
+                content
+            },
+            Err(e) if e.is_not_found() => {
+                debug!("No rev attribute to update (or skipped): {}", e);
+                updated_content
+            },
+            Err(e) => {
+                warn!("Failed to update rev attribute: {}", e);
+                updated_content
+            },
+        }
+    } else {
+        // For mkManyVariants, we already did string replacement above
+        updated_content
+    };
 
     // Update hash if provided
     let final_content = if let (Some(old_h), Some(new_h)) = (old_hash, new_hash) {

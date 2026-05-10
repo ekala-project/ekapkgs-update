@@ -8,6 +8,7 @@ mod attributes;
 mod error;
 mod maintainers;
 mod patches;
+mod rev_update;
 mod variants;
 
 #[cfg(test)]
@@ -16,6 +17,8 @@ mod tests_attributes;
 mod tests_maintainers;
 #[cfg(test)]
 mod tests_patches;
+#[cfg(test)]
+mod tests_rev;
 
 pub use attributes::find_and_update_attr;
 // `RewriteError` is intentionally kept private to the `rewrite` module: callers
@@ -24,4 +27,5 @@ pub use attributes::find_and_update_attr;
 // type. Tests in `rewrite/tests.rs` use `super::*` to access the type.
 pub use maintainers::replace_maintainers_with_empty;
 pub use patches::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
+pub use rev_update::try_update_rev_attr;
 pub use variants::update_variant_attr;
