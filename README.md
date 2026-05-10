@@ -3,18 +3,60 @@
 This is meant to be the spiritual successor to [nixpkgs-update](https://github.com/nix-community/nixpkgs-update)
 for Ekapkgs. It will eventually cover the feature set of `nix-update` and `nixpkgs-update` and more.
 
-## Contributing
+---
 
-To build:
+## 📚 Documentation
+
+**📖 Read the full documentation at: https://ekala-project.github.io/ekapkgs-update/**
+
+### Quick Links
+
+- **[Installation Guide](https://ekala-project.github.io/ekapkgs-update/installation.html)** - Get started with ekapkgs-update
+- **[Quick Start](https://ekala-project.github.io/ekapkgs-update/quick-start.html)** - Common workflows and examples
+- **[CLI Reference](https://ekala-project.github.io/ekapkgs-update/cli-reference.html)** - Complete command documentation
+- **[Passthru Attributes (EEP-0039)](https://ekala-project.github.io/ekapkgs-update/passthru-attributes.html)** - Per-package configuration
+- **[Configuration](https://ekala-project.github.io/ekapkgs-update/configuration.html)** - Environment variables and settings
+- **[Usage Guide](https://ekala-project.github.io/ekapkgs-update/usage.html)** - Manual updates and daemon mode
+- **[Contributing Guide](https://ekala-project.github.io/ekapkgs-update/contributing/development.html)** - Development setup and guidelines
+
+---
+
+## Quick Start
+
+### Installation
+
 ```bash
-$ nix develop
-$ cargo build
+# Using Nix
+nix-shell -p ekapkgs-update
+
+# Or with flakes
+nix run github:ekala-project/ekapkgs-update -- --help
 ```
 
-### Example usage
+**[→ Full installation instructions](https://ekala-project.github.io/ekapkgs-update/installation.html)**
+
+### Basic Usage
 
 ```bash
-$ /home/jon/projects/ekapkgs-update/target/debug/ekapkgs-update update spdlog --ignore-update-script
+# Update a single package
+ekapkgs-update update mypackage
+
+# Update with commit
+ekapkgs-update update mypackage --commit
+
+# Update and create PR
+ekapkgs-update update mypackage --create-pr
+
+# Run daemon mode (continuous updates)
+ekapkgs-update run --file ./default.nix
+```
+
+**[→ See all usage examples in the Quick Start guide](https://ekala-project.github.io/ekapkgs-update/quick-start.html)**
+
+### Example Output
+
+```bash
+$ ekapkgs-update update spdlog
 2025-12-17T01:52:05.168426Z  INFO ekapkgs_update::commands::update: Using semver strategy: Latest
 ...
 2025-12-17T01:52:30.203863Z  INFO ekapkgs_update::commands::update: ✓ Successfully updated spdlog from 1.15.2 to 1.16.0
@@ -42,7 +84,26 @@ index 37e08a8dc5a2..e7bce67e0c79 100644
    nativeBuildInputs = [ cmake ];
 ```
 
-### CVE/Vulnerability Checking
+---
+
+## Features
+
+### 🔧 Per-Package Configuration (EEP-0039)
+
+Configure update behavior directly in package definitions:
+
+```nix
+passthru.ekapkgs-update = {
+  skip = false;                    # Enable/disable updates
+  semver-strategy = "minor";       # Version constraints (latest, major, minor, patch)
+  include-prereleases = false;     # Prerelease handling
+  version-regex = "v(.*)";         # Custom version extraction
+};
+```
+
+**[→ Read the complete Passthru Attributes guide](https://ekala-project.github.io/ekapkgs-update/passthru-attributes.html)**
+
+### 🔒 CVE/Vulnerability Checking
 
 ekapkgs-update automatically checks for known security vulnerabilities when running in daemon mode (`run` command). This feature uses [OSV.dev](https://osv.dev) to query vulnerability data across multiple ecosystems.
 
@@ -70,7 +131,9 @@ ekapkgs-update automatically checks for known security vulnerabilities when runn
 $ ekapkgs-update run --skip-cve
 ```
 
-### Repology Integration
+**[→ See full PR enhancement documentation](https://ekala-project.github.io/ekapkgs-update/advanced/pr-enhancements.html)**
+
+### 🌍 Repology Integration
 
 ekapkgs-update integrates with [Repology.org](https://repology.org) to validate versions across multiple Linux distributions. This provides additional confidence that the detected upstream version is stable and adopted by other distributions.
 
@@ -96,6 +159,22 @@ DEBUG firefox: Repology confirms 125.0.1 is newest across distributions
 ```bash
 $ ekapkgs-update run --skip-repology
 ```
+
+**[→ See full PR enhancement documentation](https://ekala-project.github.io/ekapkgs-update/advanced/pr-enhancements.html)**
+
+---
+
+## Contributing
+
+Want to contribute? Check out the **[Contributing Guide](https://ekala-project.github.io/ekapkgs-update/contributing/development.html)** for:
+- Development setup instructions
+- Testing guidelines
+- Code style requirements
+- How to add new features
+
+**[→ Read the full contributing guide](https://ekala-project.github.io/ekapkgs-update/contributing/development.html)**
+
+---
 
 # Roadmap
 
@@ -126,3 +205,22 @@ Daemon and web features
 
 - [ ]: Automatic fixing of trivial build issues
   - e.g. Missing dependency which is available
+
+---
+
+## 📖 Documentation & Resources
+
+- **[Full Documentation](https://ekala-project.github.io/ekapkgs-update/)** - Complete user and developer documentation
+- **[Installation Guide](https://ekala-project.github.io/ekapkgs-update/installation.html)** - How to install ekapkgs-update
+- **[Quick Start](https://ekala-project.github.io/ekapkgs-update/quick-start.html)** - Get started quickly with examples
+- **[CLI Reference](https://ekala-project.github.io/ekapkgs-update/cli-reference.html)** - Complete command documentation
+- **[Passthru Attributes](https://ekala-project.github.io/ekapkgs-update/passthru-attributes.html)** - Per-package configuration (EEP-0039)
+- **[Configuration](https://ekala-project.github.io/ekapkgs-update/configuration.html)** - Environment variables and settings
+- **[Usage Guide](https://ekala-project.github.io/ekapkgs-update/usage.html)** - Manual updates and daemon mode
+- **[Troubleshooting](https://ekala-project.github.io/ekapkgs-update/troubleshooting.html)** - Common issues and solutions
+- **[Contributing](https://ekala-project.github.io/ekapkgs-update/contributing/development.html)** - How to contribute
+- **[Architecture](https://ekala-project.github.io/ekapkgs-update/contributing/architecture.html)** - Code structure and design
+
+## License
+
+[License information here]

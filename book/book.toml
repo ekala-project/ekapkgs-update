@@ -14,6 +14,7 @@ default-theme = "rust"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/ekala-project/ekapkgs-update"
 edit-url-template = "https://github.com/ekala-project/ekapkgs-update/edit/master/book/{path}"
+site-url = "/ekapkgs-update/"
 
 [output.html.search]
 enable = true
