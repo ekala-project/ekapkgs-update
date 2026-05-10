@@ -20,6 +20,7 @@ mod paths;
 mod pypi;
 mod repology;
 mod rewrite;
+mod sourcehut;
 mod variant_strategy;
 mod vcs_sources;
 

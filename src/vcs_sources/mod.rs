@@ -12,6 +12,7 @@ use tracing::{debug, trace, warn};
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
 use crate::pypi::fetch_pypi_releases;
+use crate::sourcehut::{fetch_sourcehut_tags, parse_sourcehut_url};
 
 /// Release information from a VCS source
 #[derive(Debug)]
@@ -136,11 +137,12 @@ impl fmt::Display for SemverStrategy {
     }
 }
 
-/// Upstream VCS source (GitHub, GitLab, PyPI, etc.)
+/// Upstream VCS source (GitHub, GitLab, SourceHut, PyPI, etc.)
 #[derive(Debug)]
 pub enum UpstreamSource {
     GitHub { owner: String, repo: String },
     GitLab { owner: String, project: String },
+    SourceHut { owner: String, repo: String },
     PyPI { pname: String },
 }
 
@@ -236,7 +238,7 @@ fn parse_pypi_url(url: &str) -> Option<String> {
 impl UpstreamSource {
     /// Parse a URL and return the appropriate UpstreamSource
     ///
-    /// Tries to parse the URL as GitHub first, then GitLab, then PyPI.
+    /// Tries to parse the URL as GitHub first, then GitLab, then SourceHut, then PyPI.
     ///
     /// # Arguments
     /// * `url` - Source URL to parse
@@ -256,6 +258,12 @@ impl UpstreamSource {
                 project: gitlab_project.project,
             });
         }
+        if let Some(sourcehut_repo) = parse_sourcehut_url(url) {
+            return Some(UpstreamSource::SourceHut {
+                owner: sourcehut_repo.owner,
+                repo: sourcehut_repo.repo,
+            });
+        }
         parse_pypi_url(url).map(|pypi_pname| UpstreamSource::PyPI { pname: pypi_pname })
     }
 
@@ -266,6 +274,7 @@ impl UpstreamSource {
     /// Automatically checks for authentication tokens in environment variables:
     /// - `GITHUB_TOKEN` for GitHub sources
     /// - `GITLAB_TOKEN` for GitLab sources
+    /// - `SOURCEHUT_TOKEN` for SourceHut sources
     ///
     /// # Arguments
     /// * `current_version` - The current version to compare against
@@ -378,6 +387,38 @@ impl UpstreamSource {
                     include_prereleases,
                 )
             },
+            UpstreamSource::SourceHut { owner, repo } => {
+                let token = env::var("SOURCEHUT_TOKEN").ok();
+
+                if token.is_none() {
+                    warn!(
+                        "SOURCEHUT_TOKEN not set - using unauthenticated SourceHut API (limited \
+                         rate limit)"
+                    );
+                }
+
+                // SourceHut uses tags via GraphQL API
+                let tags = fetch_sourcehut_tags(owner, repo, token.as_deref()).await?;
+
+                let releases: Vec<Release> = tags
+                    .into_iter()
+                    .map(|t| Release {
+                        tag_name: t.name,
+                        is_prerelease: false,
+                    })
+                    .collect();
+
+                // Filter and find best match
+                find_best_release(
+                    releases,
+                    current_version,
+                    strategy,
+                    version_prefix,
+                    explicit_version,
+                    version_regex,
+                    include_prereleases,
+                )
+            },
             UpstreamSource::PyPI { pname } => {
                 // PyPI doesn't require authentication tokens
                 let pypi_response = fetch_pypi_releases(pname).await?;
@@ -415,6 +456,9 @@ impl UpstreamSource {
             UpstreamSource::GitHub { owner, repo } => format!("GitHub repo: {owner}/{repo}"),
             UpstreamSource::GitLab { owner, project } => {
                 format!("GitLab project: {owner}/{project}")
+            },
+            UpstreamSource::SourceHut { owner, repo } => {
+                format!("SourceHut repo: {owner}/{repo}")
             },
             UpstreamSource::PyPI { pname } => format!("PyPI package: {pname}"),
         }
