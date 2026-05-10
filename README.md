@@ -186,6 +186,11 @@ Update feature set
 - [x] Test updated expression
 - [x] Retain failed updates
 - [x] Remove already applied patches (currently only supports pruning one patch)
+- [x] Smart `rev` attribute updating
+  - Automatically detects and updates version-based `rev` attributes (e.g., "v1.2.3")
+  - Smart substring detection for custom prefixes (e.g., "release-1.2.3", "jq-1.6")
+  - Automatically skips commit SHAs (40 hex characters)
+  - Skips string interpolations like `rev = "v${version}"` (they auto-update)
 
 Daemon and web features
 - [x] CVE/Vulnerability Integration

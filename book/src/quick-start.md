@@ -147,8 +147,29 @@ ekapkgs-update update mypackage
 
 ekapkgs-update will:
 - Fetch the latest GitHub release
-- Update `version`, `rev`, and `hash` fields
+- Update `version` and `hash` fields
+- Smart update of `rev` attribute (see below for best practices)
 - Handle both `sha256` and modern `hash` formats
+
+**Best Practice for `rev` attributes:**
+
+Use string interpolation for automatic updates:
+```nix
+src = fetchFromGitHub {
+  owner = "example";
+  repo = "mypackage";
+  rev = "v${version}";  # ✅ Recommended: auto-updates with version
+  hash = "sha256-...";
+};
+```
+
+Literal `rev` values are also supported:
+```nix
+rev = "v1.2.3";  # ✅ Detected and updated to "v2.0.0"
+rev = "release-1.2.3";  # ✅ Smart substring matching
+rev = "jq-1.6";  # ✅ Custom prefixes supported
+rev = "abc123...";  # ✅ Commit SHAs (40 hex) are automatically skipped
+```
 
 ### PyPI Packages
 
