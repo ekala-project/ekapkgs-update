@@ -21,5 +21,6 @@ pub mod paths;
 pub mod pypi;
 pub mod repology;
 pub mod rewrite;
+pub mod sourcehut;
 pub mod variant_strategy;
 pub mod vcs_sources;
