@@ -129,6 +129,9 @@ pub enum Commands {
         /// `CACHIX_AUTH_TOKEN` to be set.
         #[arg(long, value_name = "NAME")]
         cachix_cache: Option<String>,
+        /// Interactive mode: prompt before submitting PRs with summary and commit info. Forces single-threaded execution.
+        #[arg(long)]
+        interactive: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -253,6 +256,7 @@ impl Commands {
                 skip_directory_diff,
                 skip_cachix,
                 cachix_cache,
+                interactive,
             } => {
                 commands::run::RunConfig::from_args(
                     file,
@@ -270,6 +274,7 @@ impl Commands {
                     skip_directory_diff,
                     skip_cachix,
                     cachix_cache,
+                    interactive,
                 )
                 .execute()
                 .await

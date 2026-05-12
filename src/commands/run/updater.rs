@@ -20,6 +20,7 @@ pub(super) async fn perform_update(
     run_passthru_tests: bool,
     dry_run: bool,
     pr_enhancements: &PrEnhancementsConfig,
+    interactive: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -156,26 +157,54 @@ pub(super) async fn perform_update(
 
             // Create PR if configured
             if let Some(config) = pr_config {
-                match create_pr_for_update(
-                    db,
-                    &worktree_path,
-                    attr_path,
-                    current_version,
-                    new_version,
-                    config,
-                    fork,
-                    rebuild_analysis.as_ref(),
-                    pr_enhancements,
-                )
-                .await
-                {
-                    Ok((pr_url, pr_number)) => {
-                        info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
-                    },
-                    Err(e) => {
-                        warn!("{}: Failed to create PR: {}", attr_path, e);
-                        // Don't fail the update if PR creation fails
-                    },
+                // In interactive mode, show PR details and prompt for confirmation
+                let should_create_pr = if interactive {
+                    match prompt_for_pr_confirmation(
+                        &worktree_path,
+                        attr_path,
+                        current_version,
+                        new_version,
+                        config,
+                        fork,
+                        rebuild_analysis.as_ref(),
+                        pr_enhancements,
+                    )
+                    .await
+                    {
+                        Ok(confirmed) => confirmed,
+                        Err(e) => {
+                            warn!("{}: Failed to prepare PR preview: {}", attr_path, e);
+                            false
+                        },
+                    }
+                } else {
+                    true
+                };
+
+                if should_create_pr {
+                    match create_pr_for_update(
+                        db,
+                        &worktree_path,
+                        attr_path,
+                        current_version,
+                        new_version,
+                        config,
+                        fork,
+                        rebuild_analysis.as_ref(),
+                        pr_enhancements,
+                    )
+                    .await
+                    {
+                        Ok((pr_url, pr_number)) => {
+                            info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
+                        },
+                        Err(e) => {
+                            warn!("{}: Failed to create PR: {}", attr_path, e);
+                            // Don't fail the update if PR creation fails
+                        },
+                    }
+                } else {
+                    info!("{}: Skipping PR creation (user declined)", attr_path);
                 }
             }
 
@@ -440,4 +469,83 @@ async fn create_pr_for_update(
         .await?;
 
     Ok((pr.html_url, pr.number))
+}
+
+/// Prompt user for confirmation before creating a PR (interactive mode)
+async fn prompt_for_pr_confirmation(
+    worktree_path: &Path,
+    attr_path: &str,
+    old_version: &str,
+    new_version: &str,
+    config: &PrConfig,
+    fork: &str,
+    rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
+    _pr_enhancements: &PrEnhancementsConfig,
+) -> anyhow::Result<bool> {
+    use std::io::{self, Write};
+    use tokio::process::Command;
+
+    // Create branch name (same logic as in create_pr_for_update)
+    let sanitized_attr = attr_path.replace(['.', '/'], "-");
+    let branch_name = format!("update/{sanitized_attr}/{new_version}");
+
+    // Create PR title
+    let title = format!("Update {attr_path} from {old_version} to {new_version}");
+
+    // Build PR body (same logic as in create_pr_for_update, but simplified for preview)
+    let mut body = format!(
+        "## Summary\n\nThis PR updates `{attr_path}` from version {old_version} to \
+         {new_version}.\n\n## Changes\n\n- Updated package version\n- Updated source hash"
+    );
+
+    // Add rebuild impact if available
+    if let Some(analysis) = rebuild_analysis {
+        body.push_str("\n\n## Rebuild Impact\n\n");
+        body.push_str(&format!(
+            "- **Packages affected:** {}\n",
+            analysis.rebuild_count
+        ));
+        body.push_str(&format!(
+            "- **Impact:** {:.1}% of {} total packages\n",
+            analysis.rebuild_percentage(),
+            analysis.total_packages
+        ));
+    }
+
+    body.push_str("\n\n🤖 Generated with ekapkgs-update");
+
+    // Get commits in the worktree
+    let commits_output = Command::new("git")
+        .args(["-C", &worktree_path.to_string_lossy(), "log", "--oneline"])
+        .output()
+        .await?;
+
+    let commits = if commits_output.status.success() {
+        String::from_utf8_lossy(&commits_output.stdout).to_string()
+    } else {
+        "(Unable to retrieve commits)".to_owned()
+    };
+
+    // Display PR information
+    println!("\n{}", "=".repeat(80));
+    println!("PR PREVIEW for {}", attr_path);
+    println!("{}", "=".repeat(80));
+    println!("\nTitle: {}", title);
+    println!("\nTarget: {}/{} (branch: {})", config.owner, config.repo, config.base_branch);
+    println!("Push to: {} (as branch: {})", fork, branch_name);
+    println!("\n--- PR Body ---");
+    println!("{}", body);
+    println!("\n--- Commits ---");
+    println!("{}", commits.trim());
+    println!("{}", "=".repeat(80));
+
+    // Prompt for confirmation
+    print!("\nCreate this PR? [y/N]: ");
+    io::stdout().flush()?;
+
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+
+    let response = response.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
 }

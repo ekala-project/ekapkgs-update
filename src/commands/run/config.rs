@@ -38,6 +38,9 @@ pub struct RunConfig {
 
     /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
     pub pr_enhancements: PrEnhancementsConfig,
+
+    /// Interactive mode - prompt before submitting PRs
+    pub interactive: bool,
 }
 
 impl RunConfig {
@@ -63,6 +66,7 @@ impl RunConfig {
         skip_directory_diff: bool,
         skip_cachix: bool,
         cachix_cache: Option<String>,
+        interactive: bool,
     ) -> Self {
         // Resolve cache precedence: CLI flag → env var → None. The CLI value
         // is moved when present; any whitespace-only value is treated as
@@ -89,6 +93,7 @@ impl RunConfig {
                 skip_cachix,
                 cachix_cache,
             },
+            interactive,
         }
     }
 
@@ -104,6 +109,7 @@ impl RunConfig {
             concurrent_updates,
             skip_unstable,
             pr_enhancements,
+            interactive,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -116,11 +122,20 @@ impl RunConfig {
         info!("Database initialized at: {}", expanded_db_path);
 
         // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
-        let concurrency = concurrent_updates.unwrap_or_else(|| {
-            let cpus = num_cpus::get();
-            std::cmp::max(1, cpus / 4)
-        });
-        info!("Running with concurrency level: {}", concurrency);
+        // In interactive mode, force single-threaded execution
+        let concurrency = if interactive {
+            1
+        } else {
+            concurrent_updates.unwrap_or_else(|| {
+                let cpus = num_cpus::get();
+                std::cmp::max(1, cpus / 4)
+            })
+        };
+        if interactive {
+            info!("Running in interactive mode (single-threaded)");
+        } else {
+            info!("Running with concurrency level: {}", concurrency);
+        }
 
         // Determine PR configuration: use CLI override or auto-detect from git
         let pr_config = if let Some(remote_name) = upstream {
@@ -162,6 +177,7 @@ impl RunConfig {
             dry_run,
             concurrency,
             pr_enhancements,
+            interactive,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -215,6 +231,9 @@ pub struct UpdaterServiceConfig {
 
     /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
     pub pr_enhancements: PrEnhancementsConfig,
+
+    /// Interactive mode - prompt before submitting PRs
+    pub interactive: bool,
 }
 
 impl UpdaterServiceConfig {
@@ -235,6 +254,7 @@ impl UpdaterServiceConfig {
             dry_run,
             concurrency,
             pr_enhancements,
+            interactive,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -293,6 +313,7 @@ impl UpdaterServiceConfig {
                                     run_passthru_tests,
                                     dry_run,
                                     &pr_enhancements_clone,
+                                    interactive,
                                 )
                                 .await;
                                 (result, attr_path_clone)
