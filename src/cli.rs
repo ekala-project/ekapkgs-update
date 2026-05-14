@@ -132,6 +132,9 @@ pub enum Commands {
         /// Interactive mode: prompt before submitting PRs with summary and commit info. Forces single-threaded execution.
         #[arg(long)]
         interactive: bool,
+        /// Preserve failed worktrees and artifacts for later inspection
+        #[arg(long)]
+        preserve_failures: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -220,6 +223,41 @@ pub enum Commands {
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
     },
+    /// Inspect detailed failure information for a package
+    Inspect {
+        /// Package attribute path to inspect
+        identifier: String,
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+    },
+    /// Query update failures with filtering
+    Query {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Filter by error type
+        #[arg(long)]
+        error_type: Option<String>,
+        /// Filter by phase
+        #[arg(long)]
+        phase: Option<String>,
+        /// Filter by status (success, failed, running, skipped)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by package name pattern (SQL LIKE pattern)
+        #[arg(long)]
+        package: Option<String>,
+        /// Filter to entries from the last N days
+        #[arg(long)]
+        since_days: Option<u32>,
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Group results by error type
+        #[arg(long)]
+        group_by_error: bool,
+    },
     /// Migrate a package from nixpkgs to ekapkgs paradigms
     Migrate {
         /// Nix file to evaluate (for attr paths)
@@ -227,6 +265,36 @@ pub enum Commands {
         file: String,
         /// Attribute path or file path to migrate
         target: String,
+    },
+    /// Manage preserved failure worktrees
+    Worktrees {
+        #[command(subcommand)]
+        command: WorktreesCommand,
+    },
+}
+
+/// Worktrees subcommands
+#[derive(Subcommand)]
+pub enum WorktreesCommand {
+    /// List all preserved failed worktrees
+    List {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+    },
+    /// Show details of a specific preserved worktree
+    Show {
+        /// Package attribute path
+        attr_path: String,
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+    },
+    /// Clean up old preserved worktrees
+    Clean {
+        /// Remove artifacts older than N days
+        #[arg(long, default_value = "7")]
+        older_than: u32,
     },
 }
 
@@ -257,6 +325,7 @@ impl Commands {
                 skip_cachix,
                 cachix_cache,
                 interactive,
+                preserve_failures,
             } => {
                 commands::run::RunConfig::from_args(
                     file,
@@ -275,6 +344,7 @@ impl Commands {
                     skip_cachix,
                     cachix_cache,
                     interactive,
+                    preserve_failures,
                 )
                 .execute()
                 .await
@@ -335,7 +405,45 @@ impl Commands {
                 identifier,
                 database,
             } => commands::log::show_log(database, identifier).await,
+            Commands::Inspect {
+                identifier,
+                database,
+            } => commands::inspect::inspect(database, identifier).await,
+            Commands::Query {
+                database,
+                error_type,
+                phase,
+                status,
+                package,
+                since_days,
+                limit,
+                group_by_error,
+            } => {
+                commands::query::query(
+                    database,
+                    error_type,
+                    phase,
+                    status,
+                    package,
+                    since_days,
+                    limit,
+                    group_by_error,
+                )
+                .await
+            }
             Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await,
+            Commands::Worktrees { command } => match command {
+                WorktreesCommand::List { database } => {
+                    commands::worktrees::list_worktrees(database).await
+                }
+                WorktreesCommand::Show {
+                    attr_path,
+                    database,
+                } => commands::worktrees::show_worktree(database, attr_path).await,
+                WorktreesCommand::Clean { older_than } => {
+                    commands::worktrees::clean_worktrees(older_than).await
+                }
+            },
         }
     }
 }

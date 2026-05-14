@@ -375,4 +375,96 @@ impl Database {
 
         Ok(sessions)
     }
+
+    /// Query phases with flexible filtering
+    pub async fn query_phases(
+        &self,
+        error_type: Option<&str>,
+        phase: Option<&str>,
+        status: Option<&str>,
+        package_pattern: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<PhaseRecord>> {
+        // Build dynamic query
+        let mut query = String::from(
+            "SELECT id, session_id, attr_path, phase, started_at, completed_at,
+                    duration_ms, status, error_type, error_details, artifacts_path
+             FROM update_phases
+             WHERE 1=1",
+        );
+        let mut conditions = Vec::new();
+
+        if error_type.is_some() {
+            query.push_str(" AND error_type = ?");
+            conditions.push(error_type);
+        }
+        if phase.is_some() {
+            query.push_str(" AND phase = ?");
+            conditions.push(phase);
+        }
+        if status.is_some() {
+            query.push_str(" AND status = ?");
+            conditions.push(status);
+        }
+        if package_pattern.is_some() {
+            query.push_str(" AND attr_path LIKE ?");
+        }
+        if since.is_some() {
+            query.push_str(" AND started_at >= ?");
+        }
+
+        query.push_str(" ORDER BY started_at DESC");
+
+        if let Some(lim) = limit {
+            query.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        let mut sqlx_query = sqlx::query(&query);
+
+        // Bind parameters in order
+        if let Some(et) = error_type {
+            sqlx_query = sqlx_query.bind(et);
+        }
+        if let Some(p) = phase {
+            sqlx_query = sqlx_query.bind(p);
+        }
+        if let Some(s) = status {
+            sqlx_query = sqlx_query.bind(s);
+        }
+        if let Some(pp) = package_pattern {
+            sqlx_query = sqlx_query.bind(format!("%{}%", pp));
+        }
+        if let Some(s) = since {
+            sqlx_query = sqlx_query.bind(s.to_rfc3339());
+        }
+
+        let rows = sqlx_query.fetch_all(&self.pool).await?;
+
+        let phases = rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(PhaseRecord {
+                    id: row.get("id"),
+                    session_id: row.get("session_id"),
+                    attr_path: row.get("attr_path"),
+                    phase: row.get("phase"),
+                    started_at: DateTime::parse_from_rfc3339(row.get("started_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                    completed_at: row
+                        .get::<Option<String>, _>("completed_at")
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    duration_ms: row.get("duration_ms"),
+                    status: row.get("status"),
+                    error_type: row.get("error_type"),
+                    error_details: row.get("error_details"),
+                    artifacts_path: row.get("artifacts_path"),
+                })
+            })
+            .collect();
+
+        Ok(phases)
+    }
 }
