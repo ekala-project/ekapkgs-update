@@ -376,6 +376,46 @@ impl Database {
         Ok(sessions)
     }
 
+    /// Get currently running phases for a session
+    pub async fn get_running_phases(&self, session_id: &str) -> anyhow::Result<Vec<PhaseRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, attr_path, phase, started_at, completed_at,
+                    duration_ms, status, error_type, error_details, artifacts_path
+             FROM update_phases
+             WHERE session_id = ? AND status = 'running'
+             ORDER BY started_at DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let phases = rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(PhaseRecord {
+                    id: row.get("id"),
+                    session_id: row.get("session_id"),
+                    attr_path: row.get("attr_path"),
+                    phase: row.get("phase"),
+                    started_at: DateTime::parse_from_rfc3339(row.get("started_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                    completed_at: row
+                        .get::<Option<String>, _>("completed_at")
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc)),
+                    duration_ms: row.get("duration_ms"),
+                    status: row.get("status"),
+                    error_type: row.get("error_type"),
+                    error_details: row.get("error_details"),
+                    artifacts_path: row.get("artifacts_path"),
+                })
+            })
+            .collect();
+
+        Ok(phases)
+    }
+
     /// Query phases with flexible filtering
     pub async fn query_phases(
         &self,
