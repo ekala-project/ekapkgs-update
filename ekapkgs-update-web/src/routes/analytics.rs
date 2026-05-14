@@ -1,0 +1,95 @@
+use axum::extract::State;
+use axum::response::IntoResponse;
+use sqlx;
+
+use crate::state::AppState;
+use crate::templates::{AnalyticsTemplate, ErrorTypeCount, PhaseStats, SuccessRateTrend};
+
+pub async fn index(State(state): State<AppState>) -> impl IntoResponse {
+    // Get error distribution
+    let error_distribution = get_error_distribution(&state).await;
+    let total_errors: usize = error_distribution.iter().map(|e| e.count).sum();
+
+    // Get phase statistics
+    let phase_stats = get_phase_stats(&state).await;
+
+    // Get success rate trend
+    let success_rate_trend = get_success_rate_trend(&state).await;
+
+    AnalyticsTemplate {
+        error_distribution,
+        total_errors,
+        phase_stats,
+        success_rate_trend,
+    }
+}
+
+async fn get_error_distribution(state: &AppState) -> Vec<ErrorTypeCount> {
+    let sql = "SELECT error_type, COUNT(*) as count
+               FROM update_phases
+               WHERE error_type IS NOT NULL
+               GROUP BY error_type
+               ORDER BY count DESC
+               LIMIT 10";
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(sql)
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(error_type, count)| ErrorTypeCount {
+            error_type,
+            count: count as usize,
+        })
+        .collect()
+}
+
+async fn get_phase_stats(state: &AppState) -> Vec<PhaseStats> {
+    let sql = "SELECT
+                   phase,
+                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failure_count,
+                   AVG(duration_ms) as avg_duration
+               FROM update_phases
+               WHERE completed_at IS NOT NULL
+               GROUP BY phase
+               ORDER BY phase";
+
+    let rows: Vec<(String, i64, i64, Option<f64>)> = sqlx::query_as(sql)
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap_or_default();
+
+    rows.into_iter()
+        .map(
+            |(phase, success_count, failure_count, avg_duration)| PhaseStats {
+                phase,
+                success_count: success_count as usize,
+                failure_count: failure_count as usize,
+                avg_duration_ms: avg_duration.unwrap_or(0.0) as i64,
+            },
+        )
+        .collect()
+}
+
+async fn get_success_rate_trend(state: &AppState) -> Vec<SuccessRateTrend> {
+    let sql = "SELECT
+                   DATE(started_at) as date,
+                   CAST(SUM(packages_succeeded) AS REAL) / NULLIF(SUM(packages_attempted), 0) * \
+               100 as success_rate
+               FROM update_sessions
+               WHERE status = 'completed'
+               GROUP BY DATE(started_at)
+               ORDER BY date DESC
+               LIMIT 30";
+
+    let rows: Vec<(String, f64)> = sqlx::query_as(sql)
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(date, success_rate)| SuccessRateTrend { date, success_rate })
+        .collect()
+}

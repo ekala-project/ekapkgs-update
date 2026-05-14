@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title %}Session {{ session.id }} - ekapkgs-update Portal{% endblock %}
+{% block nav_sessions %}active{% endblock %}
+
+{% block content %}
+<div class="session-detail">
+    <div class="breadcrumb">
+        <a href="/sessions">Sessions</a> / {{ session.id }}
+    </div>
+
+    <h2>Session Details</h2>
+
+    <div class="session-info">
+        <div class="info-grid">
+            <div class="info-item">
+                <label>Session ID:</label>
+                <code>{{ session.id }}</code>
+            </div>
+            <div class="info-item">
+                <label>Status:</label>
+                <span class="badge badge-{{ session.status }}">{{ session.status }}</span>
+            </div>
+            <div class="info-item">
+                <label>Started:</label>
+                <span>{{ session.started_at }}</span>
+            </div>
+            <div class="info-item">
+                <label>Completed:</label>
+                <span>
+                    {% if session.completed_at %}
+                        {{ session.completed_at.unwrap() }}
+                    {% else %}
+                        Still running...
+                    {% endif %}
+                </span>
+            </div>
+            <div class="info-item">
+                <label>Duration:</label>
+                <span>
+                    {% if session.completed_at %}
+                        {{ ((session.completed_at.unwrap().timestamp() - session.started_at.timestamp()) / 60)|round }} minutes
+                    {% else %}
+                        {{ ((chrono::Utc::now().timestamp() - session.started_at.timestamp()) / 60)|round }} minutes (ongoing)
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Attempted</h3>
+            <p class="stat-value">{{ session.packages_attempted }}</p>
+        </div>
+        <div class="stat-card success">
+            <h3>Succeeded</h3>
+            <p class="stat-value">{{ session.packages_succeeded }}</p>
+        </div>
+        <div class="stat-card error">
+            <h3>Failed</h3>
+            <p class="stat-value">{{ session.packages_failed }}</p>
+        </div>
+        <div class="stat-card warning">
+            <h3>Skipped</h3>
+            <p class="stat-value">{{ session.packages_skipped }}</p>
+        </div>
+    </div>
+
+    {% if !success_phases.is_empty() %}
+    <section class="phase-section">
+        <h3>Successful Updates ({{ success_phases.len() }})</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Package</th>
+                    <th>Phase</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for phase in success_phases %}
+                <tr>
+                    <td><code>{{ phase.attr_path }}</code></td>
+                    <td>{{ phase.phase }}</td>
+                    <td>{{ phase.started_at }}</td>
+                    <td>
+                        {% if phase.duration_ms %}
+                            {{ phase.duration_ms.unwrap() / 1000 }}s
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+    {% endif %}
+
+    {% if !failed_phases.is_empty() %}
+    <section class="phase-section">
+        <h3>Failed Updates ({{ failed_phases.len() }})</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Package</th>
+                    <th>Phase</th>
+                    <th>Error Type</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for phase in failed_phases %}
+                <tr class="error-row">
+                    <td><code>{{ phase.attr_path }}</code></td>
+                    <td>{{ phase.phase }}</td>
+                    <td>
+                        {% if phase.error_type %}
+                            <span class="error-badge">{{ phase.error_type.unwrap() }}</span>
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>{{ phase.started_at }}</td>
+                    <td>
+                        {% if phase.duration_ms %}
+                            {{ phase.duration_ms.unwrap() / 1000 }}s
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if phase.error_details %}
+                            <details>
+                                <summary>View Error</summary>
+                                <pre><code>{{ phase.error_details.as_ref().unwrap() }}</code></pre>
+                            </details>
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+    {% endif %}
+</div>
+{% endblock %}

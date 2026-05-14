@@ -5,6 +5,7 @@
 //! remediation.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -13,7 +14,8 @@ use crate::commands::update::errors::UpdateError;
 use crate::commands::update::types::UpdatePhase;
 
 /// Status of an update session
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
     /// Session is currently running
     Running,
@@ -46,8 +48,14 @@ impl SessionStatus {
     }
 }
 
+impl std::fmt::Display for SessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Information about an update session
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSession {
     pub id: String,
     pub started_at: DateTime<Utc>,
@@ -61,7 +69,7 @@ pub struct UpdateSession {
 }
 
 /// Information about a single phase execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseRecord {
     pub id: i64,
     pub session_id: String,

@@ -1,0 +1,40 @@
+[package]
+name = "ekapkgs-update-web"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ekapkgs-update-web"
+path = "src/main.rs"
+
+[dependencies]
+# Shared workspace dependencies
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true }
+uuid = { workspace = true }
+
+# Web framework
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+
+# Templates
+askama = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
+
+# Utilities
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+shellexpand = "3.1"
+
+# Reference to the main ekapkgs-update crate for shared types
+ekapkgs-update = { path = "../ekapkgs-update" }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ekapkgs-update Portal{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="nav-brand">
+                <h1>ekapkgs-update</h1>
+                <span class="tagline">Package Update Monitor</span>
+            </div>
+            <ul class="nav-links">
+                <li><a href="/" class="{% block nav_dashboard %}{% endblock %}">Dashboard</a></li>
+                <li><a href="/sessions" class="{% block nav_sessions %}{% endblock %}">Sessions</a></li>
+                <li><a href="/packages" class="{% block nav_packages %}{% endblock %}">Packages</a></li>
+                <li><a href="/analytics" class="{% block nav_analytics %}{% endblock %}">Analytics</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <p>ekapkgs-update-web &copy; 2026 | Real-time package update monitoring</p>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
