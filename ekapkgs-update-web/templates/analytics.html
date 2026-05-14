@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics - ekapkgs-update Portal{% endblock %}
+{% block nav_analytics %}active{% endblock %}
+
+{% block content %}
+<div class="analytics">
+    <h2>Analytics</h2>
+
+    <section class="chart-section">
+        <h3>Error Distribution</h3>
+        <div class="chart-container">
+            <table class="chart-table">
+                <thead>
+                    <tr>
+                        <th>Error Type</th>
+                        <th>Count</th>
+                        <th>Percentage</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for error in error_distribution %}
+                    <tr>
+                        <td><code>{{ error.error_type }}</code></td>
+                        <td>{{ error.count }}</td>
+                        <td>
+                            <div class="bar-chart">
+                                <div class="bar" style="width: {% if total_errors > 0 %}{{ error.count * 100 / total_errors }}{% else %}0{% endif %}%"></div>
+                                <span>{% if total_errors > 0 %}{{ error.count * 100 / total_errors }}{% else %}0{% endif %}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="chart-section">
+        <h3>Phase Statistics</h3>
+        <div class="chart-container">
+            <table class="chart-table">
+                <thead>
+                    <tr>
+                        <th>Phase</th>
+                        <th>Success</th>
+                        <th>Failures</th>
+                        <th>Avg Duration (s)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for stat in phase_stats %}
+                    <tr>
+                        <td><code>{{ stat.phase }}</code></td>
+                        <td class="success">{{ stat.success_count }}</td>
+                        <td class="error">{{ stat.failure_count }}</td>
+                        <td>{{ stat.avg_duration_ms / 1000 }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="chart-section">
+        <h3>Success Rate Trend (Last 30 Days)</h3>
+        <div class="chart-container">
+            <table class="chart-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Success Rate</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for trend in success_rate_trend %}
+                    <tr>
+                        <td>{{ trend.date }}</td>
+                        <td>
+                            <div class="bar-chart">
+                                <div class="bar bar-success" style="width: {{ trend.success_rate }}%"></div>
+                                <span>{{ trend.success_rate|round }}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

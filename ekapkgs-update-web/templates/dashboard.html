@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - ekapkgs-update Portal{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h2>Dashboard</h2>
+
+    <div class="stats-grid" hx-get="/api/stats" hx-trigger="every 5s" hx-swap="innerHTML">
+        <div class="stat-card">
+            <h3>Total Packages</h3>
+            <p class="stat-value">{{ stats.total_packages }}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Success Rate</h3>
+            <p class="stat-value">{{ stats.success_rate|round }}%</p>
+        </div>
+        <div class="stat-card">
+            <h3>Active Updates</h3>
+            <p class="stat-value">{{ stats.active_updates }}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Total Sessions</h3>
+            <p class="stat-value">{{ stats.total_sessions }}</p>
+        </div>
+    </div>
+
+    {% if active_session %}
+    <section class="active-session">
+        <h3>Currently Running Session</h3>
+        <div class="session-card">
+            <p><strong>Session ID:</strong> {{ active_session.id }}</p>
+            <p><strong>Started:</strong> {{ active_session.started_at }}</p>
+            <p><strong>Progress:</strong> {{ active_session.packages_succeeded + active_session.packages_failed + active_session.packages_skipped }} / {{ active_session.packages_attempted }}</p>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {% if active_session.packages_attempted > 0 %}{{ (active_session.packages_succeeded + active_session.packages_failed + active_session.packages_skipped) * 100 / active_session.packages_attempted }}{% else %}0{% endif %}%"></div>
+            </div>
+            <p>
+                <span class="badge badge-success">{{ active_session.packages_succeeded }} succeeded</span>
+                <span class="badge badge-error">{{ active_session.packages_failed }} failed</span>
+                <span class="badge badge-warning">{{ active_session.packages_skipped }} skipped</span>
+            </p>
+            <a href="/sessions/{{ active_session.id }}" class="btn">View Details</a>
+        </div>
+    </section>
+    {% endif %}
+
+    <section class="recent-sessions">
+        <h3>Recent Sessions</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Session ID</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                    <th>Success/Failed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for session in recent_sessions %}
+                <tr>
+                    <td><code>{{ session.id }}</code></td>
+                    <td>{{ session.started_at }}</td>
+                    <td>
+                        {% if session.completed_at %}
+                            {{ ((session.completed_at.unwrap().timestamp() - session.started_at.timestamp()) / 60)|round }}m
+                        {% else %}
+                            Running...
+                        {% endif %}
+                    </td>
+                    <td><span class="badge badge-{{ session.status }}">{{ session.status }}</span></td>
+                    <td>{{ session.packages_succeeded }} / {{ session.packages_failed }}</td>
+                    <td><a href="/sessions/{{ session.id }}">View</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Connect to WebSocket for real-time updates
+    const ws = new WebSocket(`ws://${window.location.host}/ws/live`);
+
+    ws.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        console.log('WebSocket update:', data);
+        // Trigger HTMX refresh on updates
+        htmx.trigger(document.body, 'wsUpdate');
+    };
+
+    ws.onerror = function(error) {
+        console.error('WebSocket error:', error);
+    };
+</script>
+{% endblock %}

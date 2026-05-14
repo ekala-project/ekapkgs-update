@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Packages - ekapkgs-update Portal{% endblock %}
+{% block nav_packages %}active{% endblock %}
+
+{% block content %}
+<div class="packages">
+    <h2>Packages</h2>
+
+    <div class="search-bar">
+        <form action="/packages" method="get">
+            <input
+                type="text"
+                name="search"
+                placeholder="Search packages..."
+                value="{% if search %}{{ search.as_ref().unwrap() }}{% endif %}"
+            >
+            <button type="submit" class="btn">Search</button>
+            <a href="/packages" class="btn btn-secondary">Clear</a>
+        </form>
+    </div>
+
+    <table class="packages-table">
+        <thead>
+            <tr>
+                <th>Package</th>
+                <th>Current Version</th>
+                <th>Latest Version</th>
+                <th>Status</th>
+                <th>Last Attempted</th>
+                <th>Next Attempt</th>
+                <th>PR</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for package in packages %}
+            <tr>
+                <td><code>{{ package.attr_path }}</code></td>
+                <td>
+                    {% if package.current_version %}
+                        {{ package.current_version.as_ref().unwrap() }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if package.latest_version %}
+                        {{ package.latest_version.as_ref().unwrap() }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge badge-{{ package.status }}">
+                        {% match package.status.as_str() %}
+                            {% when "up_to_date" %}
+                                Up to date
+                            {% when "pr_created" %}
+                                PR Created
+                            {% when "update_failed" %}
+                                Update Failed
+                            {% when "pending" %}
+                                Pending
+                            {% else %}
+                                {{ package.status }}
+                        {% endmatch %}
+                    </span>
+                </td>
+                <td>
+                    {% if package.last_attempted %}
+                        {{ package.last_attempted.unwrap() }}
+                    {% else %}
+                        Never
+                    {% endif %}
+                </td>
+                <td>
+                    {% if package.next_attempt %}
+                        {{ package.next_attempt.unwrap() }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td>
+                    {% if package.pr_url %}
+                        <a href="{{ package.pr_url.as_ref().unwrap() }}" target="_blank" rel="noopener">View PR</a>
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if packages.is_empty() %}
+    <p class="no-data">No packages found.</p>
+    {% endif %}
+</div>
+{% endblock %}
