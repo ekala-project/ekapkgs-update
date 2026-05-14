@@ -281,6 +281,40 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Export failure context for LLM analysis
+    Export {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Package attribute path to export
+        attr_path: String,
+        /// Export format: json or markdown
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// Output file (writes to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Apply LLM-generated fix to preserved worktree
+    Apply {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Package attribute path to apply fix to
+        attr_path: String,
+        /// Patch file to apply
+        #[arg(long)]
+        patch: Option<std::path::PathBuf>,
+        /// JSON file with structured changes
+        #[arg(long)]
+        changes_json: Option<std::path::PathBuf>,
+        /// Validate changes by building
+        #[arg(long)]
+        validate: bool,
+        /// Resume update workflow after applying fix
+        #[arg(long)]
+        resume: bool,
+    },
     /// Migrate a package from nixpkgs to ekapkgs paradigms
     Migrate {
         /// Nix file to evaluate (for attr paths)
@@ -463,6 +497,26 @@ impl Commands {
                 version,
             } => {
                 commands::retry::retry(database, attr_path, from_phase, apply_patch, version).await
+            }
+            Commands::Export {
+                database,
+                attr_path,
+                format,
+                output,
+            } => {
+                let fmt = commands::export::ExportFormat::from_str(&format)?;
+                commands::export::export(database, attr_path, fmt, output).await
+            }
+            Commands::Apply {
+                database,
+                attr_path,
+                patch,
+                changes_json,
+                validate,
+                resume,
+            } => {
+                commands::apply::apply(database, attr_path, patch, changes_json, validate, resume)
+                    .await
             }
             Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await,
             Commands::Worktrees { command } => match command {
