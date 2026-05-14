@@ -42,6 +42,9 @@ pub struct RunConfig {
 
     /// Interactive mode - prompt before submitting PRs
     pub interactive: bool,
+
+    /// Preserve failed worktrees and artifacts for later inspection
+    pub preserve_failures: bool,
 }
 
 impl RunConfig {
@@ -68,6 +71,7 @@ impl RunConfig {
         skip_cachix: bool,
         cachix_cache: Option<String>,
         interactive: bool,
+        preserve_failures: bool,
     ) -> Self {
         // Resolve cache precedence: CLI flag → env var → None. The CLI value
         // is moved when present; any whitespace-only value is treated as
@@ -95,6 +99,7 @@ impl RunConfig {
                 cachix_cache,
             },
             interactive,
+            preserve_failures,
         }
     }
 
@@ -114,6 +119,7 @@ impl RunConfig {
             skip_unstable,
             pr_enhancements,
             interactive,
+            preserve_failures,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -187,6 +193,7 @@ impl RunConfig {
             concurrency,
             pr_enhancements,
             interactive,
+            preserve_failures,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -257,6 +264,9 @@ pub struct UpdaterServiceConfig {
 
     /// Interactive mode - prompt before submitting PRs
     pub interactive: bool,
+
+    /// Preserve failed worktrees and artifacts for later inspection
+    pub preserve_failures: bool,
 }
 
 impl UpdaterServiceConfig {
@@ -279,6 +289,7 @@ impl UpdaterServiceConfig {
             concurrency,
             pr_enhancements,
             interactive,
+            preserve_failures,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
