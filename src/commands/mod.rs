@@ -1,3 +1,5 @@
+pub mod apply;
+pub mod export;
 pub mod inspect;
 pub mod log;
 pub mod migrate;
