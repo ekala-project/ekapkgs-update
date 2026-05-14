@@ -77,7 +77,7 @@ where
                     attr_path, e
                 );
             }
-        }
+        },
         Err(error) => {
             warn!(
                 "{}: {} - failed after {:?}: {}",
@@ -87,13 +87,16 @@ where
                 error.summary()
             );
             // Note: artifacts_path would be set by preservation logic
-            if let Err(e) = db.record_phase_failure(phase_id, duration, error, None).await {
+            if let Err(e) = db
+                .record_phase_failure(phase_id, duration, error, None)
+                .await
+            {
                 warn!(
                     "{}: Failed to record phase failure in database: {}",
                     attr_path, e
                 );
             }
-        }
+        },
     }
 
     result
@@ -143,7 +146,7 @@ where
                     attr_path, e
                 );
             }
-        }
+        },
         Err(error) => {
             warn!(
                 "{}: {} - failed after {:?}: {}",
@@ -165,7 +168,7 @@ where
                     attr_path, e
                 );
             }
-        }
+        },
     }
 
     result

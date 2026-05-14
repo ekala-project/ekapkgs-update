@@ -92,17 +92,17 @@ pub async fn apply(
         match instantiate_result {
             Ok(output) if output.status.success() => {
                 println!("✓ Nix evaluation succeeded");
-            }
+            },
             Ok(output) => {
                 warn!("Nix evaluation failed");
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 println!("✗ Validation failed:\n{}", stderr);
                 bail!("Validation failed - see errors above");
-            }
+            },
             Err(e) => {
                 warn!("Failed to run nix-instantiate: {}", e);
                 println!("⚠ Could not validate (nix-instantiate not available)");
-            }
+            },
         }
 
         // Try to build
@@ -116,17 +116,17 @@ pub async fn apply(
         match build_result {
             Ok(output) if output.status.success() => {
                 println!("✓ Build succeeded");
-            }
+            },
             Ok(output) => {
                 warn!("Build failed");
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 println!("✗ Build failed:\n{}", stderr);
                 bail!("Build validation failed");
-            }
+            },
             Err(e) => {
                 warn!("Failed to run nix-build: {}", e);
                 println!("⚠ Could not build (nix-build not available)");
-            }
+            },
         }
     }
 
@@ -192,8 +192,8 @@ async fn apply_patch_file(patch_path: &Path) -> anyhow::Result<()> {
 /// Apply changes from JSON format
 async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
     let content = fs::read_to_string(json_path).await?;
-    let changes: serde_json::Value = serde_json::from_str(&content)
-        .context("Failed to parse changes JSON")?;
+    let changes: serde_json::Value =
+        serde_json::from_str(&content).context("Failed to parse changes JSON")?;
 
     // Expected format:
     // {
@@ -245,7 +245,7 @@ async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
                     }
 
                     content = content.replace(old, new);
-                }
+                },
                 "insert_after" => {
                     let marker = operation["marker"]
                         .as_str()
@@ -261,11 +261,11 @@ async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
                         warn!("Could not find marker in {}: {}", file_path, marker);
                         bail!("Insert operation failed - marker not found");
                     }
-                }
+                },
                 _ => {
                     warn!("Unknown operation type: {}", op_type);
                     bail!("Unsupported operation type: {}", op_type);
-                }
+                },
             }
         }
 

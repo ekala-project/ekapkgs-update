@@ -77,7 +77,10 @@ pub async fn export(
         .find(|a| a.attr_path == attr_path)
         .with_context(|| format!("No preserved artifacts found for {}", attr_path))?;
 
-    info!("Found preserved failure from session {}", artifact.session_id);
+    info!(
+        "Found preserved failure from session {}",
+        artifact.session_id
+    );
 
     // Load error context
     let error_context_path = artifact.error_context_path.clone();
@@ -219,7 +222,10 @@ fn export_markdown(context: &LlmContext) -> anyhow::Result<String> {
         md.push_str("```diff\n");
         // Truncate large diffs
         let truncated = if diff.len() > 10000 {
-            format!("{}...\n\n(diff truncated to 10KB, full diff available in artifacts)", &diff[..10000])
+            format!(
+                "{}...\n\n(diff truncated to 10KB, full diff available in artifacts)",
+                &diff[..10000]
+            )
         } else {
             diff.clone()
         };
@@ -262,7 +268,11 @@ fn export_markdown(context: &LlmContext) -> anyhow::Result<String> {
     if !context.previous_attempts.is_empty() {
         md.push_str("## Previous Update Attempts\n\n");
         for attempt in &context.previous_attempts {
-            md.push_str(&format!("### Session `{}` ({})\n\n", &attempt.session_id[..8], attempt.timestamp));
+            md.push_str(&format!(
+                "### Session `{}` ({})\n\n",
+                &attempt.session_id[..8],
+                attempt.timestamp
+            ));
 
             md.push_str("| Phase | Status | Duration |\n");
             md.push_str("|-------|--------|----------|\n");
@@ -272,7 +282,10 @@ fn export_markdown(context: &LlmContext) -> anyhow::Result<String> {
                 } else {
                     "---".to_string()
                 };
-                md.push_str(&format!("| {} | {} | {} |\n", phase.phase, phase.status, duration));
+                md.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    phase.phase, phase.status, duration
+                ));
             }
             md.push_str("\n");
         }

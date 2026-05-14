@@ -88,25 +88,12 @@ pub enum UpdateError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cause", rename_all = "snake_case")]
 pub enum BuildFailureCause {
-    MissingDependency {
-        package: String,
-    },
-    CompilerError {
-        error_type: String,
-    },
-    LinkError {
-        missing_symbol: String,
-    },
-    ObsoletePatch {
-        patch_file: String,
-    },
-    IncompatibleVersion {
-        component: String,
-        issue: String,
-    },
-    TestFailure {
-        test: String,
-    },
+    MissingDependency { package: String },
+    CompilerError { error_type: String },
+    LinkError { missing_symbol: String },
+    ObsoletePatch { patch_file: String },
+    IncompatibleVersion { component: String, issue: String },
+    TestFailure { test: String },
     Unknown,
 }
 
@@ -160,22 +147,25 @@ impl UpdateError {
             } => match cause {
                 BuildFailureCause::MissingDependency { package } => {
                     format!("Build failed: missing dependency '{}'", package)
-                }
+                },
                 BuildFailureCause::CompilerError { error_type } => {
                     format!("Build failed: compiler error ({})", error_type)
-                }
+                },
                 BuildFailureCause::LinkError { missing_symbol } => {
-                    format!("Build failed: link error (missing symbol '{}')", missing_symbol)
-                }
+                    format!(
+                        "Build failed: link error (missing symbol '{}')",
+                        missing_symbol
+                    )
+                },
                 BuildFailureCause::ObsoletePatch { patch_file } => {
                     format!("Build failed: obsolete patch '{}'", patch_file)
-                }
+                },
                 BuildFailureCause::IncompatibleVersion { component, issue } => {
                     format!("Build failed: incompatible {} ({})", component, issue)
-                }
+                },
                 BuildFailureCause::TestFailure { test } => {
                     format!("Build failed: test '{}' failed", test)
-                }
+                },
                 BuildFailureCause::Unknown => "Build failed: unknown cause".to_string(),
             },
             Self::TestError {
@@ -183,29 +173,29 @@ impl UpdateError {
                 ..
             } => {
                 format!("Test '{}' failed", name)
-            }
+            },
             Self::NetworkError {
                 url,
                 status_code: Some(code),
                 ..
             } => {
                 format!("Network error fetching {} (HTTP {})", url, code)
-            }
+            },
             Self::HashMismatchError { context, .. } => {
                 format!("Hash mismatch in {}", context)
-            }
+            },
             Self::MetadataError { attr_path, .. } => {
                 format!("Failed to extract metadata for {}", attr_path)
-            }
+            },
             Self::GitError { operation, .. } => {
                 format!("Git operation failed: {}", operation)
-            }
+            },
             Self::VersionConstraintError { constraint, .. } => {
                 format!("No version satisfies constraint: {}", constraint)
-            }
+            },
             Self::InfrastructureError { component, .. } => {
                 format!("Infrastructure failure: {}", component)
-            }
+            },
             _ => format!("{}: {}", self.error_type_name(), self.details()),
         }
     }
@@ -221,7 +211,7 @@ impl UpdateError {
                 expected, actual, ..
             } => {
                 format!("Expected hash: {}\nActual hash: {}", expected, actual)
-            }
+            },
             Self::GitError { details, .. } => details.clone(),
             Self::VersionConstraintError { reason, .. } => reason.clone(),
             Self::InfrastructureError { details, .. } => details.clone(),
@@ -237,8 +227,7 @@ impl UpdateError {
                 "Try fetching manually and inspecting the hash".to_string(),
             ],
             Self::BuildError {
-                suspected_cause:
-                    Some(BuildFailureCause::ObsoletePatch { patch_file }),
+                suspected_cause: Some(BuildFailureCause::ObsoletePatch { patch_file }),
                 ..
             } => vec![
                 format!("Remove or update obsolete patch: {}", patch_file),
@@ -285,18 +274,18 @@ impl UpdateError {
             Self::BuildError { .. } => {
                 files.push("Build logs".to_string());
                 files.push("Diff of changes made".to_string());
-            }
+            },
             Self::TestError { .. } => {
                 files.push("Test output".to_string());
                 files.push("Package test configuration".to_string());
-            }
+            },
             Self::HashMismatchError { .. } => {
                 files.push("Source URL".to_string());
                 files.push("Upstream release info".to_string());
-            }
+            },
             _ => {
                 files.push("Diff of changes made".to_string());
-            }
+            },
         }
 
         files

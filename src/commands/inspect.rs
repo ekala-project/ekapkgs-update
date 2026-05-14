@@ -56,10 +56,7 @@ pub async fn inspect(database_path: String, identifier: String) -> anyhow::Resul
     println!("Status:     {}", status_str);
 
     // Calculate total duration
-    let total_duration: i64 = session_phases
-        .iter()
-        .filter_map(|p| p.duration_ms)
-        .sum();
+    let total_duration: i64 = session_phases.iter().filter_map(|p| p.duration_ms).sum();
     let total_secs = total_duration as f64 / 1000.0;
     println!("Duration:   {:.1}s", total_secs);
     println!();
@@ -117,12 +114,12 @@ pub async fn inspect(database_path: String, identifier: String) -> anyhow::Resul
                         }
                         println!();
                     }
-                }
+                },
                 Err(e) => {
                     println!("Failed to parse error details: {}", e);
                     println!("Raw JSON: {}", error_json);
                     println!();
-                }
+                },
             }
         }
 
