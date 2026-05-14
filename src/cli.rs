@@ -258,6 +258,29 @@ pub enum Commands {
         #[arg(long)]
         group_by_error: bool,
     },
+    /// Show status of current/recent update runs
+    Status {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+    },
+    /// Retry a failed update from preserved worktree
+    Retry {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Package attribute path to retry
+        attr_path: String,
+        /// Resume from specific phase (if supported)
+        #[arg(long)]
+        from_phase: Option<String>,
+        /// Apply patch file before retrying
+        #[arg(long)]
+        apply_patch: Option<std::path::PathBuf>,
+        /// Override version to update to
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Migrate a package from nixpkgs to ekapkgs paradigms
     Migrate {
         /// Nix file to evaluate (for attr paths)
@@ -430,6 +453,16 @@ impl Commands {
                     group_by_error,
                 )
                 .await
+            }
+            Commands::Status { database } => commands::status::status(database).await,
+            Commands::Retry {
+                database,
+                attr_path,
+                from_phase,
+                apply_patch,
+                version,
+            } => {
+                commands::retry::retry(database, attr_path, from_phase, apply_patch, version).await
             }
             Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await,
             Commands::Worktrees { command } => match command {
