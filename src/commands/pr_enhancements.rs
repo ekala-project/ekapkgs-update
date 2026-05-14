@@ -7,13 +7,15 @@
 
 use std::path::Path;
 
+use serde::Serialize;
+
 /// Configuration for optional PR enhancements.
 ///
 /// Naming convention: positive flags are `true` to enable a feature
 /// (`directory_diff`, `analyze_rebuilds`), and `skip_*` flags are `true` to
 /// disable a feature (`skip_cve_check`, `skip_repology`). CLI flags use the
 /// `--no-*` form and are translated when constructing this struct.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PrEnhancementsConfig {
     /// Whether to include directory diff comparison in PR body
     pub directory_diff: bool,

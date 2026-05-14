@@ -1,12 +1,15 @@
 mod build;
 mod config;
+pub mod errors;
 mod file_update;
 mod flake;
 mod format;
 mod git;
 mod hash_workflows;
+pub mod instrumentation;
 mod pr;
 mod script;
+pub mod types;
 mod variants;
 
 use std::path::Path;

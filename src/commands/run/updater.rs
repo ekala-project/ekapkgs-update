@@ -13,6 +13,7 @@ use crate::vcs_sources::SemverStrategy;
 /// Perform a package update
 pub(super) async fn perform_update(
     db: &Database,
+    session_id: &str,
     eval_entry_point: &str,
     req: &UpdateRequest,
     pr_config: Option<&PrConfig>,
