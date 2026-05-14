@@ -32,7 +32,10 @@
 //! The connection pool remains alive as long as the `Database` struct is in scope.
 //! `Database` is `Clone`, so multiple handles can share the same underlying pool.
 
+mod sessions;
 mod types;
+
+pub use sessions::{PhaseRecord, SessionStatus, UpdateSession};
 
 use std::path::Path;
 use std::str::FromStr;

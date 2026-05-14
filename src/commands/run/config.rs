@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -10,7 +11,7 @@ use crate::database::Database;
 use crate::git::PrConfig;
 
 /// Configuration for automated run mode
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunConfig {
     /// Nix file entry point to evaluate
     pub file: String,
@@ -99,6 +100,9 @@ impl RunConfig {
 
     /// Execute the automated update process
     pub async fn execute(self) -> anyhow::Result<()> {
+        // Serialize config before destructuring
+        let config_json = serde_json::to_string(&self).ok();
+
         let RunConfig {
             file,
             database_path,
@@ -120,6 +124,10 @@ impl RunConfig {
         // Initialize database
         let db = Database::new(&expanded_db_path).await?;
         info!("Database initialized at: {}", expanded_db_path);
+
+        // Create session for tracking this run
+        let session_id = db.create_session(config_json).await?;
+        info!("Created session: {}", session_id);
 
         // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
         // In interactive mode, force single-threaded execution
@@ -170,6 +178,7 @@ impl RunConfig {
 
         // Spawn updater service
         let updater_config = UpdaterServiceConfig {
+            session_id: session_id.clone(),
             eval_entry_point: Arc::from(file_updater), // Convert String to Arc<str>
             pr_config,
             fork: Arc::from(fork), // Convert String to Arc<str>
@@ -189,6 +198,16 @@ impl RunConfig {
         let (checked_count, skipped_count, error_count) = checker_result?;
         let (updated_count, failed_count) = updater_result?;
 
+        // Update session status based on results
+        let session_status = if failed_count > 0 {
+            crate::database::SessionStatus::Failed
+        } else {
+            crate::database::SessionStatus::Completed
+        };
+        if let Err(e) = db.update_session_status(&session_id, session_status).await {
+            tracing::warn!("Failed to update session status: {}", e);
+        }
+
         // Display summary
         info!("All services complete!");
         if error_count > 0 {
@@ -203,6 +222,7 @@ impl RunConfig {
         info!("  Skipped (backoff): {}", skipped_count);
         info!("  Updated: {}", updated_count);
         info!("  Failed: {}", failed_count);
+        info!("  Session: {}", session_id);
 
         Ok(())
     }
@@ -211,6 +231,9 @@ impl RunConfig {
 /// Configuration for the updater service
 #[derive(Debug, Clone)]
 pub struct UpdaterServiceConfig {
+    /// Session ID for tracking this run
+    pub session_id: String,
+
     /// Nix file entry point (Arc for cheap cloning in async tasks)
     pub eval_entry_point: Arc<str>,
 
@@ -247,6 +270,7 @@ impl UpdaterServiceConfig {
         use tracing::warn;
 
         let UpdaterServiceConfig {
+            session_id,
             eval_entry_point,
             pr_config,
             fork,
@@ -296,6 +320,7 @@ impl UpdaterServiceConfig {
 
                             // Clone data needed for the async task
                             let db_clone = db.clone();
+                            let session_id_clone = session_id.clone();
                             let eval_entry_point_clone = Arc::clone(&eval_entry_point); // O(1) clone
                             let pr_config_clone = pr_config.clone();
                             let fork_clone = Arc::clone(&fork); // O(1) clone
@@ -306,6 +331,7 @@ impl UpdaterServiceConfig {
                             join_set.spawn(async move {
                                 let result = super::updater::perform_update(
                                     &db_clone,
+                                    &session_id_clone,
                                     &eval_entry_point_clone, // Arc<str> derefs to &str
                                     &req,
                                     pr_config_clone.as_ref(),
