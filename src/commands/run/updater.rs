@@ -231,9 +231,10 @@ pub(super) async fn perform_update(
             // Preserve failure artifacts if requested
             let artifacts_path = if preserve_failures {
                 // Create a structured error from the anyhow error
-                // For now, use a generic InfrastructureError since we don't have granular error info
+                // For now, use a generic InfrastructureError since we don't have granular error
+                // info
                 let update_error = UpdateError::InfrastructureError {
-                    phase: UpdatePhase::Build,  // Default to Build phase
+                    phase: UpdatePhase::Build, // Default to Build phase
                     component: "update".to_string(),
                     details: error_message.clone(),
                 };
@@ -241,25 +242,34 @@ pub(super) async fn perform_update(
                 match preserve_failure(
                     session_id,
                     attr_path,
-                    UpdatePhase::Build,  // We don't know exact phase, default to Build
+                    UpdatePhase::Build, // We don't know exact phase, default to Build
                     &worktree_path,
                     &update_error,
-                    None,  // TODO: Capture build log
-                    None,  // TODO: Capture test output
+                    None, // TODO: Capture build log
+                    None, // TODO: Capture test output
                 )
                 .await
                 {
                     Ok(artifacts) => {
                         info!("{}: Preserved failure artifacts", attr_path);
-                        Some(artifacts.worktree_path.parent()
-                            .and_then(|p| p.parent())
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|| artifacts.worktree_path.to_string_lossy().to_string()))
-                    }
+                        Some(
+                            artifacts
+                                .worktree_path
+                                .parent()
+                                .and_then(|p| p.parent())
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|| {
+                                    artifacts.worktree_path.to_string_lossy().to_string()
+                                }),
+                        )
+                    },
                     Err(preserve_err) => {
-                        warn!("{}: Failed to preserve failure artifacts: {}", attr_path, preserve_err);
+                        warn!(
+                            "{}: Failed to preserve failure artifacts: {}",
+                            attr_path, preserve_err
+                        );
                         None
-                    }
+                    },
                 }
             } else {
                 None
@@ -274,7 +284,10 @@ pub(super) async fn perform_update(
                     );
                 }
             } else {
-                debug!("{}: Skipping worktree cleanup (preserved for inspection)", attr_path);
+                debug!(
+                    "{}: Skipping worktree cleanup (preserved for inspection)",
+                    attr_path
+                );
             }
 
             if let Err(db_err) = db
@@ -529,6 +542,7 @@ async fn prompt_for_pr_confirmation(
     _pr_enhancements: &PrEnhancementsConfig,
 ) -> anyhow::Result<bool> {
     use std::io::{self, Write};
+
     use tokio::process::Command;
 
     // Create branch name (same logic as in create_pr_for_update)
@@ -577,7 +591,10 @@ async fn prompt_for_pr_confirmation(
     println!("PR PREVIEW for {}", attr_path);
     println!("{}", "=".repeat(80));
     println!("\nTitle: {}", title);
-    println!("\nTarget: {}/{} (branch: {})", config.owner, config.repo, config.base_branch);
+    println!(
+        "\nTarget: {}/{} (branch: {})",
+        config.owner, config.repo, config.base_branch
+    );
     println!("Push to: {} (as branch: {})", fork, branch_name);
     println!("\n--- PR Body ---");
     println!("{}", body);

@@ -132,10 +132,7 @@ pub async fn preserve_failure(
     fs::write(&manifest_path, serde_json::to_string_pretty(&artifacts)?).await?;
     debug!("{}: Manifest saved", attr_path);
 
-    info!(
-        "{}: Successfully preserved failure artifacts",
-        attr_path
-    );
+    info!("{}: Successfully preserved failure artifacts", attr_path);
 
     Ok(artifacts)
 }
@@ -242,9 +239,7 @@ pub async fn cleanup_old_failures(older_than_days: u32) -> anyhow::Result<usize>
             let manifest_path = package_entry.path().join("manifest.json");
             if manifest_path.exists() {
                 let manifest_content = fs::read_to_string(&manifest_path).await?;
-                if let Ok(artifacts) =
-                    serde_json::from_str::<FailureArtifacts>(&manifest_content)
-                {
+                if let Ok(artifacts) = serde_json::from_str::<FailureArtifacts>(&manifest_content) {
                     if artifacts.timestamp < cutoff {
                         fs::remove_dir_all(package_entry.path()).await?;
                         removed += 1;
@@ -290,8 +285,7 @@ pub async fn list_preserved_failures() -> anyhow::Result<Vec<FailureArtifacts>> 
             let manifest_path = package_entry.path().join("manifest.json");
             if manifest_path.exists() {
                 let manifest_content = fs::read_to_string(&manifest_path).await?;
-                if let Ok(artifacts) = serde_json::from_str::<FailureArtifacts>(&manifest_content)
-                {
+                if let Ok(artifacts) = serde_json::from_str::<FailureArtifacts>(&manifest_content) {
                     all_artifacts.push(artifacts);
                 }
             }

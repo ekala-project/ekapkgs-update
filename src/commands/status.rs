@@ -31,13 +31,21 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
     println!();
     println!("Session ID: {}", current.id);
     println!("Status:     {:?}", current.status);
-    println!("Started:    {}", current.started_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Started:    {}",
+        current.started_at.format("%Y-%m-%d %H:%M:%S")
+    );
 
     if let Some(completed) = current.completed_at {
         let duration = completed.signed_duration_since(current.started_at);
         let mins = duration.num_minutes();
         let secs = duration.num_seconds() % 60;
-        println!("Completed:  {} ({}m {}s)", completed.format("%Y-%m-%d %H:%M:%S"), mins, secs);
+        println!(
+            "Completed:  {} ({}m {}s)",
+            completed.format("%Y-%m-%d %H:%M:%S"),
+            mins,
+            secs
+        );
     } else if is_running {
         let duration = Utc::now().signed_duration_since(current.started_at);
         let mins = duration.num_minutes();
@@ -78,7 +86,10 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
         println!("Recent Sessions");
         println!("{}", "=".repeat(80));
         println!();
-        println!("{:<25} {:<12} {:>10} {:>10} {:>10}", "Started", "Status", "Success", "Failed", "Duration");
+        println!(
+            "{:<25} {:<12} {:>10} {:>10} {:>10}",
+            "Started", "Status", "Success", "Failed", "Duration"
+        );
         println!("{}", "-".repeat(80));
 
         for session in &sessions[1..] {

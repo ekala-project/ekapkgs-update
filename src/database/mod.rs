@@ -35,13 +35,12 @@
 mod sessions;
 mod types;
 
-pub use sessions::{PhaseRecord, SessionStatus, UpdateSession};
-
 use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+pub use sessions::{PhaseRecord, SessionStatus, UpdateSession};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};

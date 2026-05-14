@@ -18,8 +18,14 @@ pub async fn list_worktrees(database_path: String) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("\nPreserved Failure Artifacts ({} total):\n", artifacts.len());
-    println!("{:<40} {:<20} {:<20}", "Package", "Failed Phase", "Timestamp");
+    println!(
+        "\nPreserved Failure Artifacts ({} total):\n",
+        artifacts.len()
+    );
+    println!(
+        "{:<40} {:<20} {:<20}",
+        "Package", "Failed Phase", "Timestamp"
+    );
     println!("{}", "-".repeat(80));
 
     for artifact in &artifacts {
@@ -56,7 +62,10 @@ pub async fn show_worktree(database_path: String, attr_path: String) -> anyhow::
     println!();
     println!("Session ID:    {}", artifact.session_id);
     println!("Failed Phase:  {}", artifact.failed_phase.as_str());
-    println!("Timestamp:     {}", artifact.timestamp.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Timestamp:     {}",
+        artifact.timestamp.format("%Y-%m-%d %H:%M:%S")
+    );
     println!();
     println!("Artifact Locations:");
     println!("  Worktree:        {}", artifact.worktree_path.display());
@@ -68,7 +77,10 @@ pub async fn show_worktree(database_path: String, attr_path: String) -> anyhow::
     }
     println!("  Diff:            {}", artifact.diff_path.display());
     println!("  Metadata:        {}", artifact.metadata_path.display());
-    println!("  Error Context:   {}", artifact.error_context_path.display());
+    println!(
+        "  Error Context:   {}",
+        artifact.error_context_path.display()
+    );
     println!();
 
     // Read and display error context
@@ -89,7 +101,10 @@ pub async fn show_worktree(database_path: String, attr_path: String) -> anyhow::
 
 /// Clean up old preserved worktrees
 pub async fn clean_worktrees(older_than_days: u32) -> anyhow::Result<()> {
-    info!("Cleaning preserved failures older than {} days", older_than_days);
+    info!(
+        "Cleaning preserved failures older than {} days",
+        older_than_days
+    );
 
     let removed = cleanup_old_failures(older_than_days)
         .await

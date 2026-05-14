@@ -90,10 +90,7 @@ fn display_table(results: &[PhaseRecord]) {
 
     for record in results.iter().take(50) {
         let when = format_relative_time(&record.started_at);
-        let error_type = record
-            .error_type
-            .as_deref()
-            .unwrap_or("N/A");
+        let error_type = record.error_type.as_deref().unwrap_or("N/A");
 
         println!(
             "{:<40} {:<20} {:<20} {:<15}",

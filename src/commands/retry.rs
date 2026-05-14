@@ -79,7 +79,9 @@ pub async fn retry(
     // 3. Skip phases that already succeeded if resuming
 
     // Read metadata from preserved artifacts to understand the update parameters
-    let metadata_path = artifact.worktree_path.parent()
+    let metadata_path = artifact
+        .worktree_path
+        .parent()
         .context("No parent directory")?
         .join("metadata.json");
 
@@ -103,7 +105,10 @@ pub async fn retry(
     }
 
     println!("Next steps:");
-    println!("1. Review changes with: git -C {} diff", retry_dir.display());
+    println!(
+        "1. Review changes with: git -C {} diff",
+        retry_dir.display()
+    );
     println!("2. Manually run update command:");
     println!("   cd {}", retry_dir.display());
     println!("   ekapkgs-update update <file> {} [options]", attr_path);

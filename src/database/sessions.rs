@@ -8,10 +8,9 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::Database;
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::types::UpdatePhase;
-
-use super::Database;
 
 /// Status of an update session
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,14 +126,27 @@ impl Database {
         counter: &str,
     ) -> anyhow::Result<()> {
         let query = match counter {
-            "attempted" => "UPDATE update_sessions SET packages_attempted = packages_attempted + 1 WHERE id = ?",
-            "succeeded" => "UPDATE update_sessions SET packages_succeeded = packages_succeeded + 1 WHERE id = ?",
-            "failed" => "UPDATE update_sessions SET packages_failed = packages_failed + 1 WHERE id = ?",
-            "skipped" => "UPDATE update_sessions SET packages_skipped = packages_skipped + 1 WHERE id = ?",
+            "attempted" => {
+                "UPDATE update_sessions SET packages_attempted = packages_attempted + 1 WHERE id = \
+                 ?"
+            },
+            "succeeded" => {
+                "UPDATE update_sessions SET packages_succeeded = packages_succeeded + 1 WHERE id = \
+                 ?"
+            },
+            "failed" => {
+                "UPDATE update_sessions SET packages_failed = packages_failed + 1 WHERE id = ?"
+            },
+            "skipped" => {
+                "UPDATE update_sessions SET packages_skipped = packages_skipped + 1 WHERE id = ?"
+            },
             _ => return Err(anyhow::anyhow!("Invalid counter: {}", counter)),
         };
 
-        sqlx::query(query).bind(session_id).execute(&self.pool).await?;
+        sqlx::query(query)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

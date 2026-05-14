@@ -129,7 +129,8 @@ pub enum Commands {
         /// `CACHIX_AUTH_TOKEN` to be set.
         #[arg(long, value_name = "NAME")]
         cachix_cache: Option<String>,
-        /// Interactive mode: prompt before submitting PRs with summary and commit info. Forces single-threaded execution.
+        /// Interactive mode: prompt before submitting PRs with summary and commit info. Forces
+        /// single-threaded execution.
         #[arg(long)]
         interactive: bool,
         /// Preserve failed worktrees and artifacts for later inspection
@@ -487,7 +488,7 @@ impl Commands {
                     group_by_error,
                 )
                 .await
-            }
+            },
             Commands::Status { database } => commands::status::status(database).await,
             Commands::Retry {
                 database,
@@ -497,7 +498,7 @@ impl Commands {
                 version,
             } => {
                 commands::retry::retry(database, attr_path, from_phase, apply_patch, version).await
-            }
+            },
             Commands::Export {
                 database,
                 attr_path,
@@ -506,7 +507,7 @@ impl Commands {
             } => {
                 let fmt = commands::export::ExportFormat::from_str(&format)?;
                 commands::export::export(database, attr_path, fmt, output).await
-            }
+            },
             Commands::Apply {
                 database,
                 attr_path,
@@ -517,19 +518,19 @@ impl Commands {
             } => {
                 commands::apply::apply(database, attr_path, patch, changes_json, validate, resume)
                     .await
-            }
+            },
             Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await,
             Commands::Worktrees { command } => match command {
                 WorktreesCommand::List { database } => {
                     commands::worktrees::list_worktrees(database).await
-                }
+                },
                 WorktreesCommand::Show {
                     attr_path,
                     database,
                 } => commands::worktrees::show_worktree(database, attr_path).await,
                 WorktreesCommand::Clean { older_than } => {
                     commands::worktrees::clean_worktrees(older_than).await
-                }
+                },
             },
         }
     }
