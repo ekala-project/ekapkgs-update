@@ -2,8 +2,11 @@ use std::path::Path;
 
 use tracing::{debug, info, warn};
 
+use super::preservation::preserve_failure;
 use super::types::{UpdateRequest, UpdateResult};
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
+use crate::commands::update::errors::UpdateError;
+use crate::commands::update::types::UpdatePhase;
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
@@ -22,6 +25,7 @@ pub(super) async fn perform_update(
     dry_run: bool,
     pr_enhancements: &PrEnhancementsConfig,
     interactive: bool,
+    preserve_failures: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -224,12 +228,53 @@ pub(super) async fn perform_update(
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
 
-            // Clean up the worktree
-            if let Err(cleanup_err) = cleanup_worktree(&worktree_path).await {
-                warn!(
-                    "{}: Failed to clean up worktree: {}",
-                    attr_path, cleanup_err
-                );
+            // Preserve failure artifacts if requested
+            let artifacts_path = if preserve_failures {
+                // Create a structured error from the anyhow error
+                // For now, use a generic InfrastructureError since we don't have granular error info
+                let update_error = UpdateError::InfrastructureError {
+                    phase: UpdatePhase::Build,  // Default to Build phase
+                    component: "update".to_string(),
+                    details: error_message.clone(),
+                };
+
+                match preserve_failure(
+                    session_id,
+                    attr_path,
+                    UpdatePhase::Build,  // We don't know exact phase, default to Build
+                    &worktree_path,
+                    &update_error,
+                    None,  // TODO: Capture build log
+                    None,  // TODO: Capture test output
+                )
+                .await
+                {
+                    Ok(artifacts) => {
+                        info!("{}: Preserved failure artifacts", attr_path);
+                        Some(artifacts.worktree_path.parent()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| artifacts.worktree_path.to_string_lossy().to_string()))
+                    }
+                    Err(preserve_err) => {
+                        warn!("{}: Failed to preserve failure artifacts: {}", attr_path, preserve_err);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Clean up the worktree (only if not preserved)
+            if artifacts_path.is_none() {
+                if let Err(cleanup_err) = cleanup_worktree(&worktree_path).await {
+                    warn!(
+                        "{}: Failed to clean up worktree: {}",
+                        attr_path, cleanup_err
+                    );
+                }
+            } else {
+                debug!("{}: Skipping worktree cleanup (preserved for inspection)", attr_path);
             }
 
             if let Err(db_err) = db

@@ -351,6 +351,7 @@ impl UpdaterServiceConfig {
                                     dry_run,
                                     &pr_enhancements_clone,
                                     interactive,
+                                    preserve_failures,
                                 )
                                 .await;
                                 (result, attr_path_clone)
