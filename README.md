@@ -86,6 +86,29 @@ index 37e08a8dc5a2..e7bce67e0c79 100644
 
 ---
 
+## 🌐 Web Portal
+
+Monitor your package updates in real-time with **ekapkgs-update-web**!
+
+```bash
+# Start the web portal
+cargo run -p ekapkgs-update-web
+
+# Then visit http://localhost:3000
+```
+
+**Features:**
+- 📊 Real-time dashboard with live session monitoring
+- 📈 Analytics and charts (success rates, error distribution, phase stats)
+- 🔍 Searchable package list with version tracking
+- 📋 Detailed session history with phase-by-phase breakdown
+- ⚡ WebSocket updates for live progress
+- 🎨 Clean, responsive UI with HTMX + server-side rendering
+
+**[→ See ekapkgs-update-web README for full details](./ekapkgs-update-web/README.md)**
+
+---
+
 ## Features
 
 ### 🔧 Per-Package Configuration (EEP-0039)

@@ -90,6 +90,10 @@ async fn get_success_rate_trend(state: &AppState) -> Vec<SuccessRateTrend> {
         .unwrap_or_default();
 
     rows.into_iter()
-        .map(|(date, success_rate)| SuccessRateTrend { date, success_rate })
+        .map(|(date, success_rate)| SuccessRateTrend {
+            date,
+            success_rate,
+            success_rate_display: format!("{:.1}", success_rate),
+        })
         .collect()
 }
