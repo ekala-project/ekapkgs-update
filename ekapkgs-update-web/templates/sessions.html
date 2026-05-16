@@ -8,11 +8,11 @@
     <h2>Update Sessions</h2>
 
     <div class="filter-bar">
-        <a href="/sessions" class="btn {% if !filter_status %}active{% endif %}">All</a>
-        <a href="/sessions?status=running" class="btn {% if filter_status == Some("running".to_string()) %}active{% endif %}">Running</a>
-        <a href="/sessions?status=completed" class="btn {% if filter_status == Some("completed".to_string()) %}active{% endif %}">Completed</a>
-        <a href="/sessions?status=failed" class="btn {% if filter_status == Some("failed".to_string()) %}active{% endif %}">Failed</a>
-        <a href="/sessions?status=cancelled" class="btn {% if filter_status == Some("cancelled".to_string()) %}active{% endif %}">Cancelled</a>
+        <a href="/sessions" class="btn {% match filter_status %}{% when None %}active{% when Some with (_) %}{% endmatch %}">All</a>
+        <a href="/sessions?status=running" class="btn">Running</a>
+        <a href="/sessions?status=completed" class="btn">Completed</a>
+        <a href="/sessions?status=failed" class="btn">Failed</a>
+        <a href="/sessions?status=cancelled" class="btn">Cancelled</a>
     </div>
 
     <table class="sessions-table">
@@ -37,18 +37,20 @@
                 <td><code>{{ session.id }}</code></td>
                 <td>{{ session.started_at }}</td>
                 <td>
-                    {% if session.completed_at %}
-                        {{ session.completed_at.unwrap() }}
-                    {% else %}
-                        —
-                    {% endif %}
+                    {% match session.completed_at %}
+                        {% when Some with (completed) %}
+                            {{ completed }}
+                        {% when None %}
+                            —
+                    {% endmatch %}
                 </td>
                 <td>
-                    {% if session.completed_at %}
-                        {{ ((session.completed_at.unwrap().timestamp() - session.started_at.timestamp()) / 60)|round }}m
-                    {% else %}
-                        Running...
-                    {% endif %}
+                    {% match session.completed_at %}
+                        {% when Some with (completed) %}
+                            {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }}m
+                        {% when None %}
+                            Running...
+                    {% endmatch %}
                 </td>
                 <td><span class="badge badge-{{ session.status }}">{{ session.status }}</span></td>
                 <td>{{ session.packages_attempted }}</td>
@@ -57,7 +59,7 @@
                 <td class="warning">{{ session.packages_skipped }}</td>
                 <td>
                     {% if session.packages_attempted > 0 %}
-                        {{ (session.packages_succeeded * 100 / session.packages_attempted)|round }}%
+                        {{ session.packages_succeeded * 100 / session.packages_attempted }}%
                     {% else %}
                         —
                     {% endif %}

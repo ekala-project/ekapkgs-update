@@ -88,7 +88,7 @@ async fn get_dashboard_stats(state: &AppState) -> DashboardStats {
 
     DashboardStats {
         total_packages: total_packages as usize,
-        success_rate,
+        success_rate: format!("{:.1}", success_rate),
         active_updates,
         total_sessions: total_sessions as usize,
     }

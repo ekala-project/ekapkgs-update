@@ -28,21 +28,23 @@
             <div class="info-item">
                 <label>Completed:</label>
                 <span>
-                    {% if session.completed_at %}
-                        {{ session.completed_at.unwrap() }}
-                    {% else %}
-                        Still running...
-                    {% endif %}
+                    {% match session.completed_at %}
+                        {% when Some with (completed) %}
+                            {{ completed }}
+                        {% when None %}
+                            Still running...
+                    {% endmatch %}
                 </span>
             </div>
             <div class="info-item">
                 <label>Duration:</label>
                 <span>
-                    {% if session.completed_at %}
-                        {{ ((session.completed_at.unwrap().timestamp() - session.started_at.timestamp()) / 60)|round }} minutes
-                    {% else %}
-                        {{ ((chrono::Utc::now().timestamp() - session.started_at.timestamp()) / 60)|round }} minutes (ongoing)
-                    {% endif %}
+                    {% match session.completed_at %}
+                        {% when Some with (completed) %}
+                            {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }} minutes
+                        {% when None %}
+                            In progress...
+                    {% endmatch %}
                 </span>
             </div>
         </div>
@@ -86,11 +88,12 @@
                     <td>{{ phase.phase }}</td>
                     <td>{{ phase.started_at }}</td>
                     <td>
-                        {% if phase.duration_ms %}
-                            {{ phase.duration_ms.unwrap() / 1000 }}s
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% match phase.duration_ms %}
+                            {% when Some with (duration) %}
+                                {{ duration / 1000 }}s
+                            {% when None %}
+                                —
+                        {% endmatch %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -119,29 +122,32 @@
                     <td><code>{{ phase.attr_path }}</code></td>
                     <td>{{ phase.phase }}</td>
                     <td>
-                        {% if phase.error_type %}
-                            <span class="error-badge">{{ phase.error_type.unwrap() }}</span>
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% match phase.error_type %}
+                            {% when Some with (error) %}
+                                <span class="error-badge">{{ error }}</span>
+                            {% when None %}
+                                —
+                        {% endmatch %}
                     </td>
                     <td>{{ phase.started_at }}</td>
                     <td>
-                        {% if phase.duration_ms %}
-                            {{ phase.duration_ms.unwrap() / 1000 }}s
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% match phase.duration_ms %}
+                            {% when Some with (duration) %}
+                                {{ duration / 1000 }}s
+                            {% when None %}
+                                —
+                        {% endmatch %}
                     </td>
                     <td>
-                        {% if phase.error_details %}
-                            <details>
-                                <summary>View Error</summary>
-                                <pre><code>{{ phase.error_details.as_ref().unwrap() }}</code></pre>
-                            </details>
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% match phase.error_details %}
+                            {% when Some with (details) %}
+                                <details>
+                                    <summary>View Error</summary>
+                                    <pre><code>{{ details }}</code></pre>
+                                </details>
+                            {% when None %}
+                                —
+                        {% endmatch %}
                     </td>
                 </tr>
                 {% endfor %}

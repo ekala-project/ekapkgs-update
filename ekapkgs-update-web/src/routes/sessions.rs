@@ -123,7 +123,6 @@ pub async fn detail(State(state): State<AppState>, Path(id): Path<String>) -> im
 
     SessionDetailTemplate {
         session,
-        phases,
         success_phases,
         failed_phases,
     }

@@ -13,7 +13,7 @@
                 type="text"
                 name="search"
                 placeholder="Search packages..."
-                value="{% if search %}{{ search.as_ref().unwrap() }}{% endif %}"
+                value="{% match search %}{% when Some with (term) %}{{ term }}{% when None %}{% endmatch %}"
             >
             <button type="submit" class="btn">Search</button>
             <a href="/packages" class="btn btn-secondary">Clear</a>
@@ -37,18 +37,20 @@
             <tr>
                 <td><code>{{ package.attr_path }}</code></td>
                 <td>
-                    {% if package.current_version %}
-                        {{ package.current_version.as_ref().unwrap() }}
-                    {% else %}
-                        —
-                    {% endif %}
+                    {% match package.current_version %}
+                        {% when Some with (version) %}
+                            {{ version }}
+                        {% when None %}
+                            —
+                    {% endmatch %}
                 </td>
                 <td>
-                    {% if package.latest_version %}
-                        {{ package.latest_version.as_ref().unwrap() }}
-                    {% else %}
-                        —
-                    {% endif %}
+                    {% match package.latest_version %}
+                        {% when Some with (version) %}
+                            {{ version }}
+                        {% when None %}
+                            —
+                    {% endmatch %}
                 </td>
                 <td>
                     <span class="badge badge-{{ package.status }}">
@@ -67,25 +69,28 @@
                     </span>
                 </td>
                 <td>
-                    {% if package.last_attempted %}
-                        {{ package.last_attempted.unwrap() }}
-                    {% else %}
-                        Never
-                    {% endif %}
+                    {% match package.last_attempted %}
+                        {% when Some with (date) %}
+                            {{ date }}
+                        {% when None %}
+                            Never
+                    {% endmatch %}
                 </td>
                 <td>
-                    {% if package.next_attempt %}
-                        {{ package.next_attempt.unwrap() }}
-                    {% else %}
-                        —
-                    {% endif %}
+                    {% match package.next_attempt %}
+                        {% when Some with (date) %}
+                            {{ date }}
+                        {% when None %}
+                            —
+                    {% endmatch %}
                 </td>
                 <td>
-                    {% if package.pr_url %}
-                        <a href="{{ package.pr_url.as_ref().unwrap() }}" target="_blank" rel="noopener">View PR</a>
-                    {% else %}
-                        —
-                    {% endif %}
+                    {% match package.pr_url %}
+                        {% when Some with (url) %}
+                            <a href="{{ url }}" target="_blank" rel="noopener">View PR</a>
+                        {% when None %}
+                            —
+                    {% endmatch %}
                 </td>
             </tr>
             {% endfor %}

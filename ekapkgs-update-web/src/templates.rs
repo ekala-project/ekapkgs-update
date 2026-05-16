@@ -12,7 +12,7 @@ pub struct DashboardTemplate {
 
 pub struct DashboardStats {
     pub total_packages: usize,
-    pub success_rate: f64,
+    pub success_rate: String, // Pre-formatted for display
     pub active_updates: usize,
     pub total_sessions: usize,
 }
@@ -28,7 +28,6 @@ pub struct SessionsTemplate {
 #[template(path = "session_detail.html")]
 pub struct SessionDetailTemplate {
     pub session: UpdateSession,
-    pub phases: Vec<PhaseRecord>,
     pub success_phases: Vec<PhaseRecord>,
     pub failed_phases: Vec<PhaseRecord>,
 }
@@ -74,4 +73,5 @@ pub struct PhaseStats {
 pub struct SuccessRateTrend {
     pub date: String,
     pub success_rate: f64,
+    pub success_rate_display: String, // Pre-formatted for display
 }

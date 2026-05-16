@@ -14,7 +14,7 @@
         </div>
         <div class="stat-card">
             <h3>Success Rate</h3>
-            <p class="stat-value">{{ stats.success_rate|round }}%</p>
+            <p class="stat-value">{{ stats.success_rate }}%</p>
         </div>
         <div class="stat-card">
             <h3>Active Updates</h3>
@@ -26,25 +26,27 @@
         </div>
     </div>
 
-    {% if active_session %}
+    {% match active_session %}
+    {% when Some with (session) %}
     <section class="active-session">
         <h3>Currently Running Session</h3>
         <div class="session-card">
-            <p><strong>Session ID:</strong> {{ active_session.id }}</p>
-            <p><strong>Started:</strong> {{ active_session.started_at }}</p>
-            <p><strong>Progress:</strong> {{ active_session.packages_succeeded + active_session.packages_failed + active_session.packages_skipped }} / {{ active_session.packages_attempted }}</p>
+            <p><strong>Session ID:</strong> {{ session.id }}</p>
+            <p><strong>Started:</strong> {{ session.started_at }}</p>
+            <p><strong>Progress:</strong> {{ session.packages_succeeded + session.packages_failed + session.packages_skipped }} / {{ session.packages_attempted }}</p>
             <div class="progress-bar">
-                <div class="progress-fill" style="width: {% if active_session.packages_attempted > 0 %}{{ (active_session.packages_succeeded + active_session.packages_failed + active_session.packages_skipped) * 100 / active_session.packages_attempted }}{% else %}0{% endif %}%"></div>
+                <div class="progress-fill" style="width: {% if session.packages_attempted > 0 %}{{ (session.packages_succeeded + session.packages_failed + session.packages_skipped) * 100 / session.packages_attempted }}{% else %}0{% endif %}%"></div>
             </div>
             <p>
-                <span class="badge badge-success">{{ active_session.packages_succeeded }} succeeded</span>
-                <span class="badge badge-error">{{ active_session.packages_failed }} failed</span>
-                <span class="badge badge-warning">{{ active_session.packages_skipped }} skipped</span>
+                <span class="badge badge-success">{{ session.packages_succeeded }} succeeded</span>
+                <span class="badge badge-error">{{ session.packages_failed }} failed</span>
+                <span class="badge badge-warning">{{ session.packages_skipped }} skipped</span>
             </p>
-            <a href="/sessions/{{ active_session.id }}" class="btn">View Details</a>
+            <a href="/sessions/{{ session.id }}" class="btn">View Details</a>
         </div>
     </section>
-    {% endif %}
+    {% when None %}
+    {% endmatch %}
 
     <section class="recent-sessions">
         <h3>Recent Sessions</h3>
@@ -65,11 +67,12 @@
                     <td><code>{{ session.id }}</code></td>
                     <td>{{ session.started_at }}</td>
                     <td>
-                        {% if session.completed_at %}
-                            {{ ((session.completed_at.unwrap().timestamp() - session.started_at.timestamp()) / 60)|round }}m
-                        {% else %}
-                            Running...
-                        {% endif %}
+                        {% match session.completed_at %}
+                            {% when Some with (completed) %}
+                                {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }}m
+                            {% when None %}
+                                Running...
+                        {% endmatch %}
                     </td>
                     <td><span class="badge badge-{{ session.status }}">{{ session.status }}</span></td>
                     <td>{{ session.packages_succeeded }} / {{ session.packages_failed }}</td>

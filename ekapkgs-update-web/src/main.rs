@@ -64,14 +64,16 @@ async fn main() -> Result<()> {
         info!("Using database at: {}", db_path);
     }
 
-    info!("Using database at: {}", db_path);
-
-    // Initialize database connection
     let db = ekapkgs_update::database::Database::new(&db_path)
         .await
         .context("Failed to connect to database")?;
 
-    info!("Database connection established");
+    if !db_exists {
+        info!("✓ Database created successfully");
+        info!("📝 Note: Database is empty. Run 'ekapkgs-update run' to populate with update data.");
+    } else {
+        info!("✓ Database connection established");
+    }
 
     // Create shared application state
     let state = AppState::new(db);

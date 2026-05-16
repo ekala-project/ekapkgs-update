@@ -91,7 +91,12 @@ ekapkgs-update-web/
 cargo run -p ekapkgs-update-web -- \\
   --database ~/.local/share/ekapkgs-update/db.sqlite \\
   --port 3000
+
+# Or use the convenient start script
+./ekapkgs-update-web/start-web.sh
 ```
+
+**Note:** The database will be created automatically if it doesn't exist. The web portal will show an empty state until you run `ekapkgs-update run` to populate it with update data.
 
 ### Production
 
@@ -118,18 +123,14 @@ cargo build --release -p ekapkgs-update-web
 - [x] Cargo workspace setup
 - [x] Web server with Axum
 - [x] Database integration (shared with ekapkgs-update)
+- [x] Automatic database creation (no manual setup required!)
 - [x] All route handlers
 - [x] WebSocket support for real-time updates
-- [x] Askama templates for all pages
+- [x] Askama templates for all pages (all syntax issues resolved)
 - [x] CSS styling (minimal, clean design)
 - [x] HTMX integration for dynamic updates
 - [x] Serde support for UpdateSession, PhaseRecord, SessionStatus
-
-### ⚠️ In Progress
-- [ ] Fix remaining template syntax issues:
-  - Replace `|round` filter (use `|int` or format in Rust)
-  - Fix Option handling in templates (use `.is_some()` or `{% if let Some(...) %}`)
-  - Remove `.format()` calls on DateTimes (already using Display)
+- [x] Convenient start script (`start-web.sh`)
 
 ### 🔮 Future Enhancements
 - [ ] Custom Askama filters for date formatting
