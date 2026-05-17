@@ -166,6 +166,83 @@ in
         '';
       };
     };
+
+    web = {
+      enable = lib.mkEnableOption "the ekapkgs-update web monitoring portal";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.ekapkgs-update-web or cfg.package;
+        defaultText = lib.literalExpression "pkgs.ekapkgs-update-web";
+        description = "The ekapkgs-update-web package to run.";
+      };
+
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1";
+        example = "0.0.0.0";
+        description = ''
+          Host address to bind the web server to. Use <literal>0.0.0.0</literal>
+          to listen on all interfaces, or <literal>127.0.0.1</literal> for
+          localhost only.
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 3000;
+        example = 8080;
+        description = "Port the web server listens on.";
+      };
+
+      cors = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Enable CORS (Cross-Origin Resource Sharing) headers for public access.
+          Enable this if you need to access the web portal from different domains
+          or if you're serving it behind a reverse proxy.
+        '';
+      };
+
+      user = lib.mkOption {
+        type = lib.types.str;
+        default = cfg.user;
+        defaultText = lib.literalExpression "config.services.ekapkgs-update.user";
+        description = ''
+          System user the web portal runs as. Defaults to the same user as the
+          main ekapkgs-update service to ensure database access.
+        '';
+      };
+
+      group = lib.mkOption {
+        type = lib.types.str;
+        default = cfg.group;
+        defaultText = lib.literalExpression "config.services.ekapkgs-update.group";
+        description = ''
+          Group the web portal runs as. Defaults to the same group as the
+          main ekapkgs-update service.
+        '';
+      };
+
+      database = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/${cfg.stateDirectory}/updates.db";
+        defaultText = lib.literalExpression ''"/var/lib/''${config.services.ekapkgs-update.stateDirectory}/updates.db"'';
+        description = ''
+          Path to the SQLite database. Defaults to the same database used by
+          the main ekapkgs-update service. The web portal has read-only access.
+        '';
+      };
+
+      openFirewall = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether to automatically open the firewall for the web portal port.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -248,6 +325,56 @@ in
         ];
       };
     };
+
+    # Web portal service
+    systemd.services.ekapkgs-update-web = lib.mkIf cfg.web.enable {
+      description = "ekapkgs-update web monitoring portal";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = lib.escapeShellArgs ([
+          "${cfg.web.package}/bin/ekapkgs-update-web"
+          "--database"
+          cfg.web.database
+          "--host"
+          cfg.web.host
+          "--port"
+          (toString cfg.web.port)
+        ] ++ lib.optional cfg.web.cors "--cors");
+
+        Restart = "on-failure";
+        RestartSec = "10s";
+
+        User = cfg.web.user;
+        Group = cfg.web.group;
+
+        # Hardening - web portal is read-only and doesn't need much access
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        RestrictRealtime = true;
+        RestrictNamespaces = true;
+        SystemCallArchitectures = "native";
+
+        # Only needs read access to database directory
+        ReadOnlyPaths = [ "/var/lib/${cfg.stateDirectory}" ];
+      };
+    };
+
+    # Firewall configuration
+    networking.firewall.allowedTCPPorts = lib.mkIf (cfg.web.enable && cfg.web.openFirewall) [
+      cfg.web.port
+    ];
   };
 
   meta.maintainers = [ ];
