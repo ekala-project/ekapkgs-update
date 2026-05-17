@@ -335,15 +335,18 @@ in
 
       serviceConfig = {
         Type = "simple";
-        ExecStart = lib.escapeShellArgs ([
-          "${cfg.web.package}/bin/ekapkgs-update-web"
-          "--database"
-          cfg.web.database
-          "--host"
-          cfg.web.host
-          "--port"
-          (toString cfg.web.port)
-        ] ++ lib.optional cfg.web.cors "--cors");
+        ExecStart = lib.escapeShellArgs (
+          [
+            "${cfg.web.package}/bin/ekapkgs-update-web"
+            "--database"
+            cfg.web.database
+            "--host"
+            cfg.web.host
+            "--port"
+            (toString cfg.web.port)
+          ]
+          ++ lib.optional cfg.web.cors "--cors"
+        );
 
         Restart = "on-failure";
         RestartSec = "10s";
