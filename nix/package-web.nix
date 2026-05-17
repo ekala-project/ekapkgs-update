@@ -19,8 +19,14 @@ rustPlatform.buildRustPackage {
   src = ../.;
 
   # Build only the web portal binary from the workspace
-  cargoBuildFlags = [ "-p" "ekapkgs-update-web" ];
-  cargoTestFlags = [ "-p" "ekapkgs-update-web" ];
+  cargoBuildFlags = [
+    "-p"
+    "ekapkgs-update-web"
+  ];
+  cargoTestFlags = [
+    "-p"
+    "ekapkgs-update-web"
+  ];
 
   nativeBuildInputs = [
     perl

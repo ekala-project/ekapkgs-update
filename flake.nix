@@ -29,7 +29,11 @@
         ];
       };
 
-      packages.default = legacyPackages.ekapkgs-update;
+      packages = {
+        default = legacyPackages.ekapkgs-update;
+        ekapkgs-update = legacyPackages.ekapkgs-update;
+        ekapkgs-update-web = legacyPackages.ekapkgs-update-web;
+      };
       devShells.default = legacyPackages.dev-shell;
       formatter =
         let
