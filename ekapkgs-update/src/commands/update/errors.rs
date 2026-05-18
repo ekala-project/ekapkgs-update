@@ -303,6 +303,7 @@ impl std::error::Error for UpdateError {}
 /// Convert anyhow errors to UpdateError when phase context is available
 impl UpdateError {
     /// Wrap a generic error with phase context
+    #[allow(dead_code)]
     pub fn from_anyhow(phase: UpdatePhase, error: anyhow::Error) -> Self {
         UpdateError::InfrastructureError {
             phase,

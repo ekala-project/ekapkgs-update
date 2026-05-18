@@ -40,6 +40,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+#[allow(unused_imports)] // Used by ekapkgs-update-web
 pub use sessions::{PhaseRecord, SessionStatus, UpdateSession};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
