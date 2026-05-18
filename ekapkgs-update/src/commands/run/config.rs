@@ -205,14 +205,29 @@ impl RunConfig {
         let (checked_count, skipped_count, error_count) = checker_result?;
         let (updated_count, failed_count) = updater_result?;
 
+        // Calculate total attempted updates
+        let packages_attempted = updated_count + failed_count;
+
         // Update session status based on results
         let session_status = if failed_count > 0 {
             crate::database::SessionStatus::Failed
         } else {
             crate::database::SessionStatus::Completed
         };
-        if let Err(e) = db.update_session_status(&session_id, session_status).await {
-            tracing::warn!("Failed to update session status: {}", e);
+
+        // Finalize session with complete statistics
+        if let Err(e) = db
+            .finalize_session(
+                &session_id,
+                session_status,
+                packages_attempted,
+                updated_count,
+                failed_count,
+                skipped_count,
+            )
+            .await
+        {
+            tracing::warn!("Failed to finalize session: {}", e);
         }
 
         // Display summary
