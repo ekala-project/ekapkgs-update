@@ -230,21 +230,52 @@ impl RunConfig {
             tracing::warn!("Failed to finalize session: {}", e);
         }
 
-        // Display summary
+        // Display comprehensive summary
+        info!("============================================================");
         info!("All services complete!");
-        if error_count > 0 {
-            info!("Evaluation errors: {}", error_count);
-        }
+        info!("============================================================");
+        info!("");
         if dry_run {
-            info!("Update summary (dry-run scan - no changes made):");
+            info!("Update Summary (DRY-RUN - no changes made):");
         } else {
-            info!("Update summary:");
+            info!("Update Summary:");
         }
-        info!("  Checked: {}", checked_count);
-        info!("  Skipped (backoff): {}", skipped_count);
-        info!("  Updated: {}", updated_count);
-        info!("  Failed: {}", failed_count);
-        info!("  Session: {}", session_id);
+        info!("");
+        info!("  Packages evaluated:      {:>6}", checked_count);
+        if error_count > 0 {
+            info!("  Evaluation errors:       {:>6}", error_count);
+        }
+        info!("");
+        info!("  Breakdown:");
+        info!("    Skipped (backoff):     {:>6}", skipped_count);
+        info!("    Attempted:             {:>6}", packages_attempted);
+        info!("    Succeeded:             {:>6}", updated_count);
+        info!("    Failed:                {:>6}", failed_count);
+        info!("");
+
+        if packages_attempted > 0 {
+            let success_rate = (updated_count as f64 / packages_attempted as f64) * 100.0;
+            info!("  Success rate:            {:>5.1}% ({}/{})",
+                  success_rate, updated_count, packages_attempted);
+            info!("");
+        }
+
+        info!("  Session ID: {}", session_id);
+        info!("  Database: {}", expanded_db_path);
+        info!("============================================================");
+
+        // Additional warnings/notices
+        if skipped_count > packages_attempted * 10 {
+            info!("");
+            info!("NOTICE: {} packages were skipped due to backoff cooldown", skipped_count);
+            info!("These packages have recently failed and are in cooldown period");
+        }
+
+        if failed_count > 0 && preserve_failures {
+            info!("");
+            info!("NOTICE: {} updates failed - artifacts preserved for inspection", failed_count);
+            info!("Location: ~/.cache/ekapkgs-update/failed/{}/", session_id);
+        }
 
         Ok(())
     }
