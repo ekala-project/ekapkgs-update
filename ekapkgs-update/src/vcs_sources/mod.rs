@@ -781,7 +781,18 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
         Version::parse(&normalized_new),
     ) {
         // First check if new version is actually newer
-        if new_ver <= curr_ver {
+        if new_ver < curr_ver {
+            warn!(
+                "Rejecting downgrade: {} -> {} (current version is newer)",
+                current, new
+            );
+            return false;
+        }
+        if new_ver == curr_ver {
+            debug!(
+                "Rejecting same version: {} -> {} (no change)",
+                current, new
+            );
             return false;
         }
 
@@ -805,7 +816,24 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
         );
 
         match strategy {
-            SemverStrategy::Latest | SemverStrategy::Major => clean_new > clean_current,
+            SemverStrategy::Latest | SemverStrategy::Major => {
+                if clean_new <= clean_current {
+                    if clean_new < clean_current {
+                        warn!(
+                            "Rejecting downgrade (string comparison): {} -> {}",
+                            current, new
+                        );
+                    } else {
+                        debug!(
+                            "Rejecting same version (string comparison): {} -> {}",
+                            current, new
+                        );
+                    }
+                    false
+                } else {
+                    true
+                }
+            },
             SemverStrategy::Minor | SemverStrategy::Patch => {
                 warn!(
                     "Version '{}' is not valid semver, cannot apply {} strategy. Skipping update.",
