@@ -127,7 +127,45 @@ impl Database {
         Ok(())
     }
 
+    /// Finalize session with complete statistics
+    ///
+    /// Updates status, completion time, and all counter fields in a single transaction.
+    pub async fn finalize_session(
+        &self,
+        session_id: &str,
+        status: SessionStatus,
+        packages_attempted: usize,
+        packages_succeeded: usize,
+        packages_failed: usize,
+        packages_skipped: usize,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "UPDATE update_sessions
+             SET status = ?,
+                 completed_at = ?,
+                 packages_attempted = ?,
+                 packages_succeeded = ?,
+                 packages_failed = ?,
+                 packages_skipped = ?
+             WHERE id = ?",
+        )
+        .bind(status.as_str())
+        .bind(&now)
+        .bind(packages_attempted as i64)
+        .bind(packages_succeeded as i64)
+        .bind(packages_failed as i64)
+        .bind(packages_skipped as i64)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Increment session counters
+    #[allow(dead_code)]
     pub async fn increment_session_counter(
         &self,
         session_id: &str,
@@ -162,6 +200,7 @@ impl Database {
     /// Record the start of a phase
     ///
     /// Returns the phase ID for later updates.
+    #[allow(dead_code)]
     pub async fn record_phase_start(
         &self,
         session_id: &str,
@@ -186,6 +225,7 @@ impl Database {
     }
 
     /// Record successful completion of a phase
+    #[allow(dead_code)]
     pub async fn record_phase_success(
         &self,
         phase_id: i64,
@@ -211,6 +251,7 @@ impl Database {
     }
 
     /// Record failure of a phase with error details
+    #[allow(dead_code)]
     pub async fn record_phase_failure(
         &self,
         phase_id: i64,
@@ -286,6 +327,7 @@ impl Database {
     }
 
     /// Get session by ID
+    #[allow(dead_code)]
     pub async fn get_session(&self, session_id: &str) -> anyhow::Result<Option<UpdateSession>> {
         let row = sqlx::query(
             "SELECT id, started_at, completed_at, status, packages_attempted,
@@ -318,6 +360,7 @@ impl Database {
     }
 
     /// Get sessions by status
+    #[allow(dead_code)]
     pub async fn get_sessions_by_status(
         &self,
         status: SessionStatus,

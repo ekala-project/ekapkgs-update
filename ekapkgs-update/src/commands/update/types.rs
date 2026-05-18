@@ -40,6 +40,7 @@ pub enum UpdatePhase {
 
 impl UpdatePhase {
     /// Human-readable description for logs
+    #[allow(dead_code)]
     pub fn description(&self) -> &'static str {
         match self {
             Self::MetadataExtraction => "Extracting package metadata",
@@ -59,6 +60,7 @@ impl UpdatePhase {
     /// Some phases (like building or testing) can be retried without
     /// re-running earlier phases, while others (like metadata extraction)
     /// need the full workflow.
+    #[allow(dead_code)]
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
@@ -82,6 +84,7 @@ impl UpdatePhase {
     }
 
     /// Parse phase name from string (for database queries)
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "metadata_extraction" => Some(Self::MetadataExtraction),

@@ -35,6 +35,7 @@ use crate::database::Database;
 ///     }
 /// ).await?;
 /// ```
+#[allow(dead_code)]
 pub async fn execute_phase<F, T>(
     session_id: &str,
     phase: UpdatePhase,
@@ -106,6 +107,7 @@ where
 ///
 /// This is similar to `execute_phase` but also accepts an optional artifacts path
 /// to record when failures are preserved for later inspection.
+#[allow(dead_code)]
 pub async fn execute_phase_with_preservation<F, T>(
     session_id: &str,
     phase: UpdatePhase,
