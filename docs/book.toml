@@ -13,7 +13,6 @@ create-missing = true
 default-theme = "light"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/ekapkgs/ekapkgs-update"
-git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/ekapkgs/ekapkgs-update/edit/master/docs/{path}"
 
 [output.html.search]
