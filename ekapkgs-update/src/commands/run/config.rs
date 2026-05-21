@@ -255,8 +255,10 @@ impl RunConfig {
 
         if packages_attempted > 0 {
             let success_rate = (updated_count as f64 / packages_attempted as f64) * 100.0;
-            info!("  Success rate:            {:>5.1}% ({}/{})",
-                  success_rate, updated_count, packages_attempted);
+            info!(
+                "  Success rate:            {:>5.1}% ({}/{})",
+                success_rate, updated_count, packages_attempted
+            );
             info!("");
         }
 
@@ -267,13 +269,19 @@ impl RunConfig {
         // Additional warnings/notices
         if skipped_count > packages_attempted * 10 {
             info!("");
-            info!("NOTICE: {} packages were skipped due to backoff cooldown", skipped_count);
+            info!(
+                "NOTICE: {} packages were skipped due to backoff cooldown",
+                skipped_count
+            );
             info!("These packages have recently failed and are in cooldown period");
         }
 
         if failed_count > 0 && preserve_failures {
             info!("");
-            info!("NOTICE: {} updates failed - artifacts preserved for inspection", failed_count);
+            info!(
+                "NOTICE: {} updates failed - artifacts preserved for inspection",
+                failed_count
+            );
             info!("Location: ~/.cache/ekapkgs-update/failed/{}/", session_id);
         }
 

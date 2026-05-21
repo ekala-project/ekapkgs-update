@@ -789,10 +789,7 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
             return false;
         }
         if new_ver == curr_ver {
-            debug!(
-                "Rejecting same version: {} -> {} (no change)",
-                current, new
-            );
+            debug!("Rejecting same version: {} -> {} (no change)", current, new);
             return false;
         }
 
