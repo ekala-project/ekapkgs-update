@@ -6,6 +6,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::info;
 
+use crate::cli::CommitStrategy;
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::database::Database;
 use crate::git::PrConfig;
@@ -45,6 +46,9 @@ pub struct RunConfig {
 
     /// Preserve failed worktrees and artifacts for later inspection
     pub preserve_failures: bool,
+
+    /// Strategy for committing updates
+    pub commit_strategy: CommitStrategy,
 }
 
 impl RunConfig {
@@ -72,6 +76,7 @@ impl RunConfig {
         cachix_cache: Option<String>,
         interactive: bool,
         preserve_failures: bool,
+        commit_strategy: CommitStrategy,
     ) -> Self {
         // Resolve cache precedence: CLI flag → env var → None. The CLI value
         // is moved when present; any whitespace-only value is treated as
@@ -100,6 +105,7 @@ impl RunConfig {
             },
             interactive,
             preserve_failures,
+            commit_strategy,
         }
     }
 
@@ -120,6 +126,7 @@ impl RunConfig {
             pr_enhancements,
             interactive,
             preserve_failures,
+            commit_strategy,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -137,7 +144,8 @@ impl RunConfig {
 
         // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
         // In interactive mode, force single-threaded execution
-        let concurrency = if interactive {
+        let is_branch_mode = commit_strategy == CommitStrategy::Branch;
+        let concurrency = if interactive || is_branch_mode {
             1
         } else {
             concurrent_updates.unwrap_or_else(|| {
@@ -145,7 +153,9 @@ impl RunConfig {
                 std::cmp::max(1, cpus / 4)
             })
         };
-        if interactive {
+        if is_branch_mode {
+            info!("Running in branch mode (single-threaded, direct commits)");
+        } else if interactive {
             info!("Running in interactive mode (single-threaded)");
         } else {
             info!("Running with concurrency level: {}", concurrency);
@@ -194,6 +204,7 @@ impl RunConfig {
             pr_enhancements,
             interactive,
             preserve_failures,
+            commit_strategy,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -321,6 +332,9 @@ pub struct UpdaterServiceConfig {
 
     /// Preserve failed worktrees and artifacts for later inspection
     pub preserve_failures: bool,
+
+    /// Strategy for committing updates
+    pub commit_strategy: CommitStrategy,
 }
 
 impl UpdaterServiceConfig {
@@ -344,6 +358,7 @@ impl UpdaterServiceConfig {
             pr_enhancements,
             interactive,
             preserve_failures,
+            commit_strategy,
         } = self;
 
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
@@ -393,21 +408,33 @@ impl UpdaterServiceConfig {
                             let attr_path_clone = req.attr_path.clone();
 
                             // Spawn the update task
+                            let is_branch_mode = commit_strategy == CommitStrategy::Branch;
                             join_set.spawn(async move {
-                                let result = super::updater::perform_update(
-                                    &db_clone,
-                                    &session_id_clone,
-                                    &eval_entry_point_clone, // Arc<str> derefs to &str
-                                    &req,
-                                    pr_config_clone.as_ref(),
-                                    &fork_clone, // Arc<str> derefs to &str
-                                    run_passthru_tests,
-                                    dry_run,
-                                    &pr_enhancements_clone,
-                                    interactive,
-                                    preserve_failures,
-                                )
-                                .await;
+                                let result = if is_branch_mode {
+                                    super::updater::perform_direct_update(
+                                        &db_clone,
+                                        &session_id_clone,
+                                        &eval_entry_point_clone,
+                                        &req,
+                                        run_passthru_tests,
+                                    )
+                                    .await
+                                } else {
+                                    super::updater::perform_update(
+                                        &db_clone,
+                                        &session_id_clone,
+                                        &eval_entry_point_clone, // Arc<str> derefs to &str
+                                        &req,
+                                        pr_config_clone.as_ref(),
+                                        &fork_clone, // Arc<str> derefs to &str
+                                        run_passthru_tests,
+                                        dry_run,
+                                        &pr_enhancements_clone,
+                                        interactive,
+                                        preserve_failures,
+                                    )
+                                    .await
+                                };
                                 (result, attr_path_clone)
                             });
                         },

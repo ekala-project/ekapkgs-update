@@ -1,8 +1,5 @@
-use std::process::Stdio;
-
 use anyhow::Context;
 use regex::Regex;
-use tokio::process::Command;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
@@ -181,15 +178,9 @@ pub async fn update_single_variant(
 
     // Build to verify
     info!("Building variant '{}' to verify update...", variant_name);
-    let build_result = Command::new("nix-build")
-        .arg("-A")
-        .arg(&variant_attr_path)
-        .arg(file)
-        .output()
-        .await?;
+    let (success, _stdout, stderr) = super::build_nix_expr(file, &variant_attr_path, None).await?;
 
-    if !build_result.status.success() {
-        let stderr = String::from_utf8_lossy(&build_result.stderr);
+    if !success {
         anyhow::bail!("Build failed for variant '{variant_name}': {stderr}");
     }
 
@@ -253,25 +244,18 @@ async fn discover_hash_for_variant(
     let variant_attr_path = format!("{attr_path}.variants.{variant_name}");
 
     // Try to build - it will fail but give us the correct hash
-    let build_result = Command::new("nix-build")
-        .arg("-A")
-        .arg(&variant_attr_path)
-        .arg(file)
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let (success, _stdout, stderr) =
+        super::build_nix_expr(file, &variant_attr_path, Some("src")).await?;
 
     // Restore original content
     tokio::fs::write(&variants_file_path, &backup_content)
         .await
         .with_context(|| format!("restore variants file {variants_file_path}"))?;
 
-    if build_result.status.success() {
+    if success {
         // Shouldn't happen with a wrong hash, but handle it
         return Ok(None);
     }
-
-    let stderr = String::from_utf8_lossy(&build_result.stderr);
 
     // Extract hash from error message
     let hash_pattern = Regex::new(r"got:\s+(sha256-[A-Za-z0-9+/=]+)")?;

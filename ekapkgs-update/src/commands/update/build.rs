@@ -1,9 +1,24 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use regex::Regex;
 use tokio::process::Command;
 use tracing::debug;
+
+/// Extra arguments appended to every `nix-build` invocation.
+/// Set once at process startup (e.g., `--builders 'external'`).
+static EXTRA_NIX_BUILD_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Initialize extra nix-build arguments. Must be called before any builds.
+/// Calling more than once is a no-op (OnceLock semantics).
+pub fn set_extra_nix_build_args(args: Vec<String>) {
+    let _ = EXTRA_NIX_BUILD_ARGS.set(args);
+}
+
+fn get_extra_nix_build_args() -> &'static [String] {
+    EXTRA_NIX_BUILD_ARGS.get().map_or(&[], |v| v.as_slice())
+}
 
 /// Build Nix expression and return stdout/stderr
 ///
@@ -21,12 +36,12 @@ pub async fn build_nix_expr(
 
     debug!("Building {}", full_attr);
 
-    let output = Command::new("nix-build")
-        .arg(eval_entry_point)
-        .arg("-A")
-        .arg(&full_attr)
-        .output()
-        .await?;
+    let mut cmd = Command::new("nix-build");
+    cmd.arg(eval_entry_point).arg("-A").arg(&full_attr);
+    for arg in get_extra_nix_build_args() {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -123,14 +138,16 @@ pub async fn build_and_get_outputs(
     debug!("Building {} and extracting outputs", full_attr);
 
     // Build with nix-build, creating result symlinks
-    let output = Command::new("nix-build")
-        .arg(eval_entry_point)
+    let mut cmd = Command::new("nix-build");
+    cmd.arg(eval_entry_point)
         .arg("-A")
         .arg(&full_attr)
         .arg("-o")
-        .arg("result")
-        .output()
-        .await?;
+        .arg("result");
+    for arg in get_extra_nix_build_args() {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

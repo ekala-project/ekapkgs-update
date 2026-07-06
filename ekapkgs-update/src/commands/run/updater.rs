@@ -339,6 +339,129 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
     }
 }
 
+/// Perform a package update directly in the working tree (no worktree isolation).
+/// Used in commit mode where changes are committed directly to the repo.
+/// On failure, reverts dirty changes with `git checkout -- .`.
+pub(super) async fn perform_direct_update(
+    db: &Database,
+    _session_id: &str,
+    eval_entry_point: &str,
+    req: &UpdateRequest,
+    run_passthru_tests: bool,
+) -> anyhow::Result<UpdateResult> {
+    let attr_path = &req.attr_path;
+    let current_version = &req.current_version;
+    let new_version = &req.new_version;
+
+    // Get file location from meta.position
+    let file_location = match get_file_location(eval_entry_point, attr_path).await {
+        Ok(loc) => loc,
+        Err(e) => {
+            warn!("{}: Failed to get file location: {}", attr_path, e);
+            return Ok(UpdateResult::Skipped("Could not locate file".to_owned()));
+        },
+    };
+
+    debug!("{}: File location: {}", attr_path, file_location);
+
+    // Perform the update directly in the working tree
+    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
+    let update_config = crate::commands::update::UpdateConfig {
+        commit: true,     // Commit directly after successful update
+        create_pr: false, // No PRs in commit mode
+        upstream: None,
+        fork: "origin".to_owned(),
+        run_passthru_tests,
+        src_only: false,
+        format: false,
+        pr_enhancements: crate::commands::pr_enhancements::PrEnhancementsConfig::default(),
+    };
+
+    let update_result = update_config
+        .update_from_file_path(
+            eval_entry_point.to_owned(),
+            attr_path.clone(),
+            file_location,
+            version_config,
+            true, // Fail on test errors in commit mode
+        )
+        .await;
+
+    match update_result {
+        Ok(removed_patches) => {
+            info!("{}: Successfully updated to {}", attr_path, new_version);
+
+            if !removed_patches.is_empty() {
+                info!(
+                    "{}: Removed {} obsolete patch(es): {}",
+                    attr_path,
+                    removed_patches.len(),
+                    removed_patches.join(", ")
+                );
+            }
+
+            // Record successful update in database
+            if let Err(e) = db
+                .record_successful_update_with_rebuild_count(
+                    attr_path,
+                    current_version,
+                    new_version,
+                    None,
+                )
+                .await
+            {
+                warn!("{}: Failed to record successful update: {}", attr_path, e);
+            }
+
+            Ok(UpdateResult::Updated {
+                old_version: current_version.clone(),
+                new_version: new_version.clone(),
+            })
+        },
+        Err(e) => {
+            let error_message = format!("{e:#}");
+            warn!("{}: Update failed: {}", attr_path, error_message);
+
+            // Revert any dirty changes to restore clean working tree
+            info!("{}: Reverting changes...", attr_path);
+            let revert_output = tokio::process::Command::new("git")
+                .args(["checkout", "--", "."])
+                .output()
+                .await;
+
+            match revert_output {
+                Ok(output) if output.status.success() => {
+                    debug!("{}: Successfully reverted changes", attr_path);
+                },
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("{}: Failed to revert changes: {}", attr_path, stderr);
+                },
+                Err(revert_err) => {
+                    warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
+                },
+            }
+
+            // Record failure in database
+            if let Err(db_err) = db
+                .record_failed_update(
+                    &req.drv.drv_path,
+                    attr_path,
+                    &error_message,
+                    Some(current_version),
+                    Some(new_version),
+                )
+                .await
+            {
+                warn!("{}: Failed to record update failure: {}", attr_path, db_err);
+            }
+
+            // Return as skipped so it doesn't count as a successful update
+            Ok(UpdateResult::Skipped(format!("Update failed: {e}")))
+        },
+    }
+}
+
 /// Get the file location for a package from meta.position
 async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);

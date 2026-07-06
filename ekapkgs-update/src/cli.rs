@@ -31,6 +31,18 @@ pub enum ColorWhen {
     Never,
 }
 
+/// Strategy for committing updates in run mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default, serde::Serialize)]
+#[value(rename_all = "lower")]
+pub enum CommitStrategy {
+    /// Use isolated git worktrees for each update (supports concurrency and PRs).
+    #[default]
+    Worktrees,
+    /// Commit each successful update directly to the current branch
+    /// (single-threaded, no PRs).
+    Branch,
+}
+
 impl From<ColorWhen> for ColorChoice {
     fn from(value: ColorWhen) -> Self {
         match value {
@@ -136,6 +148,15 @@ pub enum Commands {
         /// Preserve failed worktrees and artifacts for later inspection
         #[arg(long)]
         preserve_failures: bool,
+        /// Nix builders to use for builds (passed as --builders to nix-build).
+        /// E.g., 'external' to offload builds to remote builders.
+        #[arg(long)]
+        builders: Option<String>,
+        /// Strategy for committing updates: 'worktrees' (default) uses isolated worktrees
+        /// and optionally creates PRs; 'branch' commits each update directly to the current
+        /// branch (single-threaded, no PRs).
+        #[arg(long, default_value = "worktrees")]
+        commit_strategy: CommitStrategy,
     },
     /// Update a package in a Nix file
     Update {
@@ -206,6 +227,10 @@ pub enum Commands {
         /// Skip directory diff comparison in PR body
         #[arg(long)]
         skip_directory_diff: bool,
+        /// Nix builders to use for builds (passed as --builders to nix-build).
+        /// E.g., 'external' to offload builds to remote builders.
+        #[arg(long)]
+        builders: Option<String>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -384,7 +409,15 @@ impl Commands {
                 cachix_cache,
                 interactive,
                 preserve_failures,
+                builders,
+                commit_strategy,
             } => {
+                if let Some(ref builders_val) = builders {
+                    commands::update::set_extra_nix_build_args(vec![
+                        "--builders".to_owned(),
+                        builders_val.clone(),
+                    ]);
+                }
                 commands::run::RunConfig::from_args(
                     file,
                     database,
@@ -403,6 +436,7 @@ impl Commands {
                     cachix_cache,
                     interactive,
                     preserve_failures,
+                    commit_strategy,
                 )
                 .execute()
                 .await
@@ -429,7 +463,14 @@ impl Commands {
                 override_filename,
                 system,
                 skip_directory_diff,
+                builders,
             } => {
+                if let Some(ref builders_val) = builders {
+                    commands::update::set_extra_nix_build_args(vec![
+                        "--builders".to_owned(),
+                        builders_val.clone(),
+                    ]);
+                }
                 commands::update::UpdateParams::from_args(
                     file,
                     attr_path,
