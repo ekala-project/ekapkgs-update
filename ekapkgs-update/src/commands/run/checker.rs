@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use futures::{StreamExt, pin_mut};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 use super::types::UpdateRequest;
@@ -17,11 +19,29 @@ pub async fn release_checker_service(
     skip_unstable: bool,
     skip_repology: bool,
 ) -> (usize, usize, usize) {
-    let stream = nix::run_eval::run_nix_eval_jobs(file.clone());
+    release_checker_service_with_limits(file, db, tx, skip_unstable, skip_repology, None, None)
+        .await
+}
+
+/// Service that monitors packages for new upstream releases, with optional
+/// concurrency and eval-worker limits.
+pub async fn release_checker_service_with_limits(
+    file: String,
+    db: Database,
+    tx: mpsc::UnboundedSender<UpdateRequest>,
+    skip_unstable: bool,
+    skip_repology: bool,
+    max_checker_concurrency: Option<usize>,
+    max_eval_workers: Option<usize>,
+) -> (usize, usize, usize) {
+    let stream = nix::run_eval::run_nix_eval_jobs_with_workers(file.clone(), max_eval_workers);
     pin_mut!(stream);
 
     // Create Repology client for cross-distribution version checking
     let repology_client = crate::repology::RepologyClient::new();
+
+    // Semaphore to limit concurrent checker tasks (unbounded if not set)
+    let semaphore = max_checker_concurrency.map(|n| Arc::new(Semaphore::new(n)));
 
     let mut error_count = 0;
     let mut skipped_count = 0;
@@ -61,9 +81,17 @@ pub async fn release_checker_service(
                 let file_clone = file.clone();
                 let tx_clone = tx.clone();
                 let repology_client_clone = repology_client.clone();
+                let semaphore_clone = semaphore.clone();
 
                 // Spawn task to check this package
                 tokio::spawn(async move {
+                    // Acquire semaphore permit if concurrency is limited
+                    let _permit = if let Some(ref sem) = semaphore_clone {
+                        Some(sem.acquire().await.expect("semaphore closed"))
+                    } else {
+                        None
+                    };
+
                     if let Err(e) = check_for_update(
                         &db_clone,
                         &file_clone,

@@ -145,8 +145,11 @@ impl RunConfig {
         // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
         // In interactive mode, force single-threaded execution
         let is_branch_mode = commit_strategy == CommitStrategy::Branch;
-        let concurrency = if interactive || is_branch_mode {
+        let concurrency = if interactive {
             1
+        } else if is_branch_mode {
+            // Branch mode defaults to 1 but allows --concurrent-updates override
+            concurrent_updates.unwrap_or(1)
         } else {
             concurrent_updates.unwrap_or_else(|| {
                 let cpus = num_cpus::get();
@@ -154,7 +157,10 @@ impl RunConfig {
             })
         };
         if is_branch_mode {
-            info!("Running in branch mode (single-threaded, direct commits)");
+            info!(
+                "Running in branch mode (concurrency: {}, direct commits)",
+                concurrency
+            );
         } else if interactive {
             info!("Running in interactive mode (single-threaded)");
         } else {
@@ -181,15 +187,31 @@ impl RunConfig {
 
         // Spawn release checker service
         let skip_repology = pr_enhancements.skip_repology;
+        let checker_concurrency = concurrency;
         let checker_handle = tokio::spawn(async move {
-            super::checker::release_checker_service(
-                file_checker,
-                db_checker,
-                tx,
-                skip_unstable,
-                skip_repology,
-            )
-            .await
+            if is_branch_mode {
+                // In branch mode, limit checker concurrency and eval workers
+                // to avoid OOM from unbounded parallel nix-instantiate calls
+                super::checker::release_checker_service_with_limits(
+                    file_checker,
+                    db_checker,
+                    tx,
+                    skip_unstable,
+                    skip_repology,
+                    Some(std::cmp::max(4, checker_concurrency * 2)),
+                    Some(std::cmp::max(1, checker_concurrency)),
+                )
+                .await
+            } else {
+                super::checker::release_checker_service(
+                    file_checker,
+                    db_checker,
+                    tx,
+                    skip_unstable,
+                    skip_repology,
+                )
+                .await
+            }
         });
 
         // Spawn updater service
@@ -361,6 +383,10 @@ impl UpdaterServiceConfig {
             commit_strategy,
         } = self;
 
+        // Mutex to serialize git operations in branch mode (concurrent builds
+        // modify different files, but git add/commit must not race)
+        let git_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
         let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
             JoinSet::new();
         let mut updated_count = 0;
@@ -409,6 +435,7 @@ impl UpdaterServiceConfig {
 
                             // Spawn the update task
                             let is_branch_mode = commit_strategy == CommitStrategy::Branch;
+                            let git_mutex_clone = Arc::clone(&git_mutex);
                             join_set.spawn(async move {
                                 let result = if is_branch_mode {
                                     super::updater::perform_direct_update(
@@ -417,6 +444,7 @@ impl UpdaterServiceConfig {
                                         &eval_entry_point_clone,
                                         &req,
                                         run_passthru_tests,
+                                        git_mutex_clone,
                                     )
                                     .await
                                 } else {

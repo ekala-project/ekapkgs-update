@@ -152,9 +152,13 @@ pub enum Commands {
         /// E.g., 'external' to offload builds to remote builders.
         #[arg(long)]
         builders: Option<String>,
+        /// Maximum number of local nix build jobs (passed as --max-jobs to nix-build).
+        /// Set to 0 to force all builds to run on remote builders.
+        #[arg(long)]
+        max_jobs: Option<usize>,
         /// Strategy for committing updates: 'worktrees' (default) uses isolated worktrees
         /// and optionally creates PRs; 'branch' commits each update directly to the current
-        /// branch (single-threaded, no PRs).
+        /// branch with concurrent builds.
         #[arg(long, default_value = "worktrees")]
         commit_strategy: CommitStrategy,
     },
@@ -231,6 +235,10 @@ pub enum Commands {
         /// E.g., 'external' to offload builds to remote builders.
         #[arg(long)]
         builders: Option<String>,
+        /// Maximum number of local nix build jobs (passed as --max-jobs to nix-build).
+        /// Set to 0 to force all builds to run on remote builders.
+        #[arg(long)]
+        max_jobs: Option<usize>,
     },
     /// Prune maintainers from all .nix files in a directory
     PruneMaintainers {
@@ -283,6 +291,21 @@ pub enum Commands {
         /// Group results by error type
         #[arg(long)]
         group_by_error: bool,
+    },
+    /// Generate a categorized markdown report of failed updates
+    Report {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Filter by package name pattern (SQL LIKE pattern)
+        #[arg(long)]
+        package: Option<String>,
+        /// Filter to failures from the last N days
+        #[arg(long)]
+        since_days: Option<u32>,
+        /// Output file (writes to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
     },
     /// Show status of current/recent update runs
     Status {
@@ -410,13 +433,20 @@ impl Commands {
                 interactive,
                 preserve_failures,
                 builders,
+                max_jobs,
                 commit_strategy,
             } => {
+                let mut extra_args = Vec::new();
                 if let Some(ref builders_val) = builders {
-                    commands::update::set_extra_nix_build_args(vec![
-                        "--builders".to_owned(),
-                        builders_val.clone(),
-                    ]);
+                    extra_args.push("--builders".to_owned());
+                    extra_args.push(builders_val.clone());
+                }
+                if let Some(max_jobs_val) = max_jobs {
+                    extra_args.push("--max-jobs".to_owned());
+                    extra_args.push(max_jobs_val.to_string());
+                }
+                if !extra_args.is_empty() {
+                    commands::update::set_extra_nix_build_args(extra_args);
                 }
                 commands::run::RunConfig::from_args(
                     file,
@@ -464,12 +494,19 @@ impl Commands {
                 system,
                 skip_directory_diff,
                 builders,
+                max_jobs,
             } => {
+                let mut extra_args = Vec::new();
                 if let Some(ref builders_val) = builders {
-                    commands::update::set_extra_nix_build_args(vec![
-                        "--builders".to_owned(),
-                        builders_val.clone(),
-                    ]);
+                    extra_args.push("--builders".to_owned());
+                    extra_args.push(builders_val.clone());
+                }
+                if let Some(max_jobs_val) = max_jobs {
+                    extra_args.push("--max-jobs".to_owned());
+                    extra_args.push(max_jobs_val.to_string());
+                }
+                if !extra_args.is_empty() {
+                    commands::update::set_extra_nix_build_args(extra_args);
                 }
                 commands::update::UpdateParams::from_args(
                     file,
@@ -530,6 +567,12 @@ impl Commands {
                 )
                 .await
             },
+            Commands::Report {
+                database,
+                package,
+                since_days,
+                output,
+            } => commands::report::report(database, package, since_days, output).await,
             Commands::Status { database } => commands::status::status(database).await,
             Commands::Retry {
                 database,

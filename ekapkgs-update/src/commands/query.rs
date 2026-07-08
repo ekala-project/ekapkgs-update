@@ -24,6 +24,7 @@ pub async fn query(
     // Convert since_days to DateTime
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days as i64));
 
+    // Query phase records first
     let results = db
         .query_phases(
             error_type.as_deref(),
@@ -36,20 +37,33 @@ pub async fn query(
         .await
         .context("Failed to query phases")?;
 
-    if results.is_empty() {
-        println!("No matching records found.");
+    if !results.is_empty() {
+        println!("\nFound {} matching phase record(s)\n", results.len());
+
+        if group_by_error {
+            display_grouped_by_error(&results);
+        } else {
+            display_table(&results);
+        }
         return Ok(());
     }
 
-    println!("\nFound {} matching record(s)\n", results.len());
+    // Fall back to update_logs for failures recorded by the run command
+    let is_failed_query = status.as_deref() == Some("failed") || status.is_none();
+    if is_failed_query {
+        let failed_logs = db
+            .query_failed_logs(package_pattern.as_deref(), since, limit)
+            .await
+            .context("Failed to query update logs")?;
 
-    // Group by error type if requested
-    if group_by_error {
-        display_grouped_by_error(&results);
-    } else {
-        display_table(&results);
+        if !failed_logs.is_empty() {
+            println!("\nFound {} failed update(s)\n", failed_logs.len());
+            display_failed_logs(&failed_logs);
+            return Ok(());
+        }
     }
 
+    println!("No matching records found.");
     Ok(())
 }
 
@@ -105,6 +119,46 @@ fn display_table(results: &[PhaseRecord]) {
         println!(
             "\n... and {} more (use --limit to see more)",
             results.len() - 50
+        );
+    }
+}
+
+/// Display failed update logs from the update_logs table
+fn display_failed_logs(logs: &[crate::database::UpdateLog]) {
+    println!(
+        "{:<40} {:<15} {:<15} {:<15} {}",
+        "Package", "Old", "New", "When", "Error"
+    );
+    println!("{}", "-".repeat(120));
+
+    for log in logs.iter().take(50) {
+        let when = format_relative_time(&log.timestamp_as_datetime());
+        let old = log.old_version.as_deref().unwrap_or("?");
+        let new = log.new_version.as_deref().unwrap_or("?");
+        // First line of error, truncated
+        let error_summary = log
+            .error_log
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(50)
+            .collect::<String>();
+
+        println!(
+            "{:<40} {:<15} {:<15} {:<15} {}",
+            truncate(&log.attr_path, 40),
+            truncate(old, 15),
+            truncate(new, 15),
+            when,
+            error_summary
+        );
+    }
+
+    if logs.len() > 50 {
+        println!(
+            "\n... and {} more (use --limit to see more)",
+            logs.len() - 50
         );
     }
 }

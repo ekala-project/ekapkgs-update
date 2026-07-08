@@ -496,6 +496,49 @@ impl Database {
         Ok(logs)
     }
 
+    /// Query failed update logs with optional filtering
+    pub async fn query_failed_logs(
+        &self,
+        package_pattern: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<UpdateLog>> {
+        let mut query = String::from(
+            "SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
+             FROM update_logs
+             WHERE status = 'failed'",
+        );
+
+        if package_pattern.is_some() {
+            query.push_str(" AND attr_path LIKE ?");
+        }
+        if since.is_some() {
+            query.push_str(" AND timestamp >= ?");
+        }
+
+        query.push_str(" ORDER BY timestamp DESC");
+
+        if let Some(lim) = limit {
+            query.push_str(&format!(" LIMIT {lim}"));
+        }
+
+        let mut q = sqlx::query_as::<_, UpdateLog>(&query);
+
+        if let Some(pattern) = package_pattern {
+            q = q.bind(pattern.to_owned());
+        }
+        if let Some(since_dt) = since {
+            q = q.bind(since_dt.to_rfc3339());
+        }
+
+        let logs = q
+            .fetch_all(&self.pool)
+            .await
+            .context("query failed update logs")?;
+
+        Ok(logs)
+    }
+
     /// Get rebuild count for a specific package (most recent update)
     #[allow(dead_code)] // planned API: reporting/stats commands
     pub async fn get_rebuild_count(&self, attr_path: &str) -> Result<Option<i64>> {

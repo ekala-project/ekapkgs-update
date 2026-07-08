@@ -10,7 +10,12 @@ ekapkgs-update query [OPTIONS]
 
 ## Description
 
-Query the update database to find failures, successful updates, and patterns. Results can be filtered by error type, phase, status, package name, and time range.
+Query the update database to find failures and patterns. The command searches two data sources:
+
+- **Phase records** (`update_phases` table) — detailed per-phase tracking from instrumented update runs.
+- **Update logs** (`update_logs` table) — failure records from `run --commit-strategy branch` and other run-mode updates.
+
+When phase records match the query, those are shown. Otherwise, the command falls back to update logs, which is where most `run` command failures are recorded.
 
 ## Options
 
@@ -19,60 +24,13 @@ Query the update database to find failures, successful updates, and patterns. Re
 #### `--database <PATH>` (short: `-d`)
 Path to SQLite database.
 
-**Default:** `~/.cache/ekapkgs-update/db.sqlite3`
+**Default:** `~/.cache/ekapkgs-update/updates.db`
 
 ```bash
-ekapkgs-update query --database /var/lib/ekapkgs-update/db.sqlite3
+ekapkgs-update query --database /var/lib/ekapkgs-update/updates.db
 ```
 
 ### Filtering
-
-#### `--error-type <TYPE>`
-Filter by error type.
-
-```bash
-# Find all hash mismatches
-ekapkgs-update query --error-type "HashMismatch"
-
-# Find build failures
-ekapkgs-update query --error-type "BuildFailure"
-
-# Find network errors
-ekapkgs-update query --error-type "NetworkError"
-```
-
-**Common error types:**
-- `HashMismatch` - Hash verification failed
-- `BuildFailure` - Package build failed
-- `TestFailure` - passthru.tests failed
-- `NetworkError` - Network/API issues
-- `PatchFailure` - Patch application failed
-- `VersionNotFound` - No compatible version found
-- `EvaluationError` - Nix evaluation failed
-
-#### `--phase <PHASE>`
-Filter by update phase.
-
-```bash
-# Find failures during hash update
-ekapkgs-update query --phase "UpdateHash"
-
-# Find failures during build
-ekapkgs-update query --phase "Build"
-
-# Find failures during test
-ekapkgs-update query --phase "Test"
-```
-
-**Update phases:**
-- `Evaluation` - Package evaluation
-- `VersionFetch` - Fetching available versions
-- `UpdateHash` - Updating source hash
-- `UpdateDependencyHashes` - Updating cargo/npm/vendor hashes
-- `Build` - Building package
-- `Test` - Running tests
-- `Commit` - Creating git commit
-- `PR` - Creating pull request
 
 #### `--status <STATUS>`
 Filter by update status.
@@ -83,44 +41,37 @@ Filter by update status.
 # Find all failures
 ekapkgs-update query --status failed
 
-# Find successful updates
-ekapkgs-update query --status success
-
-# Find skipped packages
-ekapkgs-update query --status skipped
+# Find all failures, limited to 20
+ekapkgs-update query --status failed --limit 20
 ```
 
 #### `--package <PATTERN>`
 Filter by package name using SQL LIKE pattern.
 
 ```bash
-# All Python packages
-ekapkgs-update query --package "python%"
+# All Python package failures
+ekapkgs-update query --status failed --package "python%"
 
 # Specific package
-ekapkgs-update query --package "terraform"
+ekapkgs-update query --status failed --package "terraform"
 
-# All packages containing "lib"
-ekapkgs-update query --package "%lib%"
+# All packages containing "rust"
+ekapkgs-update query --status failed --package "%rust%"
 ```
 
 **SQL LIKE patterns:**
-- `%` - Matches any sequence of characters
-- `_` - Matches any single character
-- Case-insensitive by default
+- `%` — Matches any sequence of characters
+- `_` — Matches any single character
 
 #### `--since-days <N>`
 Filter to entries from the last N days.
 
 ```bash
-# Last week
-ekapkgs-update query --since-days 7
-
 # Last 24 hours
-ekapkgs-update query --since-days 1
+ekapkgs-update query --status failed --since-days 1
 
-# Last month
-ekapkgs-update query --since-days 30
+# Last week
+ekapkgs-update query --status failed --since-days 7
 ```
 
 #### `--limit <N>`
@@ -128,255 +79,136 @@ Limit number of results.
 
 ```bash
 # Show only 10 most recent failures
-ekapkgs-update query --limit 10
+ekapkgs-update query --status failed --limit 10
+```
 
-# Show top 50 results
-ekapkgs-update query --limit 50
+#### `--error-type <TYPE>`
+Filter by error type (phase records only).
+
+```bash
+ekapkgs-update query --error-type "BuildFailure"
+```
+
+#### `--phase <PHASE>`
+Filter by update phase (phase records only).
+
+```bash
+ekapkgs-update query --phase "Build"
 ```
 
 ### Grouping
 
 #### `--group-by-error`
-Group results by error type and show counts.
+Group results by error type and show counts (phase records only).
 
 ```bash
 ekapkgs-update query --group-by-error
 ```
 
-**Example output:**
+## Querying Failed Packages
+
+After a `run` completes, use `--status failed` to see which packages failed to build:
+
+```bash
+# List all failures from the most recent run
+ekapkgs-update query --status failed
+
+# List failures for Python packages only
+ekapkgs-update query --status failed --package "python312Packages.%"
+
+# List failures from the last day
+ekapkgs-update query --status failed --since-days 1 --limit 50
 ```
-Error Type Summary:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HashMismatch        : 23 occurrences
-BuildFailure        : 15 occurrences
-TestFailure         : 8 occurrences
-PatchFailure        : 5 occurrences
-NetworkError        : 3 occurrences
-VersionNotFound     : 2 occurrences
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total failures: 56
+
+### Example output
+
+```
+Found 30 failed update(s)
+
+Package                                  Old             New             When            Error
+------------------------------------------------------------------------------------------------------------------------
+shadow                                   4.18.0          4.19.4          13h ago         Package build failed after update with no reversed
+rust-cbindgen                            0.29.2          0.29.4          13h ago         Could not extract correct cargoHash from build err
+python312Packages.cffi                   2.0.0           2.1.0           14h ago         Package build failed after update with no reversed
+python312Packages.wheel                  0.46.1          0.47.0          14h ago         Could not extract correct hash from build error:
+```
+
+Each row shows:
+- **Package** — the attribute path of the failed package
+- **Old / New** — the version transition that was attempted
+- **When** — relative timestamp of the failure
+- **Error** — first line of the error message (truncated)
+
+### Getting full error details
+
+Once you identify a failed package, use `log` or `inspect` to see the full error:
+
+```bash
+# View full failure log for a package
+ekapkgs-update log shadow
+
+# View detailed failure information
+ekapkgs-update inspect shadow
 ```
 
 ## Examples
 
-### Basic Queries
+### After a batch run
 
 ```bash
-# All failures (no filters)
-ekapkgs-update query
+# 1. See what failed
+ekapkgs-update query --status failed --limit 30
 
-# Recent failures (last 7 days)
-ekapkgs-update query --since-days 7
+# 2. Investigate a specific failure
+ekapkgs-update log python312Packages.cffi
 
-# Limited results
-ekapkgs-update query --limit 20
+# 3. Retry a failed update manually
+ekapkgs-update update python312Packages.cffi --commit
 ```
 
-### Error Analysis
+### Filter by package ecosystem
 
 ```bash
-# Group failures by error type
-ekapkgs-update query --group-by-error
+# All Python 3.12 failures
+ekapkgs-update query --status failed --package "python312Packages.%"
 
-# Find all hash mismatches
-ekapkgs-update query --error-type "HashMismatch"
+# All AWS SDK failures
+ekapkgs-update query --status failed --package "aws-%"
 
-# Recent hash mismatches
-ekapkgs-update query --error-type "HashMismatch" --since-days 7
+# All Haskell failures
+ekapkgs-update query --status failed --package "haskellPackages.%"
 ```
 
-### Package Searches
+### Time-scoped queries
 
 ```bash
-# All Python package failures
-ekapkgs-update query --package "python%"
+# What failed in the last run (assuming it was today)
+ekapkgs-update query --status failed --since-days 1
 
-# Specific package history
-ekapkgs-update query --package "terraform"
-
-# All Haskell packages
-ekapkgs-update query --package "haskellPackages%"
-```
-
-### Phase Analysis
-
-```bash
-# Failures during build phase
-ekapkgs-update query --phase "Build"
-
-# Hash update failures
-ekapkgs-update query --phase "UpdateHash"
-
-# Test failures
-ekapkgs-update query --phase "Test"
-```
-
-### Combined Filters
-
-```bash
-# Recent Python build failures
-ekapkgs-update query \
-  --package "python%" \
-  --phase "Build" \
-  --since-days 7
-
-# Recent hash mismatches, top 10
-ekapkgs-update query \
-  --error-type "HashMismatch" \
-  --since-days 7 \
-  --limit 10
-
-# All test failures for a specific package
-ekapkgs-update query \
-  --package "gcc" \
-  --phase "Test" \
-  --status "failed"
-```
-
-### Status Queries
-
-```bash
-# All successful updates from last 24 hours
-ekapkgs-update query --status success --since-days 1
-
-# Find what's currently running
-ekapkgs-update query --status running
-
-# Find skipped packages
-ekapkgs-update query --status skipped --group-by-error
-```
-
-### Debugging Workflows
-
-```bash
-# 1. Get overview
-ekapkgs-update query --group-by-error --since-days 7
-
-# 2. Investigate specific error type
-ekapkgs-update query --error-type "HashMismatch" --limit 10
-
-# 3. Check specific package
-ekapkgs-update query --package "mypackage"
-
-# 4. Get detailed info
-ekapkgs-update inspect mypackage
-```
-
-## Output Format
-
-### Standard Output
-
-```
-Update Failures:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Package: python312Packages.requests
-Status: failed
-Phase: Build
-Error: BuildFailure
-Updated: 2024-05-19 10:30:15
-Message: builder for '/nix/store/...-python3.12-requests-2.32.0.drv' failed with exit code 1
-
-Package: terraform
-Status: failed
-Phase: UpdateHash
-Error: HashMismatch
-Updated: 2024-05-19 09:15:42
-Message: hash mismatch in fixed-output derivation
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total results: 2
-```
-
-### Grouped Output
-
-```
-Error Type Summary:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-HashMismatch (15):
-  - python312Packages.requests (2024-05-19 10:30:15)
-  - nodejs (2024-05-19 09:45:22)
-  - terraform (2024-05-19 09:15:42)
-  ... and 12 more
-
-BuildFailure (8):
-  - gcc (2024-05-19 11:00:00)
-  - rust (2024-05-19 10:45:30)
-  - llvm (2024-05-19 10:20:15)
-  ... and 5 more
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total failures: 23
-```
-
-## Common Patterns
-
-### Weekly Review
-
-```bash
-# Overview of last week
-ekapkgs-update query --since-days 7 --group-by-error
-
-# Most problematic packages
-ekapkgs-update query --since-days 7 --limit 20
-```
-
-### CI/CD Monitoring
-
-```bash
-# Check if any failures in last run
-if ekapkgs-update query --since-days 1 --status failed | grep -q "Total results: 0"; then
-  echo "All updates succeeded"
-else
-  echo "Some updates failed, checking details..."
-  ekapkgs-update query --since-days 1 --status failed --group-by-error
-fi
-```
-
-### Debugging Specific Issues
-
-```bash
-# Find all instances of hash mismatch
-ekapkgs-update query --error-type "HashMismatch"
-
-# Find which packages consistently fail
-ekapkgs-update query --status failed --limit 100 | grep "Package:" | sort | uniq -c | sort -rn
-```
-
-### Package Maintenance
-
-```bash
-# Check update history for a package before making changes
-ekapkgs-update query --package "mypackage"
-
-# See if test failures are common
-ekapkgs-update query --phase "Test" --since-days 30
+# What failed this week
+ekapkgs-update query --status failed --since-days 7
 ```
 
 ## Integration with Other Commands
 
-### Query -> Inspect -> Retry
+### Query -> Log -> Manual Fix
 
 ```bash
 # 1. Find recent failures
-ekapkgs-update query --since-days 1 --status failed
+ekapkgs-update query --status failed --since-days 1
 
-# 2. Inspect specific failure
-ekapkgs-update inspect python312Packages.requests
+# 2. View the full error for a package
+ekapkgs-update log shadow
 
-# 3. View preserved worktree
-ekapkgs-update worktrees show python312Packages.requests
-
-# 4. Retry after fixing
-ekapkgs-update retry python312Packages.requests
+# 3. Fix the package manually, then retry
+ekapkgs-update update shadow --commit
 ```
 
 ### Query -> Export -> LLM
 
 ```bash
 # 1. Find failures to analyze
-ekapkgs-update query --phase "Build" --limit 5
+ekapkgs-update query --status failed --limit 5
 
 # 2. Export for AI analysis
 ekapkgs-update export python312Packages.requests --format markdown
@@ -385,42 +217,15 @@ ekapkgs-update export python312Packages.requests --format markdown
 ekapkgs-update apply python312Packages.requests --patch fix.patch --resume
 ```
 
-## Database Schema
-
-The query command searches these database tables:
-
-- `update_attempts` - Individual update attempts
-- `update_sessions` - Batch update runs
-- `error_types` - Error classifications
-- `packages` - Package metadata
-
-For schema details, see [Database Schema](../advanced/database.md).
-
-## Performance
-
-For large databases:
-
-```bash
-# Use limit to improve query speed
-ekapkgs-update query --limit 100
-
-# Filter by time to reduce dataset
-ekapkgs-update query --since-days 7
-
-# Use specific filters instead of scanning all records
-ekapkgs-update query --package "python%" --since-days 7
-```
-
 ## Exit Codes
 
-- `0` - Query executed successfully (results may be empty)
-- `1` - Database error or query failure
-- `2` - Invalid arguments
+- `0` — Query executed successfully (results may be empty)
+- `1` — Database error or query failure
+- `2` — Invalid arguments
 
 ## See Also
 
-- [inspect](./inspect.md) - View detailed failure information
-- [log](./inspect.md) - Show failure logs
-- [status](./status.md) - View update session status
-- [retry](./retry.md) - Retry failed updates
+- [log / inspect](./inspect.md) — View detailed failure information
+- [status](./status.md) — View update session status
+- [retry](./retry.md) — Retry failed updates
 - [Debugging Use Case](../use-cases/debugging.md)

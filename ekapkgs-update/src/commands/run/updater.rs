@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::preservation::preserve_failure;
@@ -348,6 +350,7 @@ pub(super) async fn perform_direct_update(
     eval_entry_point: &str,
     req: &UpdateRequest,
     run_passthru_tests: bool,
+    git_mutex: Arc<Mutex<()>>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -364,11 +367,11 @@ pub(super) async fn perform_direct_update(
 
     debug!("{}: File location: {}", attr_path, file_location);
 
-    // Perform the update directly in the working tree
+    // Perform the update directly in the working tree (commit handled separately under mutex)
     let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
     let update_config = crate::commands::update::UpdateConfig {
-        commit: true,     // Commit directly after successful update
-        create_pr: false, // No PRs in commit mode
+        commit: false,
+        create_pr: false,
         upstream: None,
         fork: "origin".to_owned(),
         run_passthru_tests,
@@ -381,11 +384,17 @@ pub(super) async fn perform_direct_update(
         .update_from_file_path(
             eval_entry_point.to_owned(),
             attr_path.clone(),
-            file_location,
+            file_location.clone(),
             version_config,
             true, // Fail on test errors in commit mode
         )
         .await;
+
+    // Determine the package directory for git operations
+    let pkg_dir = std::path::Path::new(&file_location)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_location.clone());
 
     match update_result {
         Ok(removed_patches) => {
@@ -398,6 +407,45 @@ pub(super) async fn perform_direct_update(
                     removed_patches.len(),
                     removed_patches.join(", ")
                 );
+            }
+
+            // Serialize git operations under the mutex to prevent concurrent
+            // commits from staging each other's changes
+            {
+                let _lock = git_mutex.lock().await;
+
+                let add_output = tokio::process::Command::new("git")
+                    .args(["add", &pkg_dir])
+                    .output()
+                    .await;
+
+                match &add_output {
+                    Ok(output) if !output.status.success() => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("{}: git add failed: {}", attr_path, stderr);
+                    },
+                    Err(e) => warn!("{}: Failed to stage changes: {}", attr_path, e),
+                    _ => {},
+                }
+
+                let commit_msg = format!("{attr_path}: {current_version} -> {new_version}");
+                let commit_output = tokio::process::Command::new("git")
+                    .args(["commit", "-m", &commit_msg])
+                    .output()
+                    .await;
+
+                match commit_output {
+                    Ok(output) if output.status.success() => {
+                        info!("{}: Committed: {}", attr_path, commit_msg);
+                    },
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("{}: git commit failed: {}", attr_path, stderr);
+                    },
+                    Err(e) => {
+                        warn!("{}: Failed to run git commit: {}", attr_path, e);
+                    },
+                }
             }
 
             // Record successful update in database
@@ -422,24 +470,27 @@ pub(super) async fn perform_direct_update(
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
 
-            // Revert any dirty changes to restore clean working tree
-            info!("{}: Reverting changes...", attr_path);
-            let revert_output = tokio::process::Command::new("git")
-                .args(["checkout", "--", "."])
-                .output()
-                .await;
+            // Revert only this package's files under the mutex
+            {
+                let _lock = git_mutex.lock().await;
+                info!("{}: Reverting {}...", attr_path, pkg_dir);
+                let revert_output = tokio::process::Command::new("git")
+                    .args(["checkout", "--", &pkg_dir])
+                    .output()
+                    .await;
 
-            match revert_output {
-                Ok(output) if output.status.success() => {
-                    debug!("{}: Successfully reverted changes", attr_path);
-                },
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!("{}: Failed to revert changes: {}", attr_path, stderr);
-                },
-                Err(revert_err) => {
-                    warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
-                },
+                match revert_output {
+                    Ok(output) if output.status.success() => {
+                        debug!("{}: Successfully reverted changes", attr_path);
+                    },
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("{}: Failed to revert changes: {}", attr_path, stderr);
+                    },
+                    Err(revert_err) => {
+                        warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
+                    },
+                }
             }
 
             // Record failure in database

@@ -19,6 +19,13 @@ async fn get_stderr_log_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
+    run_nix_eval_jobs_with_workers(file_path, None)
+}
+
+pub fn run_nix_eval_jobs_with_workers(
+    file_path: String,
+    max_workers: Option<usize>,
+) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
     async_stream::stream! {
         // Set up stderr logging to XDG cache directory
         let log_path = match get_stderr_log_path().await {
@@ -43,12 +50,18 @@ pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result
 
         debug!("nix-eval-jobs stderr logging to: {:?}", log_path);
 
-        let mut cmd = match Command::new("nix-eval-jobs")
+        let mut nix_eval_cmd = Command::new("nix-eval-jobs");
+        nix_eval_cmd
             .arg("--show-input-drvs")
             .arg(&file_path)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::from(stderr_file))
-            .spawn()
+            .stderr(std::process::Stdio::from(stderr_file));
+
+        if let Some(workers) = max_workers {
+            nix_eval_cmd.arg("--workers").arg(workers.to_string());
+        }
+
+        let mut cmd = match nix_eval_cmd.spawn()
         {
             Ok(cmd) => cmd,
             Err(e) => {

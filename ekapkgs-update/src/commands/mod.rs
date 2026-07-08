@@ -6,6 +6,7 @@ pub mod migrate;
 pub mod pr_enhancements;
 pub mod prune_maintainers;
 pub mod query;
+pub mod report;
 pub mod retry;
 pub mod run;
 pub mod status;

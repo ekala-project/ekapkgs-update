@@ -14,6 +14,7 @@
   - [run - Automated Updates](./cli/run.md)
   - [update - Single Package](./cli/update.md)
   - [query - Search Failures](./cli/query.md)
+  - [report - Failure Reports](./cli/report.md)
   - [status - View Sessions](./cli/status.md)
   - [inspect - Failure Details](./cli/inspect.md)
   - [retry - Retry Failed Updates](./cli/retry.md)
