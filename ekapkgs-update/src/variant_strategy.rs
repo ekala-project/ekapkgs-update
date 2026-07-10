@@ -56,6 +56,55 @@ pub fn infer_strategy_from_variant(variant_name: &str) -> Option<SemverStrategy>
     }
 }
 
+/// Result of inferring a strategy from an attr_path's version suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrPathStrategy {
+    /// Use this semver strategy for updates
+    Strategy(SemverStrategy),
+    /// The package appears pinned to a specific version — skip updates
+    Pinned,
+}
+
+/// Infer semver strategy from a package's attr_path by examining trailing
+/// version-like suffixes.
+///
+/// For example, `flex_2_5_39` has suffix `_2_5_39` which parses as 3 components
+/// (pinned). `libffi_3_3` has suffix `_3_3` which parses as 2 components (Patch).
+/// `elixir_1_17` has suffix `_1_17` → 2 components → Patch strategy.
+///
+/// Returns `None` if the attr_path does not end with a version-like suffix.
+pub fn infer_strategy_from_attr_path(attr_path: &str) -> Option<AttrPathStrategy> {
+    // Get the last segment after any '.' (e.g., "python312Packages.cmake" -> "cmake")
+    let name = attr_path.rsplit('.').next().unwrap_or(attr_path);
+
+    // Find the longest trailing _N(_N)* suffix
+    // Work backwards from the end of the name collecting _digit segments
+    let parts: Vec<&str> = name.split('_').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Count how many trailing segments are purely numeric
+    let mut numeric_suffix_count = 0;
+    for part in parts.iter().rev() {
+        if part.parse::<u32>().is_ok() {
+            numeric_suffix_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    if numeric_suffix_count == 0 {
+        return None;
+    }
+
+    match numeric_suffix_count {
+        1 => Some(AttrPathStrategy::Strategy(SemverStrategy::Minor)), // foo_3 -> 3.x
+        2 => Some(AttrPathStrategy::Strategy(SemverStrategy::Patch)), // foo_3_3 -> 3.3.x
+        _ => Some(AttrPathStrategy::Pinned),                         // foo_2_5_39 -> pinned
+    }
+}
+
 /// Extract version constraint pattern from variant name for matching
 ///
 /// Examples:
@@ -149,5 +198,44 @@ mod tests {
         assert_eq!(extract_version_prefix("v1"), Some("1".to_owned()));
         assert_eq!(extract_version_prefix("v1_2_3"), Some("1.2.3".to_owned()));
         assert_eq!(extract_version_prefix("latest"), None);
+    }
+
+    #[test]
+    fn test_infer_strategy_from_attr_path() {
+        // Version-pinned attr_paths (3+ trailing numeric segments -> Pinned)
+        assert_eq!(
+            infer_strategy_from_attr_path("flex_2_5_39"),
+            Some(AttrPathStrategy::Pinned)
+        );
+
+        // Two trailing numeric segments -> Patch
+        assert_eq!(
+            infer_strategy_from_attr_path("libffi_3_3"),
+            Some(AttrPathStrategy::Strategy(SemverStrategy::Patch))
+        );
+        assert_eq!(
+            infer_strategy_from_attr_path("elixir_1_17"),
+            Some(AttrPathStrategy::Strategy(SemverStrategy::Patch))
+        );
+
+        // One trailing numeric segment -> Minor
+        assert_eq!(
+            infer_strategy_from_attr_path("catch2_3"),
+            Some(AttrPathStrategy::Strategy(SemverStrategy::Minor))
+        );
+
+        // No trailing numeric segments -> None (use default)
+        assert_eq!(infer_strategy_from_attr_path("hello"), None);
+        assert_eq!(infer_strategy_from_attr_path("aws-c-auth"), None);
+        assert_eq!(
+            infer_strategy_from_attr_path("python312Packages.requests"),
+            None
+        );
+
+        // Dotted attr_paths: only look at the last segment
+        assert_eq!(
+            infer_strategy_from_attr_path("llvmPackages_19.libllvm"),
+            None
+        );
     }
 }

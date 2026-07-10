@@ -82,6 +82,15 @@ impl Release {
             },
         };
 
+        // Detect prereleases from version string even if the API didn't flag them
+        if !include_prereleases && version_looks_prerelease(&version) {
+            debug!(
+                "Skipping release {} - version string contains prerelease indicator",
+                version
+            );
+            return false;
+        }
+
         if let Some(prefix) = version_prefix {
             if !version.starts_with(prefix) {
                 debug!(
@@ -697,6 +706,85 @@ pub fn normalize_version(version: &str) -> String {
     }
 }
 
+/// Check whether a version string contains common prerelease indicators
+/// (alpha, beta, rc, dev, pre) that the upstream API may not have flagged.
+fn version_looks_prerelease(version: &str) -> bool {
+    let lower = version.to_lowercase();
+    // Check for common prerelease keywords
+    if lower.contains("alpha")
+        || lower.contains("beta")
+        || lower.contains("dev")
+        || lower.contains("preview")
+    {
+        return true;
+    }
+    // Check for "rc" or "pre" as a distinct segment: either after a dash/dot,
+    // or directly after digits (e.g., "4.7.0rc1", "1.0.0-rc.2")
+    if lower.contains("-rc")
+        || lower.contains(".rc")
+        || lower.contains("-pre")
+        || lower.contains(".pre")
+    {
+        return true;
+    }
+    // Detect embedded rc/pre without separator: "1.2.3rc1", "1.2.3pre4"
+    // Match digit followed by "rc" or "pre" followed by digit
+    for pattern in &["rc", "pre"] {
+        if let Some(pos) = lower.find(pattern) {
+            if pos > 0 && lower.as_bytes()[pos - 1].is_ascii_digit() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Compare two version strings component-by-component using numeric ordering.
+///
+/// Splits on `.`, parses each component as `u64` for numeric comparison,
+/// and falls back to string comparison for non-numeric components.
+/// Missing components are treated as `0`.
+fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
+    // Strip any trailing prerelease suffixes for base comparison
+    let a_base = a.split('-').next().unwrap_or(a);
+    let b_base = b.split('-').next().unwrap_or(b);
+
+    let a_parts: Vec<&str> = a_base.split('.').collect();
+    let b_parts: Vec<&str> = b_base.split('.').collect();
+    let max_len = a_parts.len().max(b_parts.len());
+
+    for i in 0..max_len {
+        let a_part = a_parts.get(i).copied().unwrap_or("0");
+        let b_part = b_parts.get(i).copied().unwrap_or("0");
+
+        // Extract leading numeric portion for comparison
+        let a_num: Option<u64> = a_part
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok();
+        let b_num: Option<u64> = b_part
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok();
+
+        match (a_num, b_num) {
+            (Some(an), Some(bn)) => match an.cmp(&bn) {
+                std::cmp::Ordering::Equal => continue,
+                ord => return ord,
+            },
+            _ => match a_part.cmp(b_part) {
+                std::cmp::Ordering::Equal => continue,
+                ord => return ord,
+            },
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 /// Check if a new version is acceptable based on the semver strategy
 ///
 /// # Arguments
@@ -805,30 +893,32 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
             },
         }
     } else {
-        // For non-semver versions, only Latest/Major strategies work
+        // For non-semver versions, use numeric component comparison instead of
+        // lexicographic string comparison (which incorrectly treats "9" > "12")
         debug!(
-            "Could not parse versions as semver (current: {}, new: {}), using string comparison \
+            "Could not parse versions as semver (current: {}, new: {}), using component comparison \
              (strategy: {})",
             clean_current, clean_new, strategy
         );
 
         match strategy {
             SemverStrategy::Latest | SemverStrategy::Major => {
-                if clean_new <= clean_current {
-                    if clean_new < clean_current {
-                        warn!(
-                            "Rejecting downgrade (string comparison): {} -> {}",
-                            current, new
-                        );
-                    } else {
+                match compare_version_components(clean_new, clean_current) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => {
                         debug!(
-                            "Rejecting same version (string comparison): {} -> {}",
+                            "Rejecting same version (component comparison): {} -> {}",
                             current, new
                         );
-                    }
-                    false
-                } else {
-                    true
+                        false
+                    },
+                    std::cmp::Ordering::Less => {
+                        warn!(
+                            "Rejecting downgrade: {} -> {} (current version is newer)",
+                            current, new
+                        );
+                        false
+                    },
                 }
             },
             SemverStrategy::Minor | SemverStrategy::Patch => {

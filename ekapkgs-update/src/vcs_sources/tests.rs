@@ -518,3 +518,139 @@ fn test_version_acceptable_single_component_rejected() {
         SemverStrategy::Latest
     ));
 }
+
+// Regression tests: version downgrades that were previously accepted
+#[test]
+fn test_version_acceptable_four_component_downgrade() {
+    // oniguruma: 6.9.10 -> 6.9.7.1 is a downgrade (4-component version)
+    assert!(!is_version_acceptable(
+        "6.9.10",
+        "6.9.7.1",
+        SemverStrategy::Latest
+    ));
+
+    // pkginfo: 1.12.1.2 -> 1.9.6 is a downgrade
+    assert!(!is_version_acceptable(
+        "1.12.1.2",
+        "1.9.6",
+        SemverStrategy::Latest
+    ));
+
+    // lz4: 1.10.0 -> 1.8.1.2 is a downgrade
+    assert!(!is_version_acceptable(
+        "1.10.0",
+        "1.8.1.2",
+        SemverStrategy::Latest
+    ));
+}
+
+#[test]
+fn test_version_acceptable_four_component_upgrade() {
+    // 6.9.7.1 -> 6.9.10 is an upgrade
+    assert!(is_version_acceptable(
+        "6.9.7.1",
+        "6.9.10",
+        SemverStrategy::Latest
+    ));
+
+    // 1.9.6 -> 1.12.1.2 is an upgrade
+    assert!(is_version_acceptable(
+        "1.9.6",
+        "1.12.1.2",
+        SemverStrategy::Latest
+    ));
+}
+
+#[test]
+fn test_version_acceptable_embedded_prerelease() {
+    // typing-extensions: 4.15.0 -> 4.7.0rc1 is a downgrade AND a prerelease
+    assert!(!is_version_acceptable(
+        "4.15.0",
+        "4.7.0rc1",
+        SemverStrategy::Latest
+    ));
+
+    // Even if the prerelease were newer, the version comparison should work
+    assert!(!is_version_acceptable(
+        "5.0.0",
+        "4.7.0rc1",
+        SemverStrategy::Latest
+    ));
+}
+
+#[test]
+fn test_version_acceptable_mixed_component_counts() {
+    // 3-component vs 4-component, both should work correctly
+    assert!(is_version_acceptable(
+        "1.2.3",
+        "1.2.4.1",
+        SemverStrategy::Latest
+    ));
+    assert!(!is_version_acceptable(
+        "1.2.4",
+        "1.2.3.9",
+        SemverStrategy::Latest
+    ));
+}
+
+#[test]
+fn test_version_looks_prerelease() {
+    assert!(version_looks_prerelease("6.0.0-Alpha9"));
+    assert!(version_looks_prerelease("1.0.0-beta.1"));
+    assert!(version_looks_prerelease("4.7.0rc1"));
+    assert!(version_looks_prerelease("2.2.2-alpha"));
+    assert!(version_looks_prerelease("1.0.0-dev1"));
+    assert!(version_looks_prerelease("1.0.0-preview.3"));
+    assert!(version_looks_prerelease("3.1.0rc2"));
+    assert!(version_looks_prerelease("1.0.0pre4"));
+
+    // These should NOT be flagged as prerelease
+    assert!(!version_looks_prerelease("1.2.3"));
+    assert!(!version_looks_prerelease("6.9.10"));
+    assert!(!version_looks_prerelease("2.0.0"));
+    // "process" contains "pre" but not in a version context
+    assert!(!version_looks_prerelease("1.0.0"));
+}
+
+#[test]
+fn test_compare_version_components() {
+    use std::cmp::Ordering;
+
+    // Basic comparisons
+    assert_eq!(
+        compare_version_components("1.2.3", "1.2.4"),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_version_components("1.2.4", "1.2.3"),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_version_components("1.2.3", "1.2.3"),
+        Ordering::Equal
+    );
+
+    // The key regression: numeric vs lexicographic
+    assert_eq!(
+        compare_version_components("6.9.10", "6.9.7"),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_version_components("1.12.1", "1.9.6"),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_version_components("4.15.0", "4.7.0"),
+        Ordering::Greater
+    );
+
+    // Different component counts
+    assert_eq!(
+        compare_version_components("1.2.3", "1.2.3.1"),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_version_components("1.2.3.1", "1.2.3"),
+        Ordering::Greater
+    );
+}

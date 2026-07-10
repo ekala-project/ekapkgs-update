@@ -182,8 +182,33 @@ async fn check_for_update(
         return Ok(());
     };
 
-    // Use semver strategy from passthru, or default to Latest
-    let semver_strategy = metadata.semver_strategy.unwrap_or(SemverStrategy::Latest);
+    // Use semver strategy from passthru, or infer from attr_path suffix, or default to Latest.
+    // Packages like "flex_2_5_39" or "libffi_3_3" have version-pinned attr_paths that
+    // should constrain updates to their version series.
+    let semver_strategy = if let Some(strategy) = metadata.semver_strategy {
+        strategy
+    } else if let Some(inferred) =
+        crate::variant_strategy::infer_strategy_from_attr_path(attr_path)
+    {
+        match inferred {
+            crate::variant_strategy::AttrPathStrategy::Pinned => {
+                debug!(
+                    "{}: Skipping - attr_path version suffix indicates pinned package",
+                    attr_path
+                );
+                return Ok(());
+            },
+            crate::variant_strategy::AttrPathStrategy::Strategy(s) => {
+                info!(
+                    "{}: Inferred {} strategy from attr_path version suffix",
+                    attr_path, s
+                );
+                s
+            },
+        }
+    } else {
+        SemverStrategy::Latest
+    };
     debug!("{}: Using semver strategy: {}", attr_path, semver_strategy);
 
     // Use include-prereleases from passthru, or default to false
