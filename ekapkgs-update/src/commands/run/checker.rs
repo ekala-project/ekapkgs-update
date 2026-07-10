@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::{StreamExt, pin_mut};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 use super::types::UpdateRequest;
@@ -43,6 +44,15 @@ pub async fn release_checker_service_with_limits(
     // Semaphore to limit concurrent checker tasks (unbounded if not set)
     let semaphore = max_checker_concurrency.map(|n| Arc::new(Semaphore::new(n)));
 
+    // Track (pname, version) pairs that have already been queued for update.
+    // Multiple attr_paths can alias the same underlying package expression
+    // (e.g., python312Packages.foo and python313Packages.foo share the same
+    // source file). Updating one updates all aliases, so only the first needs
+    // to be processed. Using pname+version as the key avoids colliding with
+    // legitimately different versions that share the same file (mkManyVariants).
+    let queued_updates: Arc<Mutex<HashSet<(String, String)>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+
     let mut error_count = 0;
     let mut skipped_count = 0;
     let mut checked_count = 0;
@@ -82,6 +92,7 @@ pub async fn release_checker_service_with_limits(
                 let tx_clone = tx.clone();
                 let repology_client_clone = repology_client.clone();
                 let semaphore_clone = semaphore.clone();
+                let queued_clone = Arc::clone(&queued_updates);
 
                 // Spawn task to check this package
                 tokio::spawn(async move {
@@ -101,6 +112,7 @@ pub async fn release_checker_service_with_limits(
                         skip_unstable,
                         &repology_client_clone,
                         skip_repology,
+                        &queued_clone,
                     )
                     .await
                     {
@@ -133,6 +145,7 @@ async fn check_for_update(
     skip_unstable: bool,
     repology_client: &crate::repology::RepologyClient,
     skip_repology: bool,
+    queued_updates: &Mutex<HashSet<(String, String)>>,
 ) -> anyhow::Result<()> {
     // Extract package metadata
     let metadata = match PackageMetadata::from_attr_path(eval_entry_point, attr_path).await {
@@ -357,6 +370,21 @@ async fn check_for_update(
                     attr_path, latest_version, proposed
                 );
             }
+        }
+    }
+
+    // Deduplicate by (pname, version): multiple attr_paths can alias the same
+    // underlying package expression (e.g., python312Packages.foo and
+    // python313Packages.foo share one source file). Updating one updates all.
+    if let Some(ref pname) = metadata.pname {
+        let dedup_key = (pname.clone(), current_version.clone());
+        let mut queued = queued_updates.lock().await;
+        if !queued.insert(dedup_key) {
+            debug!(
+                "{}: Skipping - update already queued for {} {}",
+                attr_path, pname, current_version
+            );
+            return Ok(());
         }
     }
 
