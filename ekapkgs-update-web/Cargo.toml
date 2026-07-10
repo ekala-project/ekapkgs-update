@@ -36,5 +36,10 @@ shellexpand = "3.1"
 # Reference to the main ekapkgs-update crate for shared types
 ekapkgs-update = { path = "../ekapkgs-update" }
 
+[dev-dependencies]
+http-body-util = "0.1"
+hyper = "1"
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true

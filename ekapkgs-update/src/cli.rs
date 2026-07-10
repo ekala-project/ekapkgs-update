@@ -225,9 +225,6 @@ pub enum Commands {
         /// Override the filename to update (useful when meta.position points to the wrong file)
         #[arg(long)]
         override_filename: Option<String>,
-        /// System to use for evaluation (e.g., 'x86_64-linux', 'aarch64-darwin')
-        #[arg(long)]
-        system: Option<String>,
         /// Skip directory diff comparison in PR body
         #[arg(long)]
         skip_directory_diff: bool,
@@ -491,7 +488,6 @@ impl Commands {
                 version_regex,
                 format,
                 override_filename,
-                system,
                 skip_directory_diff,
                 builders,
                 max_jobs,
@@ -528,7 +524,6 @@ impl Commands {
                     version_regex,
                     format,
                     override_filename,
-                    system,
                     skip_directory_diff,
                 )
                 .execute()

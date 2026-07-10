@@ -247,8 +247,8 @@ pub(super) async fn perform_update(
                     UpdatePhase::Build, // We don't know exact phase, default to Build
                     &worktree_path,
                     &update_error,
-                    None, // TODO: Capture build log
-                    None, // TODO: Capture test output
+                    Some(error_message.clone()), // Build/update error message
+                    None, // Test output requires deeper capture plumbing
                 )
                 .await
                 {

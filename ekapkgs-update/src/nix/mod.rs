@@ -109,6 +109,26 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
     Ok(result)
 }
 
+/// Evaluate a Nix expression that returns a boolean, using `--json` for reliable parsing.
+async fn eval_nix_bool(expr: &str) -> anyhow::Result<bool> {
+    let output = Command::new("nix-instantiate")
+        .arg("--eval")
+        .arg("--json")
+        .arg("-E")
+        .arg(expr)
+        .output()
+        .await
+        .context("Failed to execute nix-instantiate")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix-instantiate evaluation failed: {}", stderr.trim());
+    }
+
+    let result = String::from_utf8_lossy(&output.stdout);
+    Ok(result.trim() == "true")
+}
+
 /// Check if a package uses mkManyVariants pattern by evaluating '<pkg> ? variants'
 pub async fn is_many_variants_package(
     eval_entry_point: &str,
@@ -116,11 +136,10 @@ pub async fn is_many_variants_package(
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let check_expr =
-        format!("with import {normalized_entry} {{ }}; toString ({attr_path} ? variants)");
+        format!("with import {normalized_entry} {{ }}; {attr_path} ? variants");
 
-    match eval_nix_expr(&check_expr).await {
-        Ok(result) => {
-            let is_many_variants = result.trim() == "1";
+    match eval_nix_bool(&check_expr).await {
+        Ok(is_many_variants) => {
             if is_many_variants {
                 debug!("{} is a mkManyVariants package", attr_path);
             }
@@ -224,12 +243,10 @@ pub async fn has_attr(
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let check_expr =
-        format!("with import {normalized_entry} {{ }}; toString({attr_path} ? {attribute_name})");
+        format!("with import {normalized_entry} {{ }}; {attr_path} ? {attribute_name}");
 
-    match eval_nix_expr(&check_expr).await {
-        Ok(result) => {
-            // TODO: we could probably do --json, and get an actual `true` or `false` from the eval
-            let has_attribute = result.trim() == "1";
+    match eval_nix_bool(&check_expr).await {
+        Ok(has_attribute) => {
             if has_attribute {
                 debug!("{} has attribute '{}'", attr_path, attribute_name);
             }

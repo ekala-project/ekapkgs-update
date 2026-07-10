@@ -45,7 +45,13 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
             }).collect::<Vec<_>>(),
         });
 
-        let msg = Message::Text(serde_json::to_string(&update).unwrap());
+        let msg = match serde_json::to_string(&update) {
+            Ok(s) => Message::Text(s),
+            Err(e) => {
+                tracing::warn!("Failed to serialize WebSocket update: {e}");
+                continue;
+            },
+        };
 
         // Send update to client
         if socket.send(msg).await.is_err() {

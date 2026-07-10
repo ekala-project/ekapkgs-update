@@ -106,6 +106,7 @@ impl Database {
     }
 
     /// Update session status
+    #[allow(dead_code)] // used by ekapkgs-update-web
     pub async fn update_session_status(
         &self,
         session_id: &str,
@@ -165,7 +166,7 @@ impl Database {
     }
 
     /// Increment session counters
-    #[allow(dead_code)]
+    #[allow(dead_code)] // superseded by finalize_session; consider removing
     pub async fn increment_session_counter(
         &self,
         session_id: &str,
@@ -200,7 +201,6 @@ impl Database {
     /// Record the start of a phase
     ///
     /// Returns the phase ID for later updates.
-    #[allow(dead_code)]
     pub async fn record_phase_start(
         &self,
         session_id: &str,
@@ -225,7 +225,6 @@ impl Database {
     }
 
     /// Record successful completion of a phase
-    #[allow(dead_code)]
     pub async fn record_phase_success(
         &self,
         phase_id: i64,
@@ -251,7 +250,6 @@ impl Database {
     }
 
     /// Record failure of a phase with error details
-    #[allow(dead_code)]
     pub async fn record_phase_failure(
         &self,
         phase_id: i64,
@@ -327,7 +325,7 @@ impl Database {
     }
 
     /// Get session by ID
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by ekapkgs-update-web
     pub async fn get_session(&self, session_id: &str) -> anyhow::Result<Option<UpdateSession>> {
         let row = sqlx::query(
             "SELECT id, started_at, completed_at, status, packages_attempted,
@@ -360,7 +358,7 @@ impl Database {
     }
 
     /// Get sessions by status
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by ekapkgs-update-web
     pub async fn get_sessions_by_status(
         &self,
         status: SessionStatus,

@@ -185,9 +185,6 @@ pub struct UpdateParams {
     /// Override filename for package definition (ignores meta.position)
     pub override_filename: Option<String>,
 
-    /// System parameter for cross-platform evaluation (TODO: implement)
-    pub system: Option<String>,
-
     /// Common update configuration
     pub update_config: UpdateConfig,
 
@@ -228,7 +225,6 @@ impl UpdateParams {
         version_regex: Option<String>,
         format: bool,
         override_filename: Option<String>,
-        system: Option<String>,
         skip_directory_diff: bool,
     ) -> Self {
         Self {
@@ -237,7 +233,6 @@ impl UpdateParams {
             ignore_update_script,
             force,
             override_filename,
-            system,
             update_config: UpdateConfig {
                 commit,
                 create_pr,
@@ -275,7 +270,6 @@ impl UpdateParams {
             ignore_update_script,
             force,
             override_filename,
-            system: _system,
             update_config,
             version_config,
             variant_config,

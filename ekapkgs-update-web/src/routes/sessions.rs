@@ -26,26 +26,40 @@ pub async fn list(
                 .db
                 .get_sessions_by_status(ekapkgs_update::database::SessionStatus::Running)
                 .await
+                .inspect_err(|e| tracing::warn!("Failed to get running sessions: {e}"))
                 .unwrap_or_default(),
             "completed" => state
                 .db
                 .get_sessions_by_status(ekapkgs_update::database::SessionStatus::Completed)
                 .await
+                .inspect_err(|e| tracing::warn!("Failed to get completed sessions: {e}"))
                 .unwrap_or_default(),
             "failed" => state
                 .db
                 .get_sessions_by_status(ekapkgs_update::database::SessionStatus::Failed)
                 .await
+                .inspect_err(|e| tracing::warn!("Failed to get failed sessions: {e}"))
                 .unwrap_or_default(),
             "cancelled" => state
                 .db
                 .get_sessions_by_status(ekapkgs_update::database::SessionStatus::Cancelled)
                 .await
+                .inspect_err(|e| tracing::warn!("Failed to get cancelled sessions: {e}"))
                 .unwrap_or_default(),
-            _ => state.db.get_recent_sessions(100).await.unwrap_or_default(),
+            _ => state
+                .db
+                .get_recent_sessions(super::SESSION_LIST_LIMIT)
+                .await
+                .inspect_err(|e| tracing::warn!("Failed to get recent sessions: {e}"))
+                .unwrap_or_default(),
         }
     } else {
-        state.db.get_recent_sessions(100).await.unwrap_or_default()
+        state
+            .db
+            .get_recent_sessions(super::SESSION_LIST_LIMIT)
+            .await
+            .inspect_err(|e| tracing::warn!("Failed to get recent sessions: {e}"))
+            .unwrap_or_default()
     };
 
     SessionsTemplate {
@@ -55,7 +69,12 @@ pub async fn list(
 }
 
 pub async fn list_json(State(state): State<AppState>) -> impl IntoResponse {
-    let sessions = state.db.get_recent_sessions(100).await.unwrap_or_default();
+    let sessions = state
+        .db
+        .get_recent_sessions(super::SESSION_LIST_LIMIT)
+        .await
+        .inspect_err(|e| tracing::warn!("Failed to get recent sessions: {e}"))
+        .unwrap_or_default();
     Json(sessions)
 }
 
@@ -67,46 +86,18 @@ pub async fn detail(State(state): State<AppState>, Path(id): Path<String>) -> im
     };
 
     // Get session
-    let Some(session) = state.db.get_session(&session_id).await.ok().flatten() else {
+    let Some(session) = state
+        .db
+        .get_session(&session_id)
+        .await
+        .inspect_err(|e| tracing::warn!("Failed to get session {session_id}: {e}"))
+        .ok()
+        .flatten()
+    else {
         return "Session not found".into_response();
     };
 
-    // Get all phases for this session
-    let rows = sqlx::query(
-        "SELECT id, session_id, attr_path, phase, started_at, completed_at,
-                duration_ms, status, error_type, error_details, artifacts_path
-         FROM update_phases
-         WHERE session_id = ?
-         ORDER BY started_at DESC",
-    )
-    .bind(&session_id)
-    .fetch_all(state.db.pool())
-    .await
-    .unwrap_or_default();
-
-    let phases: Vec<PhaseRecord> = rows
-        .into_iter()
-        .filter_map(|row| {
-            Some(PhaseRecord {
-                id: row.get("id"),
-                session_id: row.get("session_id"),
-                attr_path: row.get("attr_path"),
-                phase: row.get("phase"),
-                started_at: DateTime::parse_from_rfc3339(row.get("started_at"))
-                    .ok()?
-                    .with_timezone(&Utc),
-                completed_at: row
-                    .get::<Option<String>, _>("completed_at")
-                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.with_timezone(&Utc)),
-                duration_ms: row.get("duration_ms"),
-                status: row.get("status"),
-                error_type: row.get("error_type"),
-                error_details: row.get("error_details"),
-                artifacts_path: row.get("artifacts_path"),
-            })
-        })
-        .collect();
+    let phases = fetch_phases(state.db.pool(), &session_id).await;
 
     // Split into success and failed phases
     let success_phases: Vec<_> = phases
@@ -133,6 +124,10 @@ pub async fn phases_json(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    Json(fetch_phases(state.db.pool(), &id).await)
+}
+
+async fn fetch_phases(pool: &sqlx::SqlitePool, session_id: &str) -> Vec<PhaseRecord> {
     let rows = sqlx::query(
         "SELECT id, session_id, attr_path, phase, started_at, completed_at,
                 duration_ms, status, error_type, error_details, artifacts_path
@@ -140,13 +135,13 @@ pub async fn phases_json(
          WHERE session_id = ?
          ORDER BY started_at DESC",
     )
-    .bind(&id)
-    .fetch_all(state.db.pool())
+    .bind(session_id)
+    .fetch_all(pool)
     .await
+    .inspect_err(|e| tracing::warn!("Failed to get phases for session {session_id}: {e}"))
     .unwrap_or_default();
 
-    let phases: Vec<PhaseRecord> = rows
-        .into_iter()
+    rows.into_iter()
         .filter_map(|row| {
             Some(PhaseRecord {
                 id: row.get("id"),
@@ -167,7 +162,5 @@ pub async fn phases_json(
                 artifacts_path: row.get("artifacts_path"),
             })
         })
-        .collect();
-
-    Json(phases)
+        .collect()
 }

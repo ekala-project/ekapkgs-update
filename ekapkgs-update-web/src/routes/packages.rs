@@ -17,25 +17,6 @@ pub async fn list(
     Query(query): Query<PackagesQuery>,
 ) -> impl IntoResponse {
     // Query packages from updates table
-    let sql = if let Some(search_term) = &query.search {
-        format!(
-            "SELECT attr_path, current_version, latest_upstream_version, last_attempted, \
-             next_attempt, pr_url
-             FROM updates
-             WHERE attr_path LIKE '%{}%'
-             ORDER BY last_attempted DESC NULLS LAST
-             LIMIT 200",
-            search_term.replace('\'', "''")
-        )
-    } else {
-        "SELECT attr_path, current_version, latest_upstream_version, last_attempted, next_attempt, \
-         pr_url
-         FROM updates
-         ORDER BY last_attempted DESC NULLS LAST
-         LIMIT 200"
-            .to_string()
-    };
-
     let rows: Vec<(
         String,
         Option<String>,
@@ -43,10 +24,36 @@ pub async fn list(
         Option<String>,
         Option<String>,
         Option<String>,
-    )> = sqlx::query_as(&sql)
+    )> = if let Some(search_term) = &query.search {
+        let search_pattern = format!("%{search_term}%");
+        sqlx::query_as(
+            "SELECT attr_path, current_version, latest_upstream_version, last_attempted, \
+             next_attempt, pr_url
+             FROM updates
+             WHERE attr_path LIKE ?1
+             ORDER BY last_attempted DESC NULLS LAST
+             LIMIT ?2",
+        )
+        .bind(&search_pattern)
+        .bind(super::PACKAGE_SEARCH_LIMIT)
         .fetch_all(state.db.pool())
         .await
-        .unwrap_or_default();
+        .inspect_err(|e| tracing::warn!("Failed to search packages: {e}"))
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as(
+            "SELECT attr_path, current_version, latest_upstream_version, last_attempted, \
+             next_attempt, pr_url
+             FROM updates
+             ORDER BY last_attempted DESC NULLS LAST
+             LIMIT ?1",
+        )
+        .bind(super::PACKAGE_SEARCH_LIMIT)
+        .fetch_all(state.db.pool())
+        .await
+        .inspect_err(|e| tracing::warn!("Failed to list packages: {e}"))
+        .unwrap_or_default()
+    };
 
     let packages: Vec<PackageInfo> = rows
         .into_iter()
