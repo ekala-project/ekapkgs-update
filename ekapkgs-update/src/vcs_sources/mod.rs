@@ -518,11 +518,19 @@ fn find_best_release(
         anyhow::bail!("Explicit version '{target_version}' not found in available releases");
     }
 
-    // Filter releases by semver strategy and optionally include prereleases.
-    // Owning each `Release` here means the eventually-chosen one can be returned by move.
-    let mut compatible_releases: Vec<Release> = releases
+    // Sort all releases by version descending (newest first) so we can
+    // short-circuit as soon as we find the first compatible release.
+    let mut releases = releases;
+    releases.sort_by(|a, b| {
+        let version_a = extract_version_from_tag(&a.tag_name);
+        let version_b = extract_version_from_tag(&b.tag_name);
+        version_cmp_desc(version_a, version_b)
+    });
+
+    // Return the first (newest) release that passes all filters.
+    releases
         .into_iter()
-        .filter(|r| {
+        .find(|r| {
             r.matches(
                 current_version,
                 strategy,
@@ -531,23 +539,12 @@ fn find_best_release(
                 include_prereleases,
             )
         })
-        .collect();
-
-    // Sort by version (newest first)
-    compatible_releases.sort_by(|a, b| {
-        let version_a = extract_version_from_tag(&a.tag_name);
-        let version_b = extract_version_from_tag(&b.tag_name);
-        // Reverse order for newest first
-        version_cmp_desc(version_a, version_b)
-    });
-
-    // Return the best (first after sorting) release by moving it out of the
-    // sorted Vec; no clone required.
-    compatible_releases.into_iter().next().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No compatible releases found for version {current_version} with strategy {strategy}"
-        )
-    })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No compatible releases found for version {current_version} with strategy \
+                 {strategy}"
+            )
+        })
 }
 
 /// Compare two version strings descendingly (newest first).
@@ -870,7 +867,7 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
     ) {
         // First check if new version is actually newer
         if new_ver < curr_ver {
-            warn!(
+            debug!(
                 "Rejecting downgrade: {} -> {} (current version is newer)",
                 current, new
             );
