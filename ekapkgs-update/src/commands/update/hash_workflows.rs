@@ -241,45 +241,60 @@ pub async fn build_with_patch_recovery(
     Ok(removed_patches)
 }
 
-/// Run passthru.tests if they exist and return whether tests passed
+/// Result of running passthru.tests
+#[derive(Debug, Clone)]
+pub enum TestResult {
+    /// Tests were not requested (--run-passthru-tests not set)
+    NotRequested,
+    /// Package has no passthru.tests attribute
+    NoTests,
+    /// Tests ran and passed
+    Passed,
+    /// Tests ran and failed, with the error output
+    Failed(String),
+}
+
+impl TestResult {
+    pub fn passed(&self) -> bool {
+        matches!(self, TestResult::Passed)
+    }
+
+    pub fn failed(&self) -> bool {
+        matches!(self, TestResult::Failed(_))
+    }
+}
+
+/// Run passthru.tests if they exist and return the result
 pub async fn run_package_tests(
     eval_entry_point: &str,
     attr_path: &str,
     run_passthru_tests: bool,
-    fail_on_test_failure: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<TestResult> {
     use crate::nix::{has_passthru_tests, normalize_entry_point};
 
-    let mut tests_passed = false;
-    info!("Checking for passthru.tests...");
-
-    if run_passthru_tests {
-        let normalized_entry = normalize_entry_point(eval_entry_point);
-
-        if has_passthru_tests(&normalized_entry, attr_path).await? {
-            info!("Found {}.passthru.tests, building tests...", attr_path);
-
-            // Build tests
-            let (success, _stdout, stderr) =
-                build_nix_expr(eval_entry_point, attr_path, Some("passthru.tests")).await?;
-
-            if !success {
-                warn!("Tests failed:\n{}", stderr);
-                if fail_on_test_failure {
-                    anyhow::bail!("Package tests failed after update");
-                } else {
-                    warn!("Package tests failed after update, but continuing anyway");
-                }
-            } else {
-                info!("✓ Tests passed");
-                tests_passed = true;
-            }
-        } else {
-            info!("No passthru.tests found for {}", attr_path);
-        }
+    if !run_passthru_tests {
+        return Ok(TestResult::NotRequested);
     }
 
-    Ok(tests_passed)
+    info!("Checking for passthru.tests...");
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+
+    if !has_passthru_tests(&normalized_entry, attr_path).await? {
+        info!("No passthru.tests found for {}", attr_path);
+        return Ok(TestResult::NoTests);
+    }
+
+    info!("Found {}.passthru.tests, building tests...", attr_path);
+    let (success, _stdout, stderr) =
+        build_nix_expr(eval_entry_point, attr_path, Some("passthru.tests")).await?;
+
+    if success {
+        info!("✓ Tests passed");
+        Ok(TestResult::Passed)
+    } else {
+        warn!("{}: passthru.tests failed", attr_path);
+        Ok(TestResult::Failed(stderr))
+    }
 }
 
 /// Update npmDepsHash for Node.js packages using the invalid hash discovery pattern

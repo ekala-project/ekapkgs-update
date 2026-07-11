@@ -70,23 +70,21 @@ impl UpdateConfig {
         super::update_single_variant(file, attr_path, variant_name, strategy, self).await
     }
 
-    /// Update a package from a specific file path
-    /// Returns a list of patches that were removed during the update
+    /// Update a package from a specific file path.
+    /// Returns removed patches and the test result.
     pub async fn update_from_file_path(
         self,
         eval_entry_point: String,
         attr_path: String,
         file_location: String,
         version_config: VersionConfig,
-        fail_on_test_failure: bool,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<(Vec<String>, super::TestResult)> {
         super::update_from_file_path(
             eval_entry_point,
             attr_path,
             file_location,
             version_config,
             self,
-            fail_on_test_failure,
         )
         .await
     }
@@ -427,13 +425,12 @@ impl UpdateParams {
             })?
         };
 
-        let _removed_patches = update_config
+        let (_removed_patches, _test_result) = update_config
             .update_from_file_path(
                 file,
                 attr_path,
                 expr_file_path,
                 version_config,
-                false, // Don't fail on test errors for update command
             )
             .await?;
 

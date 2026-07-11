@@ -88,13 +88,12 @@ pub(super) async fn perform_update(
             attr_path.clone(),
             worktree_file_str,
             version_config,
-            run_passthru_tests, // Fail on test errors in run mode
         )
         .await;
 
     match update_result {
-        Ok(removed_patches) => {
-            // Update succeeded
+        Ok((removed_patches, test_result)) => {
+            // Update succeeded (build passed; tests may or may not have)
             info!("{}: Successfully updated to {}", attr_path, new_version);
 
             // Log removed patches if any
@@ -106,6 +105,8 @@ pub(super) async fn perform_update(
                     removed_patches.join(", ")
                 );
             }
+
+            let tests_failed = test_result.failed();
 
             // Analyze rebuild impact if requested
             let rebuild_analysis = if pr_enhancements.analyze_rebuilds {
@@ -199,11 +200,19 @@ pub(super) async fn perform_update(
                         fork,
                         rebuild_analysis.as_ref(),
                         pr_enhancements,
+                        &test_result,
                     )
                     .await
                     {
                         Ok((pr_url, pr_number)) => {
-                            info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
+                            if tests_failed {
+                                info!(
+                                    "{}: Created draft PR #{} (passthru.tests failed): {}",
+                                    attr_path, pr_number, pr_url
+                                );
+                            } else {
+                                info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
+                            }
                         },
                         Err(e) => {
                             warn!("{}: Failed to create PR: {}", attr_path, e);
@@ -386,7 +395,6 @@ pub(super) async fn perform_direct_update(
             attr_path.clone(),
             file_location.clone(),
             version_config,
-            true, // Fail on test errors in commit mode
         )
         .await;
 
@@ -397,7 +405,56 @@ pub(super) async fn perform_direct_update(
         .unwrap_or_else(|| file_location.clone());
 
     match update_result {
-        Ok(removed_patches) => {
+        Ok((removed_patches, test_result)) => {
+            // In branch mode, test failures should fail the update so the
+            // changes are reverted and recorded for an agent to fix later.
+            if let crate::commands::update::TestResult::Failed(ref stderr) = test_result {
+                warn!("{}: passthru.tests failed after update", attr_path);
+
+                // Revert changes under the mutex
+                {
+                    let _lock = git_mutex.lock().await;
+                    info!("{}: Reverting {}...", attr_path, pkg_dir);
+                    let revert_output = tokio::process::Command::new("git")
+                        .args(["checkout", "--", &pkg_dir])
+                        .output()
+                        .await;
+
+                    match revert_output {
+                        Ok(output) if output.status.success() => {
+                            debug!("{}: Successfully reverted changes", attr_path);
+                        },
+                        Ok(output) => {
+                            let stderr_msg = String::from_utf8_lossy(&output.stderr);
+                            warn!("{}: Failed to revert changes: {}", attr_path, stderr_msg);
+                        },
+                        Err(revert_err) => {
+                            warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
+                        },
+                    }
+                }
+
+                // Record as a test failure (distinct from build failure)
+                let error_message =
+                    format!("passthru.tests failed after update to {new_version}:\n{stderr}");
+                if let Err(db_err) = db
+                    .record_failed_update(
+                        &req.drv.drv_path,
+                        attr_path,
+                        &error_message,
+                        Some(current_version),
+                        Some(new_version),
+                    )
+                    .await
+                {
+                    warn!("{}: Failed to record test failure: {}", attr_path, db_err);
+                }
+
+                return Ok(UpdateResult::Skipped(format!(
+                    "passthru.tests failed after update to {new_version}"
+                )));
+            }
+
             info!("{}: Successfully updated to {}", attr_path, new_version);
 
             if !removed_patches.is_empty() {
@@ -543,6 +600,7 @@ async fn create_pr_for_update(
     fork: &str,
     rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
     pr_enhancements: &PrEnhancementsConfig,
+    test_result: &crate::commands::update::TestResult,
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -683,10 +741,36 @@ async fn create_pr_for_update(
         body.push_str(&diff);
     }
 
+    // Add test results section
+    let draft = match test_result {
+        crate::commands::update::TestResult::Passed => {
+            body.push_str("\n\n## Tests\n\n✅ `passthru.tests` passed");
+            false
+        },
+        crate::commands::update::TestResult::Failed(stderr) => {
+            body.push_str("\n\n## Tests\n\n❌ `passthru.tests` **failed**\n\n");
+            body.push_str(
+                "This PR is opened as a draft because the package's passthru.tests \
+                 did not pass after the update.\n\n",
+            );
+            // Truncate very long output
+            let truncated = if stderr.len() > 4000 {
+                format!("{}...\n\n(truncated)", &stderr[..4000])
+            } else {
+                stderr.clone()
+            };
+            body.push_str(&format!(
+                "<details>\n<summary>Test output</summary>\n\n```\n{truncated}\n```\n\n</details>"
+            ));
+            true
+        },
+        _ => false,
+    };
+
     body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
-    // Create PR via GitHub API
-    let pr = crate::github::create_pull_request(
+    // Create PR via GitHub API (draft if tests failed)
+    let pr = crate::github::create_pull_request_with_options(
         &config.owner,
         &config.repo,
         &title,
@@ -694,6 +778,7 @@ async fn create_pr_for_update(
         &branch_name,
         &config.base_branch,
         &github_token,
+        draft,
     )
     .await?;
 

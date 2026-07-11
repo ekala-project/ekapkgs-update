@@ -29,7 +29,7 @@ pub(super) use flake::update_flake_package;
 pub(super) use format::format_nix_file;
 pub(super) use git::create_git_commit;
 pub(super) use hash_workflows::{
-    build_with_patch_recovery, run_package_tests, update_cargo_hash_if_needed,
+    TestResult, build_with_patch_recovery, run_package_tests, update_cargo_hash_if_needed,
     update_composer_deps_hash_if_needed, update_npm_deps_hash_if_needed,
     update_nuget_deps_hash_if_needed, update_source_hash, update_vendor_hash_if_needed,
 };
@@ -40,16 +40,15 @@ pub(super) use variants::{get_default_variant, update_single_variant};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::UpstreamSource;
 
-/// Update a package from a specific file path
-/// Returns a list of patches that were removed during the update
+/// Update a package from a specific file path.
+/// Returns removed patches and the test result.
 pub async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
     file_location: String,
     version_config: VersionConfig,
     update_config: UpdateConfig,
-    fail_on_test_failure: bool,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<(Vec<String>, TestResult)> {
     info!(
         "Starting generic update for {} at {}",
         attr_path, file_location
@@ -167,26 +166,32 @@ pub async fn update_from_file_path(
     let removed_patches =
         build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
 
-    // Step 8: Run passthru.tests if requested
-    let tests_passed = run_package_tests(
+    // Step 7: Run passthru.tests if requested
+    let test_result = run_package_tests(
         &eval_entry_point,
         &attr_path,
         update_config.run_passthru_tests,
-        fail_on_test_failure,
     )
     .await?;
 
-    // Step 9: Format the file if requested
+    // Step 8: Format the file if requested
     if update_config.format {
         format_nix_file(&actual_file_location).await?;
     }
 
-    info!(
-        "✓ Successfully updated {} from {} to {}",
-        attr_path, metadata.version, new_version
-    );
+    if test_result.failed() {
+        info!(
+            "⚠ Updated {} from {} to {} (passthru.tests failed)",
+            attr_path, metadata.version, new_version
+        );
+    } else {
+        info!(
+            "✓ Successfully updated {} from {} to {}",
+            attr_path, metadata.version, new_version
+        );
+    }
 
-    // Step 10: Handle commit and PR creation
+    // Step 9: Handle commit and PR creation
     pr::PostUpdateParams {
         attr_path: &attr_path,
         metadata: &metadata,
@@ -195,12 +200,12 @@ pub async fn update_from_file_path(
         create_pr: update_config.create_pr,
         upstream: update_config.upstream.clone(),
         fork: &update_config.fork,
-        tests_passed,
+        tests_passed: test_result.passed(),
         eval_entry_point: Some(&eval_entry_point),
         pr_enhancements: &update_config.pr_enhancements,
     }
     .execute()
     .await?;
 
-    Ok(removed_patches)
+    Ok((removed_patches, test_result))
 }

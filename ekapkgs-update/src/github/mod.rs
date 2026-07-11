@@ -213,9 +213,22 @@ pub async fn create_pull_request(
     base: &str,
     token: &str,
 ) -> anyhow::Result<GithubPullRequest> {
+    create_pull_request_with_options(owner, repo, title, body, head, base, token, false).await
+}
+
+pub async fn create_pull_request_with_options(
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+    head: &str,
+    base: &str,
+    token: &str,
+    draft: bool,
+) -> anyhow::Result<GithubPullRequest> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls");
 
-    debug!("Creating PR at {}", url);
+    debug!("Creating PR at {} (draft: {})", url, draft);
 
     let client = Client::new();
     let request_body = serde_json::json!({
@@ -223,6 +236,7 @@ pub async fn create_pull_request(
         "body": body,
         "head": head,
         "base": base,
+        "draft": draft,
     });
 
     let response = github_request_builder(&client, reqwest::Method::POST, &url, Some(token))
