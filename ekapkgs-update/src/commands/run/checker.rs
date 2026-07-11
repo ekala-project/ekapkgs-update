@@ -12,18 +12,6 @@ use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
 use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
-/// Service that monitors packages for new upstream releases
-pub async fn release_checker_service(
-    file: String,
-    db: Database,
-    tx: mpsc::UnboundedSender<UpdateRequest>,
-    skip_unstable: bool,
-    skip_repology: bool,
-) -> (usize, usize, usize) {
-    release_checker_service_with_limits(file, db, tx, skip_unstable, skip_repology, None, None)
-        .await
-}
-
 /// Service that monitors packages for new upstream releases, with optional
 /// concurrency and eval-worker limits.
 pub async fn release_checker_service_with_limits(

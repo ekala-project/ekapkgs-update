@@ -189,29 +189,22 @@ impl RunConfig {
         let skip_repology = pr_enhancements.skip_repology;
         let checker_concurrency = concurrency;
         let checker_handle = tokio::spawn(async move {
-            if is_branch_mode {
-                // In branch mode, limit checker concurrency and eval workers
-                // to avoid OOM from unbounded parallel nix-instantiate calls
-                super::checker::release_checker_service_with_limits(
-                    file_checker,
-                    db_checker,
-                    tx,
-                    skip_unstable,
-                    skip_repology,
-                    Some(std::cmp::max(4, checker_concurrency * 2)),
-                    Some(std::cmp::max(1, checker_concurrency)),
-                )
-                .await
-            } else {
-                super::checker::release_checker_service(
-                    file_checker,
-                    db_checker,
-                    tx,
-                    skip_unstable,
-                    skip_repology,
-                )
-                .await
-            }
+            // Always limit checker concurrency to avoid OOM from unbounded
+            // parallel nix-instantiate calls. Each checker task spawns up to
+            // ~16 nix-instantiate processes for metadata extraction, so even
+            // modest concurrency can exhaust memory on constrained machines.
+            let max_checkers = std::cmp::max(4, checker_concurrency * 2);
+            let max_eval_workers = std::cmp::max(1, checker_concurrency);
+            super::checker::release_checker_service_with_limits(
+                file_checker,
+                db_checker,
+                tx,
+                skip_unstable,
+                skip_repology,
+                Some(max_checkers),
+                Some(max_eval_workers),
+            )
+            .await
         });
 
         // Spawn updater service
