@@ -109,7 +109,7 @@ pub async fn release_checker_service_with_limits(
                 });
             },
             Ok(NixEvalItem::Error(e)) => {
-                debug!("Evaluation error: {:?}", e);
+                warn!("Evaluation error for {}: {}", e.attr, e.error.lines().last().unwrap_or(&e.error));
                 error_count += 1;
             },
             Err(e) => {
