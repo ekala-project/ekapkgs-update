@@ -46,7 +46,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = parse_args();
-    args.command.execute().await
+
+    // Load config file (validated at startup)
+    let config_file = config::ConfigFile::load(args.config_file.as_deref())?;
+
+    args.command.execute(config_file).await
 }
 
 /// Parse CLI args, applying `--color <when>` to clap's help/usage rendering.

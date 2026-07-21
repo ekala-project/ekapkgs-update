@@ -1,5 +1,7 @@
 //! Configuration for the autofix pipeline.
 
+use crate::config::LlmConfig;
+
 /// Configuration for the `autofix run` command.
 pub struct AutofixConfig {
     /// Path to the SQLite database.
@@ -14,4 +16,6 @@ pub struct AutofixConfig {
     pub dry_run: bool,
     /// Only process items with these error types.
     pub error_types: Option<Vec<String>>,
+    /// LLM configuration (from config file, merged with env vars).
+    pub llm: LlmConfig,
 }

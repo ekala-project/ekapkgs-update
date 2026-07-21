@@ -6,6 +6,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 
 use crate::commands;
+use crate::config::ConfigFile;
 use crate::paths::DEFAULT_DATABASE_PATH;
 use crate::vcs_sources::SemverStrategy;
 
@@ -67,6 +68,11 @@ pub struct Args {
         value_enum
     )]
     pub color: ColorWhen,
+
+    /// Path to TOML config file. Defaults to ~/.config/ekapkgs-update/config.toml
+    /// or the EKAPKGS_CONFIG_FILE env var.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config_file: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -503,7 +509,7 @@ impl Commands {
     /// awaits `.execute()`. The argument plumbing for the more complex
     /// `Run` and `Update` arms lives in their respective `*Config::from_args`
     /// constructors.
-    pub async fn execute(self) -> anyhow::Result<()> {
+    pub async fn execute(self, config_file: ConfigFile) -> anyhow::Result<()> {
         match self {
             Commands::Run {
                 file,
@@ -716,12 +722,16 @@ impl Commands {
                     builders,
                     max_jobs,
                 } => {
+                    // CLI flags override config file for nix build args
+                    let resolved_builders = builders.or_else(|| config_file.nix.builders.clone());
+                    let resolved_max_jobs = max_jobs.or(config_file.nix.max_jobs);
+
                     let mut extra_args = Vec::new();
-                    if let Some(ref builders_val) = builders {
+                    if let Some(ref builders_val) = resolved_builders {
                         extra_args.push("--builders".to_owned());
                         extra_args.push(builders_val.clone());
                     }
-                    if let Some(max_jobs_val) = max_jobs {
+                    if let Some(max_jobs_val) = resolved_max_jobs {
                         extra_args.push("--max-jobs".to_owned());
                         extra_args.push(max_jobs_val.to_string());
                     }
@@ -729,7 +739,7 @@ impl Commands {
                         commands::update::set_extra_nix_build_args(extra_args);
                     }
 
-                    let config = commands::autofix::config::AutofixConfig {
+                    let autofix_config = commands::autofix::config::AutofixConfig {
                         database_path: database,
                         eval_entry_point: file,
                         max_attempts,
@@ -737,8 +747,9 @@ impl Commands {
                         dry_run,
                         error_types: error_types
                             .map(|s| s.split(',').map(|t| t.trim().to_owned()).collect()),
+                        llm: config_file.llm,
                     };
-                    commands::autofix::run(config).await
+                    commands::autofix::run(autofix_config).await
                 },
                 AutofixCommand::Status { database } => {
                     commands::autofix::status(database).await

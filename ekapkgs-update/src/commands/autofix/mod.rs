@@ -62,32 +62,18 @@ pub async fn run(config: AutofixConfig) -> anyhow::Result<()> {
         println!("\n[dry-run mode] Prompts will be displayed but not sent to LLM.\n");
     }
 
-    // Initialize LLM client (skip in dry-run mode)
+    // Initialize LLM client from config + env vars
     let llm = if config.dry_run {
-        // Create a dummy client — it won't be called in dry-run
-        None
+        // In dry-run, try to create a client but don't require it
+        LlmClient::from_config(&config.llm).ok()
     } else {
-        Some(LlmClient::from_env()?)
+        Some(LlmClient::from_config(&config.llm)?)
     };
 
-    // For dry-run, we still need a client reference. Create a placeholder.
-    let llm_ref;
-    let dummy_llm;
-    if let Some(ref client) = llm {
-        llm_ref = client;
-    } else {
-        // In dry-run mode we still call process_queue, which will skip the
-        // LLM call. We need a valid client reference though.
-        dummy_llm = LlmClient::from_env().ok();
-        if let Some(ref client) = dummy_llm {
-            llm_ref = client;
-        } else {
-            // If we can't create a client at all in dry-run, just print
-            // the queue and exit
-            println!("\nEKAPKGS_LLM_BASE_URL not set. Set it to process the queue.");
-            return Ok(());
-        }
-    }
+    let Some(ref llm_ref) = llm else {
+        println!("\nLLM not configured. Set llm.base_url in config file or EKAPKGS_LLM_BASE_URL env var.");
+        return Ok(());
+    };
 
     let run_stats = process_queue(&db, llm_ref, &config).await?;
 

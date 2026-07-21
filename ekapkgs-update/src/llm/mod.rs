@@ -19,8 +19,9 @@ use tracing::{debug, warn};
 
 pub use self::types::{ChatCompletionResponse, ChatMessage};
 use self::types::{ChatCompletionRequest, EmbeddingRequest, EmbeddingResponse};
+use crate::config::LlmConfig;
 
-/// Default model name if `EKAPKGS_LLM_MODEL` is not set.
+/// Default model name.
 const DEFAULT_MODEL: &str = "qwen2.5-coder:3b";
 /// Default maximum response tokens.
 const DEFAULT_MAX_TOKENS: u32 = 2048;
@@ -41,29 +42,29 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    /// Create a client from environment variables.
+    /// Create a client from a config file section, falling back to env vars
+    /// and built-in defaults.
     ///
-    /// Returns an error if `EKAPKGS_LLM_BASE_URL` is not set.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let base_url = std::env::var("EKAPKGS_LLM_BASE_URL")
-            .context("EKAPKGS_LLM_BASE_URL environment variable is required for autofix")?;
+    /// Returns an error if no base URL is configured anywhere.
+    pub fn from_config(llm_config: &LlmConfig) -> anyhow::Result<Self> {
+        let base_url = llm_config
+            .resolve_base_url()
+            .context("LLM base URL is required: set llm.base_url in config file or EKAPKGS_LLM_BASE_URL env var")?;
 
-        let model = std::env::var("EKAPKGS_LLM_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        let model = llm_config
+            .resolve_model()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
-        let max_tokens = std::env::var("EKAPKGS_LLM_MAX_TOKENS")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        let max_tokens = llm_config
+            .resolve_max_tokens()
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
-        let temperature = std::env::var("EKAPKGS_LLM_TEMPERATURE")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        let temperature = llm_config
+            .resolve_temperature()
             .unwrap_or(DEFAULT_TEMPERATURE);
 
-        let timeout = std::env::var("EKAPKGS_LLM_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        let timeout = llm_config
+            .resolve_timeout_secs()
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
         let client = reqwest::Client::builder()
@@ -78,6 +79,14 @@ impl LlmClient {
             max_tokens,
             temperature,
         })
+    }
+
+    /// Create a client from environment variables only (no config file).
+    ///
+    /// Convenience wrapper for contexts where no config file is loaded.
+    #[allow(dead_code)]
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_config(&LlmConfig::default())
     }
 
     /// Send a chat completion request and return the response.

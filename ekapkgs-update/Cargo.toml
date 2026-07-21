@@ -24,6 +24,7 @@ shellexpand = "3.1"
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+toml = "0.8"
 thiserror = "1.0"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
