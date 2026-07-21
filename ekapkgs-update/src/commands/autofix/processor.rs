@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 
 use super::config::AutofixConfig;
 use super::prompt::{build_prompt, is_llm_fixable};
-use super::retriever::{build_error_summary, retrieve_similar_fixes, store_embedding};
+use super::queue::Attempt;
+use super::retriever::{Embedding, build_error_summary, retrieve_similar_fixes};
 use super::validator::{ValidationResult, apply_and_validate};
 use crate::database::Database;
 use crate::llm::LlmClient;
@@ -193,27 +194,19 @@ pub async fn process_queue(
             continue;
         }
 
+        let attempt_num = item.attempts + 1;
+
         // Call LLM
         let response = match llm.chat_completion(messages).await {
             Ok(r) => r,
             Err(e) => {
                 warn!("{}: LLM request failed: {}", item.attr_path, e);
-                db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    None,
-                    None,
-                    false,
-                    None,
-                    None,
-                    "llm_error",
-                    Some(&format!("{e:#}")),
-                    None,
-                    None,
-                )
-                .await?;
-
+                Attempt::new(item.id, attempt_num)
+                    .prompt(&prompt_text)
+                    .status("llm_error")
+                    .error(&format!("{e:#}"))
+                    .save(db)
+                    .await?;
                 handle_failure(db, &item, &mut stats).await?;
                 stats.llm_errors += 1;
                 continue;
@@ -222,8 +215,18 @@ pub async fn process_queue(
 
         let response_text = response.content().unwrap_or_default().to_owned();
         let usage = response.usage.as_ref();
-        let prompt_tokens = usage.map(|u| i64::from(u.prompt_tokens));
-        let completion_tokens = usage.map(|u| i64::from(u.completion_tokens));
+
+        // Build a base attempt with shared fields for this LLM response
+        let base_attempt = |status: &str| {
+            let mut a = Attempt::new(item.id, attempt_num)
+                .prompt(&prompt_text)
+                .response(&response_text)
+                .status(status);
+            if let Some(u) = usage {
+                a = a.tokens(i64::from(u.prompt_tokens), i64::from(u.completion_tokens));
+            }
+            a
+        };
 
         debug!(
             "{}: LLM response ({} chars): {}",
@@ -237,22 +240,10 @@ pub async fn process_queue(
             Ok(json) => json,
             Err(e) => {
                 warn!("{}: Failed to parse LLM response: {}", item.attr_path, e);
-                db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    Some(&response_text),
-                    None,
-                    false,
-                    None,
-                    None,
-                    "parse_error",
-                    Some(&format!("{e:#}")),
-                    prompt_tokens,
-                    completion_tokens,
-                )
-                .await?;
-
+                base_attempt("parse_error")
+                    .error(&format!("{e:#}"))
+                    .save(db)
+                    .await?;
                 handle_failure(db, &item, &mut stats).await?;
                 stats.parse_errors += 1;
                 continue;
@@ -270,32 +261,34 @@ pub async fn process_queue(
         )
         .await?;
 
+        // Pre-compute embedding (non-fatal if unavailable)
+        let embedding = Embedding::compute(llm, &error_summary)
+            .await
+            .ok()
+            .flatten();
+
         match validation {
             ValidationResult::BuildSuccess => {
                 info!("{}: LLM fix validated successfully!", item.attr_path);
 
-                let attempt_id = db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    Some(&response_text),
-                    Some(&changes_json_str),
-                    true,
-                    Some(true),
-                    None,
-                    "success",
-                    None,
-                    prompt_tokens,
-                    completion_tokens,
-                )
-                .await?;
+                let attempt_id = base_attempt("success")
+                    .changes(&changes_json_str)
+                    .applied()
+                    .build_succeeded()
+                    .save(db)
+                    .await?;
 
-                // Store embedding for RAG (successful fix — high value)
-                if let Err(e) = store_embedding(
-                    db, llm, attempt_id, &item.error_type,
-                    &error_summary, Some(&changes_json_str), true,
-                ).await {
-                    debug!("{}: Failed to store embedding (non-fatal): {}", item.attr_path, e);
+                if let Some(emb) = embedding {
+                    if let Err(e) = emb
+                        .for_attempt(attempt_id)
+                        .error_type(&item.error_type)
+                        .fix_json(&changes_json_str)
+                        .build_succeeded()
+                        .store(db)
+                        .await
+                    {
+                        debug!("{}: Failed to store embedding: {}", item.attr_path, e);
+                    }
                 }
 
                 db.update_autofix_status(item.id, "fixed").await?;
@@ -304,28 +297,22 @@ pub async fn process_queue(
             ValidationResult::BuildFailed { stderr } => {
                 warn!("{}: LLM fix did not resolve build failure", item.attr_path);
 
-                let attempt_id = db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    Some(&response_text),
-                    Some(&changes_json_str),
-                    true,
-                    Some(false),
-                    Some(&stderr),
-                    "build_failed",
-                    None,
-                    prompt_tokens,
-                    completion_tokens,
-                )
-                .await?;
+                let attempt_id = base_attempt("build_failed")
+                    .changes(&changes_json_str)
+                    .applied()
+                    .build_failed(&stderr)
+                    .save(db)
+                    .await?;
 
-                // Store embedding for RAG (failed fix — useful for negative examples)
-                if let Err(e) = store_embedding(
-                    db, llm, attempt_id, &item.error_type,
-                    &error_summary, None, false,
-                ).await {
-                    debug!("{}: Failed to store embedding (non-fatal): {}", item.attr_path, e);
+                if let Some(emb) = embedding {
+                    if let Err(e) = emb
+                        .for_attempt(attempt_id)
+                        .error_type(&item.error_type)
+                        .store(db)
+                        .await
+                    {
+                        debug!("{}: Failed to store embedding: {}", item.attr_path, e);
+                    }
                 }
 
                 handle_failure(db, &item, &mut stats).await?;
@@ -333,42 +320,24 @@ pub async fn process_queue(
             ValidationResult::ApplyFailed { error } => {
                 warn!("{}: Failed to apply LLM changes: {}", item.attr_path, error);
 
-                db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    Some(&response_text),
-                    Some(&changes_json_str),
-                    false,
-                    None,
-                    None,
-                    "apply_error",
-                    Some(&error),
-                    prompt_tokens,
-                    completion_tokens,
-                )
-                .await?;
+                base_attempt("apply_error")
+                    .changes(&changes_json_str)
+                    .error(&error)
+                    .save(db)
+                    .await?;
 
                 handle_failure(db, &item, &mut stats).await?;
             },
             ValidationResult::EvalFailed { stderr } => {
                 warn!("{}: Nix eval failed after applying fix", item.attr_path);
 
-                db.record_autofix_attempt(
-                    item.id,
-                    item.attempts + 1,
-                    Some(&prompt_text),
-                    Some(&response_text),
-                    Some(&changes_json_str),
-                    true,
-                    Some(false),
-                    Some(&stderr),
-                    "build_failed",
-                    Some("Nix evaluation failed"),
-                    prompt_tokens,
-                    completion_tokens,
-                )
-                .await?;
+                base_attempt("build_failed")
+                    .changes(&changes_json_str)
+                    .applied()
+                    .build_failed(&stderr)
+                    .error("Nix evaluation failed")
+                    .save(db)
+                    .await?;
 
                 handle_failure(db, &item, &mut stats).await?;
             },

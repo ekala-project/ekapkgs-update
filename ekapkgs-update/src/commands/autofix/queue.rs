@@ -72,6 +72,135 @@ fn parse_optional_rfc3339(s: Option<String>) -> Option<DateTime<Utc>> {
     s.and_then(|v| parse_rfc3339(&v))
 }
 
+/// Builder for recording an autofix attempt.
+///
+/// Accumulates fields as the attempt progresses, then persists via [`save`].
+///
+/// ```ignore
+/// let attempt_id = Attempt::new(queue_id, attempt_number)
+///     .prompt(&prompt_text)
+///     .response(&response_text)
+///     .changes(&changes_json)
+///     .applied()
+///     .build_succeeded()
+///     .save(&db)
+///     .await?;
+/// ```
+pub struct Attempt {
+    queue_id: i64,
+    attempt_number: i64,
+    prompt_text: Option<String>,
+    response_text: Option<String>,
+    changes_json: Option<String>,
+    changes_applied: bool,
+    build_success: Option<bool>,
+    build_stderr: Option<String>,
+    status: String,
+    error_message: Option<String>,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+}
+
+impl Attempt {
+    pub fn new(queue_id: i64, attempt_number: i64) -> Self {
+        Self {
+            queue_id,
+            attempt_number,
+            prompt_text: None,
+            response_text: None,
+            changes_json: None,
+            changes_applied: false,
+            build_success: None,
+            build_stderr: None,
+            status: "pending".to_owned(),
+            error_message: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+        }
+    }
+
+    pub fn prompt(mut self, text: &str) -> Self {
+        self.prompt_text = Some(text.to_owned());
+        self
+    }
+
+    pub fn response(mut self, text: &str) -> Self {
+        self.response_text = Some(text.to_owned());
+        self
+    }
+
+    pub fn changes(mut self, json: &str) -> Self {
+        self.changes_json = Some(json.to_owned());
+        self
+    }
+
+    pub fn applied(mut self) -> Self {
+        self.changes_applied = true;
+        self
+    }
+
+    pub fn build_succeeded(mut self) -> Self {
+        self.build_success = Some(true);
+        self
+    }
+
+    pub fn build_failed(mut self, stderr: &str) -> Self {
+        self.build_success = Some(false);
+        self.build_stderr = Some(stderr.to_owned());
+        self
+    }
+
+    pub fn status(mut self, status: &str) -> Self {
+        self.status = status.to_owned();
+        self
+    }
+
+    pub fn error(mut self, message: &str) -> Self {
+        self.error_message = Some(message.to_owned());
+        self
+    }
+
+    pub fn tokens(mut self, prompt: i64, completion: i64) -> Self {
+        self.prompt_tokens = Some(prompt);
+        self.completion_tokens = Some(completion);
+        self
+    }
+
+    /// Persist the attempt to the database. Returns the row ID.
+    pub async fn save(self, db: &Database) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+
+        let result = sqlx::query(
+            "INSERT INTO autofix_attempts
+                (queue_id, attempt_number, started_at, completed_at,
+                 prompt_tokens, completion_tokens,
+                 prompt_text, response_text, changes_json,
+                 changes_applied, build_success, build_stderr,
+                 status, error_message)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(self.queue_id)
+        .bind(self.attempt_number)
+        .bind(&now)
+        .bind(&now)
+        .bind(self.prompt_tokens)
+        .bind(self.completion_tokens)
+        .bind(&self.prompt_text)
+        .bind(&self.response_text)
+        .bind(&self.changes_json)
+        .bind(self.changes_applied)
+        .bind(self.build_success)
+        .bind(&self.build_stderr)
+        .bind(&self.status)
+        .bind(&self.error_message)
+        .execute(db.pool())
+        .await
+        .context("record autofix attempt")?;
+
+        Ok(result.last_insert_rowid())
+    }
+}
+
 // ── Database methods ─────────────────────────────────────────────────────────
 
 impl Database {
@@ -228,56 +357,6 @@ impl Database {
         }
 
         Ok(())
-    }
-
-    /// Record a single LLM fix attempt.
-    ///
-    /// Call this after the LLM responds (or fails). Returns the attempt row ID.
-    pub async fn record_autofix_attempt(
-        &self,
-        queue_id: i64,
-        attempt_number: i64,
-        prompt_text: Option<&str>,
-        response_text: Option<&str>,
-        changes_json: Option<&str>,
-        changes_applied: bool,
-        build_success: Option<bool>,
-        build_stderr: Option<&str>,
-        status: &str,
-        error_message: Option<&str>,
-        prompt_tokens: Option<i64>,
-        completion_tokens: Option<i64>,
-    ) -> Result<i64> {
-        let now = Utc::now().to_rfc3339();
-
-        let result = sqlx::query(
-            "INSERT INTO autofix_attempts
-                (queue_id, attempt_number, started_at, completed_at,
-                 prompt_tokens, completion_tokens,
-                 prompt_text, response_text, changes_json,
-                 changes_applied, build_success, build_stderr,
-                 status, error_message)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(queue_id)
-        .bind(attempt_number)
-        .bind(&now)
-        .bind(&now)
-        .bind(prompt_tokens)
-        .bind(completion_tokens)
-        .bind(prompt_text)
-        .bind(response_text)
-        .bind(changes_json)
-        .bind(changes_applied)
-        .bind(build_success)
-        .bind(build_stderr)
-        .bind(status)
-        .bind(error_message)
-        .execute(self.pool())
-        .await
-        .context("record autofix attempt")?;
-
-        Ok(result.last_insert_rowid())
     }
 
     /// Get all attempts for a queue item, ordered by attempt number.

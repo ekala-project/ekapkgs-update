@@ -64,46 +64,98 @@ pub fn build_error_summary(
     summary
 }
 
-/// Store an embedding for a completed autofix attempt.
+/// An embedding ready to be stored in the database.
 ///
-/// Called after each attempt (successful or not) to build up the knowledge
-/// base. Returns `Ok(false)` if the embedding server is unavailable (non-fatal).
-pub async fn store_embedding(
-    db: &Database,
-    llm: &LlmClient,
+/// Created via [`Embedding::compute`], then persisted via [`Embedding::store`].
+///
+/// ```ignore
+/// if let Some(emb) = Embedding::compute(llm, &error_summary).await? {
+///     emb.for_attempt(attempt_id)
+///        .error_type("build_error")
+///        .fix_json(&changes_json)
+///        .build_succeeded()
+///        .store(&db)
+///        .await?;
+/// }
+/// ```
+pub struct Embedding {
+    vector: Vec<f32>,
+    error_summary: String,
     attempt_id: i64,
-    error_type: &str,
-    error_summary: &str,
-    fix_json: Option<&str>,
+    error_type: String,
+    fix_json: Option<String>,
     build_success: bool,
-) -> Result<bool> {
-    let Some(embedding) = llm.embed(error_summary).await? else {
-        debug!("Embedding server unavailable, skipping storage");
-        return Ok(false);
-    };
+}
 
-    let embedding_json = serde_json::to_string(&embedding)
-        .context("serialize embedding")?;
-    let now = Utc::now().to_rfc3339();
+impl Embedding {
+    /// Compute an embedding from the LLM server.
+    ///
+    /// Returns `Ok(None)` if the embedding endpoint is unavailable (non-fatal).
+    pub async fn compute(llm: &LlmClient, error_summary: &str) -> Result<Option<Self>> {
+        let Some(vector) = llm.embed(error_summary).await? else {
+            debug!("Embedding server unavailable, skipping");
+            return Ok(None);
+        };
 
-    sqlx::query(
-        "INSERT INTO autofix_embeddings
-            (attempt_id, error_type, error_summary, embedding, fix_json, build_success, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(attempt_id)
-    .bind(error_type)
-    .bind(error_summary)
-    .bind(&embedding_json)
-    .bind(fix_json)
-    .bind(build_success)
-    .bind(&now)
-    .execute(db.pool())
-    .await
-    .context("store autofix embedding")?;
+        Ok(Some(Self {
+            vector,
+            error_summary: error_summary.to_owned(),
+            attempt_id: 0,
+            error_type: String::new(),
+            fix_json: None,
+            build_success: false,
+        }))
+    }
 
-    debug!("Stored embedding for attempt {attempt_id} (dim={})", embedding.len());
-    Ok(true)
+    pub fn for_attempt(mut self, attempt_id: i64) -> Self {
+        self.attempt_id = attempt_id;
+        self
+    }
+
+    pub fn error_type(mut self, error_type: &str) -> Self {
+        self.error_type = error_type.to_owned();
+        self
+    }
+
+    pub fn fix_json(mut self, json: &str) -> Self {
+        self.fix_json = Some(json.to_owned());
+        self
+    }
+
+    pub fn build_succeeded(mut self) -> Self {
+        self.build_success = true;
+        self
+    }
+
+    /// Persist the embedding to the database.
+    pub async fn store(self, db: &Database) -> Result<()> {
+        let embedding_json = serde_json::to_string(&self.vector)
+            .context("serialize embedding")?;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO autofix_embeddings
+                (attempt_id, error_type, error_summary, embedding, fix_json, build_success, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(self.attempt_id)
+        .bind(&self.error_type)
+        .bind(&self.error_summary)
+        .bind(&embedding_json)
+        .bind(&self.fix_json)
+        .bind(self.build_success)
+        .bind(&now)
+        .execute(db.pool())
+        .await
+        .context("store autofix embedding")?;
+
+        debug!(
+            "Stored embedding for attempt {} (dim={})",
+            self.attempt_id,
+            self.vector.len()
+        );
+        Ok(())
+    }
 }
 
 /// Retrieve the most similar successful fixes for a given error context.
