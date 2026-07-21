@@ -189,41 +189,46 @@ async fn apply_patch_file(patch_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply changes from JSON format
-async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
-    let content = fs::read_to_string(json_path).await?;
-    let changes: serde_json::Value =
-        serde_json::from_str(&content).context("Failed to parse changes JSON")?;
-
-    // Expected format:
-    // {
-    //   "files": [
-    //     {
-    //       "path": "path/to/file.nix",
-    //       "operations": [
-    //         {"type": "replace", "old": "...", "new": "..."},
-    //         {"type": "insert_after", "marker": "...", "content": "..."},
-    //         {"type": "delete_lines", "start": 10, "end": 15}
-    //       ]
-    //     }
-    //   ]
-    // }
-
+/// Apply structured JSON operations to files.
+///
+/// This is the shared implementation used by both the `apply` CLI command and
+/// the autofix pipeline. The `changes` value must follow this format:
+///
+/// ```json
+/// {
+///   "files": [
+///     {
+///       "path": "path/to/file.nix",
+///       "operations": [
+///         {"type": "replace", "old": "...", "new": "..."},
+///         {"type": "insert_after", "marker": "...", "content": "..."}
+///       ]
+///     }
+///   ]
+/// }
+/// ```
+///
+/// File paths in the JSON are resolved relative to `base_dir`.
+pub async fn apply_json_operations(
+    changes: &serde_json::Value,
+    base_dir: &Path,
+) -> anyhow::Result<()> {
     let files = changes["files"]
         .as_array()
         .context("JSON must have 'files' array")?;
 
     for file_change in files {
-        let file_path = file_change["path"]
+        let file_path_str = file_change["path"]
             .as_str()
             .context("Each file must have 'path'")?;
         let operations = file_change["operations"]
             .as_array()
             .context("Each file must have 'operations' array")?;
 
-        info!("Applying changes to: {}", file_path);
+        let file_path = base_dir.join(file_path_str);
+        info!("Applying changes to: {}", file_path.display());
 
-        let mut content = fs::read_to_string(file_path).await?;
+        let mut content = fs::read_to_string(&file_path).await?;
 
         for operation in operations {
             let op_type = operation["type"]
@@ -240,7 +245,11 @@ async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
                         .context("'replace' operation needs 'new'")?;
 
                     if !content.contains(old) {
-                        warn!("Could not find text to replace in {}: {}", file_path, old);
+                        warn!(
+                            "Could not find text to replace in {}: {}",
+                            file_path.display(),
+                            old
+                        );
                         bail!("Replace operation failed - text not found");
                     }
 
@@ -258,7 +267,11 @@ async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
                         let insert_pos = pos + marker.len();
                         content.insert_str(insert_pos, insert_content);
                     } else {
-                        warn!("Could not find marker in {}: {}", file_path, marker);
+                        warn!(
+                            "Could not find marker in {}: {}",
+                            file_path.display(),
+                            marker
+                        );
                         bail!("Insert operation failed - marker not found");
                     }
                 },
@@ -269,10 +282,19 @@ async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
             }
         }
 
-        // Write the modified content back
-        fs::write(file_path, content).await?;
-        info!("Applied changes to: {}", file_path);
+        fs::write(&file_path, content).await?;
+        info!("Applied changes to: {}", file_path.display());
     }
 
     Ok(())
+}
+
+/// Apply changes from a JSON file (wrapper around [`apply_json_operations`]).
+async fn apply_json_changes(json_path: &Path) -> anyhow::Result<()> {
+    let content = fs::read_to_string(json_path).await?;
+    let changes: serde_json::Value =
+        serde_json::from_str(&content).context("Failed to parse changes JSON")?;
+
+    let base_dir = std::env::current_dir().context("Failed to get current directory")?;
+    apply_json_operations(&changes, &base_dir).await
 }

@@ -16,7 +16,10 @@ use std::path::Path;
 
 use anyhow::Context;
 // Externally-consumed re-exports (cli.rs, commands::pr_enhancements, integration tests).
-pub use build::{build_and_get_outputs, cleanup_result_symlinks, set_extra_nix_build_args};
+pub use build::{
+    build_and_get_outputs, cleanup_result_symlinks, get_extra_nix_build_args,
+    set_extra_nix_build_args,
+};
 // Sibling-only re-exports kept narrow with `pub(super)` so child modules can
 // reach them via `super::`, but no other crate module sees them.
 pub(super) use build::{build_flake_package, build_nix_expr, detect_reversed_patch};

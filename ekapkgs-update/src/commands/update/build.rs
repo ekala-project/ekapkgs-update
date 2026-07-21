@@ -16,7 +16,7 @@ pub fn set_extra_nix_build_args(args: Vec<String>) {
     let _ = EXTRA_NIX_BUILD_ARGS.set(args);
 }
 
-fn get_extra_nix_build_args() -> &'static [String] {
+pub fn get_extra_nix_build_args() -> &'static [String] {
     EXTRA_NIX_BUILD_ARGS.get().map_or(&[], |v| v.as_slice())
 }
 

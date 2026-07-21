@@ -374,6 +374,100 @@ pub enum Commands {
         #[command(subcommand)]
         command: WorktreesCommand,
     },
+    /// Automatically fix failed updates using LLM assistance
+    Autofix {
+        #[command(subcommand)]
+        command: AutofixCommand,
+    },
+}
+
+/// Autofix subcommands
+#[derive(Subcommand)]
+pub enum AutofixCommand {
+    /// Process the autofix queue (run LLM fixes serially)
+    Run {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Nix file to evaluate
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Maximum fix attempts per package before escalation
+        #[arg(long, default_value = "3")]
+        max_attempts: i64,
+        /// Maximum items to process this run
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Show prompts without calling the LLM
+        #[arg(long)]
+        dry_run: bool,
+        /// Only attempt fixes for these error types (comma-separated)
+        #[arg(long)]
+        error_types: Option<String>,
+        /// Nix builders (passed as --builders to nix-build)
+        #[arg(long)]
+        builders: Option<String>,
+        /// Max local nix build jobs (passed as --max-jobs to nix-build)
+        #[arg(long)]
+        max_jobs: Option<usize>,
+    },
+    /// Show autofix queue status
+    Status {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+    },
+    /// Show autofix attempt history
+    History {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Filter by package name pattern
+        #[arg(long)]
+        package: Option<String>,
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Manually enqueue preserved failures for autofix
+    Enqueue {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Specific package to enqueue
+        #[arg(long)]
+        package: Option<String>,
+        /// Specific session to enqueue from
+        #[arg(long)]
+        session: Option<String>,
+        /// Maximum fix attempts per package
+        #[arg(long, default_value = "3")]
+        max_attempts: i64,
+    },
+    /// Export training dataset as JSONL for LLM fine-tuning
+    ExportDataset {
+        /// Path to SQLite database
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Dataset format: 'sft' (supervised fine-tuning) or 'dpo' (preference optimization)
+        #[arg(long, default_value = "sft")]
+        format: String,
+        /// Quality filter: 'verified_success', 'build_failed', 'parse_error', or 'all'
+        #[arg(long, default_value = "verified_success")]
+        quality: String,
+        /// Filter by error type
+        #[arg(long)]
+        error_type: Option<String>,
+        /// Only include samples from the last N days
+        #[arg(long)]
+        since_days: Option<u32>,
+        /// Minimum number of samples required to export
+        #[arg(long)]
+        min_samples: Option<usize>,
+        /// Output file (writes to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 /// Worktrees subcommands
@@ -609,6 +703,72 @@ impl Commands {
                 } => commands::worktrees::show_worktree(database, attr_path).await,
                 WorktreesCommand::Clean { older_than } => {
                     commands::worktrees::clean_worktrees(older_than).await
+                },
+            },
+            Commands::Autofix { command } => match command {
+                AutofixCommand::Run {
+                    database,
+                    file,
+                    max_attempts,
+                    limit,
+                    dry_run,
+                    error_types,
+                    builders,
+                    max_jobs,
+                } => {
+                    let mut extra_args = Vec::new();
+                    if let Some(ref builders_val) = builders {
+                        extra_args.push("--builders".to_owned());
+                        extra_args.push(builders_val.clone());
+                    }
+                    if let Some(max_jobs_val) = max_jobs {
+                        extra_args.push("--max-jobs".to_owned());
+                        extra_args.push(max_jobs_val.to_string());
+                    }
+                    if !extra_args.is_empty() {
+                        commands::update::set_extra_nix_build_args(extra_args);
+                    }
+
+                    let config = commands::autofix::config::AutofixConfig {
+                        database_path: database,
+                        eval_entry_point: file,
+                        max_attempts,
+                        limit,
+                        dry_run,
+                        error_types: error_types
+                            .map(|s| s.split(',').map(|t| t.trim().to_owned()).collect()),
+                    };
+                    commands::autofix::run(config).await
+                },
+                AutofixCommand::Status { database } => {
+                    commands::autofix::status(database).await
+                },
+                AutofixCommand::History {
+                    database,
+                    package,
+                    limit,
+                } => commands::autofix::history(database, package, limit).await,
+                AutofixCommand::Enqueue {
+                    database,
+                    package,
+                    session,
+                    max_attempts,
+                } => {
+                    commands::autofix::enqueue(database, package, session, max_attempts).await
+                },
+                AutofixCommand::ExportDataset {
+                    database,
+                    format,
+                    quality,
+                    error_type,
+                    since_days,
+                    min_samples,
+                    output,
+                } => {
+                    commands::autofix::export_dataset_cmd(
+                        database, format, quality, error_type, since_days, min_samples, output,
+                    )
+                    .await
                 },
             },
         }

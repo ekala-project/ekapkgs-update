@@ -14,6 +14,7 @@ mod github;
 mod gitlab;
 mod hash_discovery;
 mod init;
+mod llm;
 mod nix;
 mod package;
 mod paths;

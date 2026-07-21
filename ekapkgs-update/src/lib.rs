@@ -15,6 +15,7 @@ pub mod github;
 pub mod gitlab;
 pub mod hash_discovery;
 pub mod init;
+pub mod llm;
 pub mod nix;
 pub mod package;
 pub mod paths;

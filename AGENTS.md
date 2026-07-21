@@ -66,11 +66,20 @@ ekapkgs-update/                     # Main CLI crate
         variants.rs                 #   mkManyVariants support
       migrate/                      # nixpkgs → ekapkgs paradigm migration
       pr_enhancements.rs            # PrEnhancementsConfig (CVE, Repology, rebuilds, Cachix)
+      autofix/                        # LLM-assisted automatic fix pipeline
+        config.rs                   #   AutofixConfig
+        queue.rs                    #   Queue management (SQLite autofix_queue/autofix_attempts)
+        prompt.rs                   #   Prompt construction for small LLMs (with RAG examples)
+        retriever.rs                #   RAG: embed errors, retrieve similar successful fixes
+        validator.rs                #   Apply changes + nix-build validation
+        processor.rs                #   Serial queue processing loop
+        dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
       export.rs, apply.rs           # LLM integration (export failure context, apply fixes)
       retry.rs, worktrees.rs        # Failure recovery and worktree management
       log.rs, inspect.rs            # Per-package failure inspection
       query.rs, report.rs, status.rs  # Database query/reporting commands
       prune_maintainers.rs          # Remove deprecated maintainers from .nix files
+    llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients
@@ -207,6 +216,9 @@ Failed updates use stepped backoff: **2 days → 4 days → 6 days** (max). Succ
 | `Database` | `database/mod.rs` | SQLite pool wrapper (Clone-safe for async sharing) |
 | `FailureArtifacts` | `commands/run/preservation.rs` | Preserved worktree + logs for failed updates |
 | `PrConfig` | `git/mod.rs` | Owner/repo/base-branch for PR creation |
+| `LlmClient` | `llm/mod.rs` | OpenAI-compatible chat completion client |
+| `AutofixQueueItem` | `commands/autofix/queue.rs` | Queue entry for LLM fix attempt |
+| `AutofixAttemptRecord` | `commands/autofix/queue.rs` | Single LLM attempt with prompt/response/outcome |
 
 ## External Dependencies
 
