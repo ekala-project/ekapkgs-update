@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod audit;
 pub mod autofix;
 pub mod export;
 pub mod inspect;

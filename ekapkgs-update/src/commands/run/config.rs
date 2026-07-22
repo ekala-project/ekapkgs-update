@@ -77,6 +77,7 @@ impl RunConfig {
         interactive: bool,
         preserve_failures: bool,
         commit_strategy: CommitStrategy,
+        audit: bool,
     ) -> Self {
         // Resolve cache precedence: CLI flag → env var → None. The CLI value
         // is moved when present; any whitespace-only value is treated as
@@ -102,6 +103,7 @@ impl RunConfig {
                 max_rebuilds,
                 skip_cachix,
                 cachix_cache,
+                run_audit: audit,
             },
             interactive,
             preserve_failures,

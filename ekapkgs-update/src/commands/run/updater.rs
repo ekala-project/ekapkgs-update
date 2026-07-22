@@ -651,6 +651,18 @@ async fn create_pr_for_update(
         warn!("{}: Cachix push raised an error: {:#}", attr_path, e);
     }
 
+    // Audit the built package if requested
+    let audit_markdown = match pr_enhancements
+        .perform_worktree_audit(worktree_path, &eval_entry_point, attr_path)
+        .await
+    {
+        Ok(md) => md,
+        Err(e) => {
+            warn!("{}: Audit failed: {:#}", attr_path, e);
+            None
+        },
+    };
+
     // Perform directory diff if requested
     let diff_markdown = pr_enhancements
         .perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path)
@@ -739,6 +751,12 @@ async fn create_pr_for_update(
     if let Some(diff) = diff_markdown {
         body.push_str("\n\n");
         body.push_str(&diff);
+    }
+
+    // Add audit results if available
+    if let Some(audit) = audit_markdown {
+        body.push_str("\n\n");
+        body.push_str(&audit);
     }
 
     // Add test results section

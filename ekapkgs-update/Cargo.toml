@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 async-stream = "0.3"
-camino = "1.1"
+camino = { version = "1.1", features = ["serde1"] }
 chrono = { workspace = true }
 clap = { version = "4.5.53", features = ["derive", "color"] }
 directories = "5.0"

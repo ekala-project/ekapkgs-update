@@ -39,6 +39,9 @@ pub struct PrEnhancementsConfig {
     /// Cachix push entirely. Resolved from CLI flag → `CACHIX_CACHE_NAME`
     /// env var by [`crate::cachix::resolve_cache_name`].
     pub cachix_cache: Option<String>,
+
+    /// Whether to run package audits after successful builds
+    pub run_audit: bool,
 }
 
 impl PrEnhancementsConfig {
@@ -196,6 +199,62 @@ impl PrEnhancementsConfig {
 
         info!("{}: Directory diff completed successfully", attr_path);
         Ok(Some(markdown))
+    }
+
+    /// Audit the built package in the given worktree, returning formatted
+    /// markdown if any findings exist.
+    ///
+    /// Returns `Ok(None)` when the feature is disabled or no findings were
+    /// produced.
+    pub async fn perform_worktree_audit(
+        &self,
+        worktree_path: &Path,
+        eval_entry_point: &str,
+        attr_path: &str,
+    ) -> anyhow::Result<Option<String>> {
+        if !self.run_audit {
+            return Ok(None);
+        }
+
+        use anyhow::Context;
+        use tracing::info;
+
+        use crate::commands::audit::{checks, report, types::AuditConfig};
+        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+
+        info!("{}: Running package audit", attr_path);
+
+        std::env::set_current_dir(worktree_path)?;
+
+        let outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
+            .await
+            .with_context(|| format!("Failed to build {attr_path} for audit"))?;
+
+        cleanup_result_symlinks().ok();
+
+        let config = AuditConfig::default();
+        let audit_report = checks::run_audit(
+            &outputs,
+            Some(eval_entry_point),
+            Some(attr_path),
+            &config,
+        )
+        .await;
+
+        if audit_report.findings.is_empty() {
+            info!("{}: Audit passed with no findings", attr_path);
+            return Ok(None);
+        }
+
+        info!(
+            "{}: Audit found {} error(s), {} warning(s), {} info",
+            attr_path,
+            audit_report.error_count(),
+            audit_report.warning_count(),
+            audit_report.info_count()
+        );
+
+        Ok(Some(report::format_markdown(&audit_report)))
     }
 
     /// Perform a directory diff for the in-place update flow (uses git stash

@@ -167,6 +167,9 @@ pub enum Commands {
         /// branch with concurrent builds.
         #[arg(long, default_value = "worktrees")]
         commit_strategy: CommitStrategy,
+        /// Run package audits after each successful build and include findings in PR body
+        #[arg(long)]
+        audit: bool,
     },
     /// Update a package in a Nix file
     Update {
@@ -385,6 +388,32 @@ pub enum Commands {
         #[command(subcommand)]
         command: AutofixCommand,
     },
+    /// Audit a built Nix package for correctness issues
+    Audit {
+        /// Target to audit: .drv path, store path, or attr path
+        target: String,
+        /// Nix file to evaluate (used when target is an attr path)
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Output format: human, json, or markdown
+        #[arg(long, default_value = "human")]
+        format: String,
+        /// Minimum severity to report: info, warning, or error
+        #[arg(long, default_value = "info")]
+        min_severity: String,
+        /// Skip metadata checks (meta.description, meta.license, etc.)
+        #[arg(long)]
+        skip_metadata: bool,
+        /// Skip binary/ELF checks (RPATH, shared libs)
+        #[arg(long)]
+        skip_binary_checks: bool,
+        /// Nix builders to use for builds (passed as --builders to nix-build)
+        #[arg(long)]
+        builders: Option<String>,
+        /// Maximum number of local nix build jobs (passed as --max-jobs to nix-build)
+        #[arg(long)]
+        max_jobs: Option<usize>,
+    },
 }
 
 /// Autofix subcommands
@@ -532,6 +561,7 @@ impl Commands {
                 builders,
                 max_jobs,
                 commit_strategy,
+                audit,
             } => {
                 let mut extra_args = Vec::new();
                 if let Some(ref builders_val) = builders {
@@ -564,6 +594,7 @@ impl Commands {
                     interactive,
                     preserve_failures,
                     commit_strategy,
+                    audit,
                 )
                 .execute()
                 .await
@@ -781,6 +812,38 @@ impl Commands {
                     )
                     .await
                 },
+            },
+            Commands::Audit {
+                target,
+                file,
+                format,
+                min_severity,
+                skip_metadata,
+                skip_binary_checks,
+                builders,
+                max_jobs,
+            } => {
+                let mut extra_args = Vec::new();
+                if let Some(ref builders_val) = builders {
+                    extra_args.push("--builders".to_owned());
+                    extra_args.push(builders_val.clone());
+                }
+                if let Some(max_jobs_val) = max_jobs {
+                    extra_args.push("--max-jobs".to_owned());
+                    extra_args.push(max_jobs_val.to_string());
+                }
+                if !extra_args.is_empty() {
+                    commands::update::set_extra_nix_build_args(extra_args);
+                }
+                commands::audit::execute(
+                    target,
+                    file,
+                    format,
+                    min_severity,
+                    skip_metadata,
+                    skip_binary_checks,
+                )
+                .await
             },
         }
     }
