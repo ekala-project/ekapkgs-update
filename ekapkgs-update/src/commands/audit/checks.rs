@@ -648,7 +648,153 @@ fn check_fhs_references(output_name: &str, output_path: &Path) -> Vec<AuditFindi
 }
 
 // ---------------------------------------------------------------------------
-// Category 5: Metadata Issues
+// Category 6: Pkg-config Issues
+// ---------------------------------------------------------------------------
+
+/// Check that .pc (pkg-config) files reference valid paths
+fn check_pkg_config(output_name: &str, output_path: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    // Path-valued fields in .pc files
+    let path_fields = [
+        "prefix",
+        "exec_prefix",
+        "libdir",
+        "includedir",
+        "sharedlibdir",
+        "bindir",
+        "datarootdir",
+        "datadir",
+        "sysconfdir",
+        "mandir",
+        "docdir",
+        "infodir",
+    ];
+
+    for entry in WalkDir::new(output_path).follow_links(true) {
+        let Ok(entry) = entry else { continue };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        // Only check .pc files
+        let is_pc = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| ext == "pc");
+        if !is_pc {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+
+        let relative = path.strip_prefix(output_path).unwrap_or(path);
+
+        // Collect variable definitions for substitution (e.g. prefix=/nix/store/...)
+        let mut vars: Vec<(String, String)> = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Variable definitions use '=' without a colon
+            // Field definitions use ':' (e.g. "Libs: -L${libdir}")
+            if trimmed.starts_with('#') || trimmed.is_empty() || trimmed.contains(':') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                vars.push((key.trim().to_owned(), value.trim().to_owned()));
+            }
+        }
+
+        // Resolve a value by substituting ${var} references
+        let resolve = |value: &str| -> String {
+            let mut result = value.to_owned();
+            // Iterate a few times to handle chained substitutions
+            for _ in 0..5 {
+                let mut changed = false;
+                for (k, v) in &vars {
+                    let pattern = format!("${{{k}}}");
+                    if result.contains(&pattern) {
+                        result = result.replace(&pattern, v);
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            result
+        };
+
+        for (key, raw_value) in &vars {
+            if !path_fields.contains(&key.as_str()) {
+                continue;
+            }
+
+            let resolved = resolve(raw_value);
+
+            // Only validate absolute paths (skip empty or relative)
+            if !resolved.starts_with('/') {
+                continue;
+            }
+
+            if !Path::new(&resolved).exists() {
+                findings.push(AuditFinding {
+                    severity: Severity::Error,
+                    category: CheckCategory::BrokenReferences,
+                    check_name: "pkg_config_bad_path".to_owned(),
+                    message: format!(".pc file {key} references non-existent path"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: Some(format!("{key}={resolved}")),
+                });
+            }
+        }
+
+        // Also check -L and -I flags in Libs/Cflags lines for bad paths
+        for line in content.lines() {
+            let trimmed = line.trim();
+            let field_value = trimmed
+                .strip_prefix("Libs:")
+                .or_else(|| trimmed.strip_prefix("Libs.private:"))
+                .or_else(|| trimmed.strip_prefix("Cflags:"));
+
+            let Some(value) = field_value else {
+                continue;
+            };
+
+            let resolved = resolve(value);
+
+            for token in resolved.split_whitespace() {
+                let dir = token
+                    .strip_prefix("-L")
+                    .or_else(|| token.strip_prefix("-I"));
+
+                let Some(dir) = dir else { continue };
+
+                if dir.starts_with('/') && !Path::new(dir).exists() {
+                    findings.push(AuditFinding {
+                        severity: Severity::Error,
+                        category: CheckCategory::BrokenReferences,
+                        check_name: "pkg_config_bad_path".to_owned(),
+                        message: ".pc file references non-existent directory in flags".to_owned(),
+                        output_name: output_name.to_owned(),
+                        file_path: to_utf8(relative),
+                        details: Some(format!("{token} (resolved: {dir})")),
+                    });
+                }
+            }
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Category 7: Metadata Issues
 // ---------------------------------------------------------------------------
 
 /// Check package metadata for missing fields
@@ -759,6 +905,11 @@ pub async fn run_audit(
         if config.check_fhs_references {
             checks_run += 1;
             findings.extend(check_fhs_references(output_name, output_path));
+        }
+
+        if config.check_pkg_config {
+            checks_run += 1;
+            findings.extend(check_pkg_config(output_name, output_path));
         }
     }
 

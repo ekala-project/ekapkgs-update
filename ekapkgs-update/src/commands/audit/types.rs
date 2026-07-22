@@ -117,6 +117,7 @@ pub struct AuditConfig {
     pub check_rpaths: bool,
     pub check_shebangs: bool,
     pub check_fhs_references: bool,
+    pub check_pkg_config: bool,
     pub check_metadata: bool,
     /// Minimum severity to include in report (findings below this are filtered)
     pub min_severity: Severity,
@@ -132,6 +133,7 @@ impl Default for AuditConfig {
             check_rpaths: true,
             check_shebangs: true,
             check_fhs_references: true,
+            check_pkg_config: true,
             check_metadata: true,
             min_severity: Severity::Info,
         }
