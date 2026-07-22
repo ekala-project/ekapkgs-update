@@ -112,10 +112,7 @@ struct SampleMetadata {
 }
 
 /// Export the training dataset.
-pub async fn export_dataset(
-    db: &Database,
-    config: DatasetExportConfig,
-) -> anyhow::Result<()> {
+pub async fn export_dataset(db: &Database, config: DatasetExportConfig) -> anyhow::Result<()> {
     // Get all queue items
     let items = db.get_autofix_history(None, None).await?;
 
@@ -137,8 +134,7 @@ pub async fn export_dataset(
 
         // Filter by date
         if let Some(days) = config.since_days {
-            let cutoff =
-                chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
             if item.created_at < cutoff {
                 continue;
             }
@@ -215,7 +211,9 @@ fn export_sft(
 ) -> anyhow::Result<()> {
     for (metadata, prompt_text, response_text, _status) in samples {
         let Some(prompt) = prompt_text else { continue };
-        let Some(response) = response_text else { continue };
+        let Some(response) = response_text else {
+            continue;
+        };
 
         // Parse the prompt back into system/user messages
         let messages = parse_prompt_to_messages(prompt, response);
@@ -254,17 +252,23 @@ async fn export_dpo(
 
         // Find a successful attempt and a failed attempt
         let chosen = attempts.iter().find(|a| a.status == "success");
-        let rejected = attempts.iter().find(|a| {
-            a.status == "build_failed" || a.status == "apply_error"
-        });
+        let rejected = attempts
+            .iter()
+            .find(|a| a.status == "build_failed" || a.status == "apply_error");
 
         let (Some(chosen), Some(rejected)) = (chosen, rejected) else {
             continue;
         };
 
-        let Some(ref prompt) = chosen.prompt_text else { continue };
-        let Some(ref chosen_response) = chosen.response_text else { continue };
-        let Some(ref rejected_response) = rejected.response_text else { continue };
+        let Some(ref prompt) = chosen.prompt_text else {
+            continue;
+        };
+        let Some(ref chosen_response) = chosen.response_text else {
+            continue;
+        };
+        let Some(ref rejected_response) = rejected.response_text else {
+            continue;
+        };
 
         // Parse prompt into messages (system + user only, no assistant)
         let prompt_messages = parse_prompt_to_prompt_only(prompt);

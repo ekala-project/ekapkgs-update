@@ -55,9 +55,7 @@ pub struct ChatCompletionResponse {
 impl ChatCompletionResponse {
     /// Extract the content of the first choice, if any.
     pub fn content(&self) -> Option<&str> {
-        self.choices
-            .first()
-            .map(|c| c.message.content.as_str())
+        self.choices.first().map(|c| c.message.content.as_str())
     }
 }
 

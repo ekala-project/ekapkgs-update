@@ -219,7 +219,8 @@ impl PrEnhancementsConfig {
         use anyhow::Context;
         use tracing::info;
 
-        use crate::commands::audit::{checks, report, types::AuditConfig};
+        use crate::commands::audit::types::AuditConfig;
+        use crate::commands::audit::{checks, report};
         use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
 
         info!("{}: Running package audit", attr_path);
@@ -233,13 +234,8 @@ impl PrEnhancementsConfig {
         cleanup_result_symlinks().ok();
 
         let config = AuditConfig::default();
-        let audit_report = checks::run_audit(
-            &outputs,
-            Some(eval_entry_point),
-            Some(attr_path),
-            &config,
-        )
-        .await;
+        let audit_report =
+            checks::run_audit(&outputs, Some(eval_entry_point), Some(attr_path), &config).await;
 
         if audit_report.findings.is_empty() {
             info!("{}: Audit passed with no findings", attr_path);

@@ -617,10 +617,7 @@ fn test_compare_version_components() {
     use std::cmp::Ordering;
 
     // Basic comparisons
-    assert_eq!(
-        compare_version_components("1.2.3", "1.2.4"),
-        Ordering::Less
-    );
+    assert_eq!(compare_version_components("1.2.3", "1.2.4"), Ordering::Less);
     assert_eq!(
         compare_version_components("1.2.4", "1.2.3"),
         Ordering::Greater

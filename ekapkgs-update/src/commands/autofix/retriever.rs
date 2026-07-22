@@ -129,13 +129,13 @@ impl Embedding {
 
     /// Persist the embedding to the database.
     pub async fn store(self, db: &Database) -> Result<()> {
-        let embedding_json = serde_json::to_string(&self.vector)
-            .context("serialize embedding")?;
+        let embedding_json = serde_json::to_string(&self.vector).context("serialize embedding")?;
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
             "INSERT INTO autofix_embeddings
-                (attempt_id, error_type, error_summary, embedding, fix_json, build_success, created_at)
+                (attempt_id, error_type, error_summary, embedding, fix_json, build_success, \
+             created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.attempt_id)
@@ -214,7 +214,11 @@ pub async fn retrieve_similar_fixes(
     }
 
     // Sort by similarity descending, take top N
-    candidates.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     candidates.truncate(MAX_EXAMPLES);
 
     if !candidates.is_empty() {

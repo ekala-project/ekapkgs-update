@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, info};
-
 pub use types::{AuditConfig, Severity};
 
 /// Output format for the standalone audit command

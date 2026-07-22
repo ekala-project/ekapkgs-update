@@ -51,9 +51,7 @@ pub async fn apply_and_validate(
     // Syntax check via nix-instantiate
     let eval_result = Command::new("nix-instantiate")
         .args(["--eval", "--strict", "-E"])
-        .arg(format!(
-            "with import {eval_entry_point} {{}}; {attr_path}"
-        ))
+        .arg(format!("with import {eval_entry_point} {{}}; {attr_path}"))
         .current_dir(worktree_path)
         .output()
         .await
@@ -99,7 +97,13 @@ pub async fn apply_and_validate(
 /// Revert all changes in the worktree.
 async fn revert_worktree(worktree_path: &Path) {
     let result = Command::new("git")
-        .args(["-C", &worktree_path.to_string_lossy(), "checkout", "--", "."])
+        .args([
+            "-C",
+            &worktree_path.to_string_lossy(),
+            "checkout",
+            "--",
+            ".",
+        ])
         .output()
         .await;
 

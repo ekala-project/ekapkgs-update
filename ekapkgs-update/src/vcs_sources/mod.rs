@@ -893,8 +893,8 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
         // For non-semver versions, use numeric component comparison instead of
         // lexicographic string comparison (which incorrectly treats "9" > "12")
         debug!(
-            "Could not parse versions as semver (current: {}, new: {}), using component comparison \
-             (strategy: {})",
+            "Could not parse versions as semver (current: {}, new: {}), using component \
+             comparison (strategy: {})",
             clean_current, clean_new, strategy
         );
 

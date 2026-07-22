@@ -782,9 +782,7 @@ impl Commands {
                     };
                     commands::autofix::run(autofix_config).await
                 },
-                AutofixCommand::Status { database } => {
-                    commands::autofix::status(database).await
-                },
+                AutofixCommand::Status { database } => commands::autofix::status(database).await,
                 AutofixCommand::History {
                     database,
                     package,
@@ -795,9 +793,7 @@ impl Commands {
                     package,
                     session,
                     max_attempts,
-                } => {
-                    commands::autofix::enqueue(database, package, session, max_attempts).await
-                },
+                } => commands::autofix::enqueue(database, package, session, max_attempts).await,
                 AutofixCommand::ExportDataset {
                     database,
                     format,
@@ -808,7 +804,13 @@ impl Commands {
                     output,
                 } => {
                     commands::autofix::export_dataset_cmd(
-                        database, format, quality, error_type, since_days, min_samples, output,
+                        database,
+                        format,
+                        quality,
+                        error_type,
+                        since_days,
+                        min_samples,
+                        output,
                     )
                     .await
                 },

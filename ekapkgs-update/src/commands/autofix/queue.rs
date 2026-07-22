@@ -344,15 +344,13 @@ impl Database {
                 .context("update autofix status to fixed")?;
             },
             _ => {
-                sqlx::query(
-                    "UPDATE autofix_queue SET status = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(status)
-                .bind(&now)
-                .bind(id)
-                .execute(self.pool())
-                .await
-                .with_context(|| format!("update autofix status to {status}"))?;
+                sqlx::query("UPDATE autofix_queue SET status = ?, updated_at = ? WHERE id = ?")
+                    .bind(status)
+                    .bind(&now)
+                    .bind(id)
+                    .execute(self.pool())
+                    .await
+                    .with_context(|| format!("update autofix status to {status}"))?;
             },
         }
 
@@ -404,12 +402,10 @@ impl Database {
 
     /// Aggregate queue statistics.
     pub async fn get_autofix_queue_stats(&self) -> Result<AutofixQueueStats> {
-        let rows = sqlx::query(
-            "SELECT status, COUNT(*) as cnt FROM autofix_queue GROUP BY status",
-        )
-        .fetch_all(self.pool())
-        .await
-        .context("get autofix queue stats")?;
+        let rows = sqlx::query("SELECT status, COUNT(*) as cnt FROM autofix_queue GROUP BY status")
+            .fetch_all(self.pool())
+            .await
+            .context("get autofix queue stats")?;
 
         let mut stats = AutofixQueueStats::default();
         for row in rows {

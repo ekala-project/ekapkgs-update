@@ -80,8 +80,8 @@ async fn get_success_rate_trend(state: &AppState) -> Vec<SuccessRateTrend> {
     let rows: Vec<(String, f64)> = sqlx::query_as(
         "SELECT
              DATE(started_at) as date,
-             CAST(SUM(packages_succeeded) AS REAL) / NULLIF(SUM(packages_attempted), 0) * 100 \
-             as success_rate
+             CAST(SUM(packages_succeeded) AS REAL) / NULLIF(SUM(packages_attempted), 0) * 100 as \
+         success_rate
          FROM update_sessions
          WHERE status = 'completed'
          GROUP BY DATE(started_at)

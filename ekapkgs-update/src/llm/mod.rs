@@ -17,8 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use tracing::{debug, warn};
 
-pub use self::types::{ChatCompletionResponse, ChatMessage};
 use self::types::{ChatCompletionRequest, EmbeddingRequest, EmbeddingResponse};
+pub use self::types::{ChatCompletionResponse, ChatMessage};
 use crate::config::LlmConfig;
 
 /// Default model name.
@@ -47,9 +47,10 @@ impl LlmClient {
     ///
     /// Returns an error if no base URL is configured anywhere.
     pub fn from_config(llm_config: &LlmConfig) -> anyhow::Result<Self> {
-        let base_url = llm_config
-            .resolve_base_url()
-            .context("LLM base URL is required: set llm.base_url in config file or EKAPKGS_LLM_BASE_URL env var")?;
+        let base_url = llm_config.resolve_base_url().context(
+            "LLM base URL is required: set llm.base_url in config file or EKAPKGS_LLM_BASE_URL \
+             env var",
+        )?;
 
         let model = llm_config
             .resolve_model()
@@ -110,18 +111,22 @@ impl LlmClient {
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = Duration::from_secs(2u64.pow(attempt));
-                warn!("LLM request failed, retrying in {}s (attempt {}/{})", delay.as_secs(), attempt + 1, MAX_RETRIES + 1);
+                warn!(
+                    "LLM request failed, retrying in {}s (attempt {}/{})",
+                    delay.as_secs(),
+                    attempt + 1,
+                    MAX_RETRIES + 1
+                );
                 tokio::time::sleep(delay).await;
             }
 
-            debug!("Sending chat completion request to {} (attempt {})", url, attempt + 1);
+            debug!(
+                "Sending chat completion request to {} (attempt {})",
+                url,
+                attempt + 1
+            );
 
-            let result = self
-                .client
-                .post(&url)
-                .json(&request_body)
-                .send()
-                .await;
+            let result = self.client.post(&url).json(&request_body).send().await;
 
             let response = match result {
                 Ok(r) => r,

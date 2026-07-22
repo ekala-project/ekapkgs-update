@@ -120,7 +120,10 @@ pub fn format_markdown(report: &AuditReport) -> String {
             } else {
                 String::new()
             };
-            out.push_str(&format!("- {} {}: {}", finding.check_name, location, finding.message));
+            out.push_str(&format!(
+                "- {} {}: {}",
+                finding.check_name, location, finding.message
+            ));
             if let Some(ref details) = finding.details {
                 out.push_str(&format!(" (`{details}`)"));
             }
@@ -164,10 +167,7 @@ pub fn format_markdown(report: &AuditReport) -> String {
                 } else {
                     String::new()
                 };
-                out.push_str(&format!(
-                    "- {icon} {location} {}\n",
-                    finding.message
-                ));
+                out.push_str(&format!("- {icon} {location} {}\n", finding.message));
             }
             out.push('\n');
         }

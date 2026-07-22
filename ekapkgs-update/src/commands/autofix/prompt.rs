@@ -6,15 +6,15 @@
 
 use serde_json::Value;
 
-use crate::llm::types::ChatMessage;
-
 use super::queue::AutofixAttemptRecord;
 use super::retriever::SimilarFix;
+use crate::llm::types::ChatMessage;
 
 /// System prompt — kept ultra-concise for small models.
 const SYSTEM_PROMPT: &str = "\
 You fix Nix package build errors. Output ONLY valid JSON, no explanation.
-Format: {\"files\":[{\"path\":\"FILE\",\"operations\":[{\"type\":\"replace\",\"old\":\"EXACT_OLD_TEXT\",\"new\":\"NEW_TEXT\"}]}]}";
+Format: {\"files\":[{\"path\":\"FILE\",\"operations\":[{\"type\":\"replace\",\"old\":\"\
+                             EXACT_OLD_TEXT\",\"new\":\"NEW_TEXT\"}]}]}";
 
 /// Build the chat messages for an LLM fix attempt.
 ///
@@ -31,9 +31,7 @@ pub fn build_prompt(
     previous_attempt: Option<&AutofixAttemptRecord>,
     similar_fixes: &[SimilarFix],
 ) -> Vec<ChatMessage> {
-    let error_type = error_context["error_type"]
-        .as_str()
-        .unwrap_or("unknown");
+    let error_type = error_context["error_type"].as_str().unwrap_or("unknown");
 
     let suspected_cause = error_context["details"]
         .get("suspected_cause")
@@ -65,13 +63,28 @@ pub fn build_prompt(
             build_obsolete_patch_prompt(&mut user_content, error_context, nix_file_content);
         },
         ("build_error", Some("missing_dependency")) => {
-            build_missing_dep_prompt(&mut user_content, error_context, nix_file_content, build_log);
+            build_missing_dep_prompt(
+                &mut user_content,
+                error_context,
+                nix_file_content,
+                build_log,
+            );
         },
         ("test_error", _) => {
-            build_test_error_prompt(&mut user_content, error_context, nix_file_content, build_log);
+            build_test_error_prompt(
+                &mut user_content,
+                error_context,
+                nix_file_content,
+                build_log,
+            );
         },
         _ => {
-            build_generic_build_prompt(&mut user_content, error_context, nix_file_content, build_log);
+            build_generic_build_prompt(
+                &mut user_content,
+                error_context,
+                nix_file_content,
+                build_log,
+            );
         },
     }
 
@@ -165,8 +178,8 @@ fn build_test_error_prompt(
 ) {
     out.push_str("Error: Package tests failed after version update.\n");
     out.push_str(
-        "Action: Fix the test configuration (e.g., disable broken tests, update test expectations, \
-         add test dependencies).\n\n",
+        "Action: Fix the test configuration (e.g., disable broken tests, update test \
+         expectations, add test dependencies).\n\n",
     );
 
     // Show test-related sections
@@ -204,11 +217,7 @@ fn build_generic_build_prompt(
     let relevant = extract_section(nix_content, "buildPhase", 30);
     let section = if relevant.is_empty() {
         // Fall back to showing the beginning of the file
-        nix_content
-            .lines()
-            .take(50)
-            .collect::<Vec<_>>()
-            .join("\n")
+        nix_content.lines().take(50).collect::<Vec<_>>().join("\n")
     } else {
         relevant
     };
@@ -236,7 +245,10 @@ fn toolchain_hints(stderr: &str) -> Option<&'static str> {
     } else if lower.contains("meson") {
         Some("Meson package: meson/ninja in nativeBuildInputs, use mesonFlags to configure.")
     } else if lower.contains("setup.py") || lower.contains("setuptools") || lower.contains("pip") {
-        Some("Python package: dependencies go in propagatedBuildInputs, build deps in nativeBuildInputs.")
+        Some(
+            "Python package: dependencies go in propagatedBuildInputs, build deps in \
+             nativeBuildInputs.",
+        )
     } else if lower.contains("npm") || lower.contains("node_modules") {
         Some("Node.js package: npmDepsHash may need updating.")
     } else if lower.contains("go build") || lower.contains("vendor") {

@@ -87,9 +87,8 @@ fn check_store_references(output_name: &str, output_path: &Path) -> Vec<AuditFin
 
     // Extensions to skip (binary/compressed formats)
     let skip_extensions: HashSet<&str> = [
-        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "gz", "xz", "bz2", "zst",
-        "zip", "tar", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "pyc", "pyo", "class",
-        "o", "a",
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "gz", "xz", "bz2", "zst", "zip",
+        "tar", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "pyc", "pyo", "class", "o", "a",
     ]
     .into_iter()
     .collect();
@@ -182,11 +181,7 @@ async fn check_shared_libs(output_name: &str, output_path: &Path) -> Vec<AuditFi
             continue;
         }
 
-        let Ok(output) = tokio::process::Command::new("ldd")
-            .arg(path)
-            .output()
-            .await
-        else {
+        let Ok(output) = tokio::process::Command::new("ldd").arg(path).output().await else {
             continue;
         };
 

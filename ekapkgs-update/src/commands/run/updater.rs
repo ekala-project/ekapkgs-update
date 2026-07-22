@@ -257,7 +257,7 @@ pub(super) async fn perform_update(
                     &worktree_path,
                     &update_error,
                     Some(error_message.clone()), // Build/update error message
-                    None, // Test output requires deeper capture plumbing
+                    None,                        // Test output requires deeper capture plumbing
                 )
                 .await
                 {
@@ -768,8 +768,8 @@ async fn create_pr_for_update(
         crate::commands::update::TestResult::Failed(stderr) => {
             body.push_str("\n\n## Tests\n\n❌ `passthru.tests` **failed**\n\n");
             body.push_str(
-                "This PR is opened as a draft because the package's passthru.tests \
-                 did not pass after the update.\n\n",
+                "This PR is opened as a draft because the package's passthru.tests did not pass \
+                 after the update.\n\n",
             );
             // Truncate very long output
             let truncated = if stderr.len() > 4000 {

@@ -132,12 +132,12 @@ impl ConfigFile {
 
         if !path.exists() {
             if explicit_path.is_some() {
-                bail!(
-                    "Config file not found: {}",
-                    path.display()
-                );
+                bail!("Config file not found: {}", path.display());
             }
-            debug!("Default config file not found at {}, using defaults", path.display());
+            debug!(
+                "Default config file not found at {}, using defaults",
+                path.display()
+            );
             return Ok(Self::default());
         }
 
@@ -189,32 +189,42 @@ impl ConfigFile {
 impl LlmConfig {
     /// Resolve the base URL from config file, then env var.
     pub fn resolve_base_url(&self) -> Option<String> {
-        self.base_url.clone().or_else(|| std::env::var("EKAPKGS_LLM_BASE_URL").ok())
+        self.base_url
+            .clone()
+            .or_else(|| std::env::var("EKAPKGS_LLM_BASE_URL").ok())
     }
 
     /// Resolve the model name from config file, then env var.
     pub fn resolve_model(&self) -> Option<String> {
-        self.model.clone().or_else(|| std::env::var("EKAPKGS_LLM_MODEL").ok())
+        self.model
+            .clone()
+            .or_else(|| std::env::var("EKAPKGS_LLM_MODEL").ok())
     }
 
     /// Resolve max tokens from config file, then env var.
     pub fn resolve_max_tokens(&self) -> Option<u32> {
         self.max_tokens.or_else(|| {
-            std::env::var("EKAPKGS_LLM_MAX_TOKENS").ok().and_then(|s| s.parse().ok())
+            std::env::var("EKAPKGS_LLM_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
         })
     }
 
     /// Resolve temperature from config file, then env var.
     pub fn resolve_temperature(&self) -> Option<f32> {
         self.temperature.or_else(|| {
-            std::env::var("EKAPKGS_LLM_TEMPERATURE").ok().and_then(|s| s.parse().ok())
+            std::env::var("EKAPKGS_LLM_TEMPERATURE")
+                .ok()
+                .and_then(|s| s.parse().ok())
         })
     }
 
     /// Resolve timeout from config file, then env var.
     pub fn resolve_timeout_secs(&self) -> Option<u64> {
         self.timeout_secs.or_else(|| {
-            std::env::var("EKAPKGS_LLM_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok())
+            std::env::var("EKAPKGS_LLM_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
         })
     }
 }
@@ -267,8 +277,14 @@ builders = "ssh://builder"
 max_jobs = 4
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.database.as_deref(), Some("/var/lib/ekapkgs-update/updates.db"));
-        assert_eq!(config.llm.base_url.as_deref(), Some("http://llm-server:8080"));
+        assert_eq!(
+            config.database.as_deref(),
+            Some("/var/lib/ekapkgs-update/updates.db")
+        );
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("http://llm-server:8080")
+        );
         assert_eq!(config.llm.model.as_deref(), Some("qwen2.5-coder:3b"));
         assert_eq!(config.llm.max_tokens, Some(2048));
         assert_eq!(config.llm.temperature, Some(0.1));
@@ -322,7 +338,10 @@ max_jobs = 4
 base_url = "http://localhost:11434"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.llm.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("http://localhost:11434")
+        );
         assert!(config.llm.model.is_none());
         assert!(config.database.is_none());
         config.validate().unwrap();

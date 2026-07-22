@@ -101,7 +101,7 @@ pub fn infer_strategy_from_attr_path(attr_path: &str) -> Option<AttrPathStrategy
     match numeric_suffix_count {
         1 => Some(AttrPathStrategy::Strategy(SemverStrategy::Minor)), // foo_3 -> 3.x
         2 => Some(AttrPathStrategy::Strategy(SemverStrategy::Patch)), // foo_3_3 -> 3.3.x
-        _ => Some(AttrPathStrategy::Pinned),                         // foo_2_5_39 -> pinned
+        _ => Some(AttrPathStrategy::Pinned),                          // foo_2_5_39 -> pinned
     }
 }
 

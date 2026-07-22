@@ -369,7 +369,10 @@ mod tests {
     #[test]
     fn test_parse_cvss_vector_score_invalid() {
         assert_eq!(parse_cvss_vector_score("garbage"), None);
-        assert_eq!(parse_cvss_vector_score("AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), None);
+        assert_eq!(
+            parse_cvss_vector_score("AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+            None
+        );
     }
 
     #[test]

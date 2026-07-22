@@ -71,7 +71,10 @@ pub async fn run(config: AutofixConfig) -> anyhow::Result<()> {
     };
 
     let Some(ref llm_ref) = llm else {
-        println!("\nLLM not configured. Set llm.base_url in config file or EKAPKGS_LLM_BASE_URL env var.");
+        println!(
+            "\nLLM not configured. Set llm.base_url in config file or EKAPKGS_LLM_BASE_URL env \
+             var."
+        );
         return Ok(());
     };
 
@@ -147,7 +150,10 @@ pub async fn history(
             "\n{} [{}] — {} attempt(s)",
             item.attr_path, item.status, item.attempts
         );
-        println!("  Error: {} (phase: {})", item.error_type, item.failed_phase);
+        println!(
+            "  Error: {} (phase: {})",
+            item.error_type, item.failed_phase
+        );
         println!("  Session: {}", item.session_id);
 
         let attempts = db.get_autofix_attempts(item.id).await?;

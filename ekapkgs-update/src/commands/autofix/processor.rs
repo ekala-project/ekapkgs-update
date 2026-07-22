@@ -33,9 +33,15 @@ impl std::fmt::Display for ProcessingStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Processed: {}, Fixed: {}, Failed: {}, Skipped: {}, Escalated: {}, LLM errors: {}, Parse errors: {}",
-            self.processed, self.fixed, self.failed, self.skipped,
-            self.escalated, self.llm_errors, self.parse_errors
+            "Processed: {}, Fixed: {}, Failed: {}, Skipped: {}, Escalated: {}, LLM errors: {}, \
+             Parse errors: {}",
+            self.processed,
+            self.fixed,
+            self.failed,
+            self.skipped,
+            self.escalated,
+            self.llm_errors,
+            self.parse_errors
         )
     }
 }
@@ -159,16 +165,11 @@ pub async fn process_queue(
         let last_attempt = previous_attempts.last();
 
         // RAG: retrieve similar successful fixes
-        let error_summary = build_error_summary(
-            &item.attr_path,
-            &item.error_type,
-            build_log.as_deref(),
-        );
-        let similar_fixes = retrieve_similar_fixes(
-            db, llm, &item.error_type, &error_summary,
-        )
-        .await
-        .unwrap_or_default();
+        let error_summary =
+            build_error_summary(&item.attr_path, &item.error_type, build_log.as_deref());
+        let similar_fixes = retrieve_similar_fixes(db, llm, &item.error_type, &error_summary)
+            .await
+            .unwrap_or_default();
 
         // Build prompt (with RAG examples if available)
         let messages = build_prompt(
@@ -189,7 +190,10 @@ pub async fn process_queue(
 
         if config.dry_run {
             info!("{}: [dry-run] Would send prompt to LLM", item.attr_path);
-            println!("\n--- Prompt for {} ---\n{}\n---\n", item.attr_path, prompt_text);
+            println!(
+                "\n--- Prompt for {} ---\n{}\n---\n",
+                item.attr_path, prompt_text
+            );
             db.update_autofix_status(item.id, "queued").await?;
             continue;
         }
@@ -262,10 +266,7 @@ pub async fn process_queue(
         .await?;
 
         // Pre-compute embedding (non-fatal if unavailable)
-        let embedding = Embedding::compute(llm, &error_summary)
-            .await
-            .ok()
-            .flatten();
+        let embedding = Embedding::compute(llm, &error_summary).await.ok().flatten();
 
         match validation {
             ValidationResult::BuildSuccess => {
@@ -545,7 +546,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_code_block() {
-        let input = "Here's the fix:\n```json\n{\"files\":[{\"path\":\"x.nix\",\"operations\":[]}]}\n```\n";
+        let input =
+            "Here's the fix:\n```json\n{\"files\":[{\"path\":\"x.nix\",\"operations\":[]}]}\n```\n";
         let result = extract_json(input).unwrap();
         assert!(result["files"].is_array());
     }
@@ -559,7 +561,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_with_commentary() {
-        let input = "I will fix the build error by adding the missing dependency.\n{\"files\":[{\"path\":\"x.nix\",\"operations\":[]}]}\nDone.";
+        let input = "I will fix the build error by adding the missing \
+                     dependency.\n{\"files\":[{\"path\":\"x.nix\",\"operations\":[]}]}\nDone.";
         let result = extract_json(input).unwrap();
         assert!(result["files"].is_array());
     }

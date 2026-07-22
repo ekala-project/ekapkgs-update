@@ -135,8 +135,7 @@ pub async fn is_many_variants_package(
     attr_path: &str,
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let check_expr =
-        format!("with import {normalized_entry} {{ }}; {attr_path} ? variants");
+    let check_expr = format!("with import {normalized_entry} {{ }}; {attr_path} ? variants");
 
     match eval_nix_bool(&check_expr).await {
         Ok(is_many_variants) => {

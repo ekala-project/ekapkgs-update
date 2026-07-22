@@ -109,7 +109,11 @@ pub async fn release_checker_service_with_limits(
                 });
             },
             Ok(NixEvalItem::Error(e)) => {
-                warn!("Evaluation error for {}: {}", e.attr, e.error.lines().last().unwrap_or(&e.error));
+                warn!(
+                    "Evaluation error for {}: {}",
+                    e.attr,
+                    e.error.lines().last().unwrap_or(&e.error)
+                );
                 error_count += 1;
             },
             Err(e) => {
@@ -188,8 +192,7 @@ async fn check_for_update(
     // should constrain updates to their version series.
     let semver_strategy = if let Some(strategy) = metadata.semver_strategy {
         strategy
-    } else if let Some(inferred) =
-        crate::variant_strategy::infer_strategy_from_attr_path(attr_path)
+    } else if let Some(inferred) = crate::variant_strategy::infer_strategy_from_attr_path(attr_path)
     {
         match inferred {
             crate::variant_strategy::AttrPathStrategy::Pinned => {

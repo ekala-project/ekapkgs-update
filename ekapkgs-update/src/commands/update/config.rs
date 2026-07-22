@@ -426,12 +426,7 @@ impl UpdateParams {
         };
 
         let (_removed_patches, _test_result) = update_config
-            .update_from_file_path(
-                file,
-                attr_path,
-                expr_file_path,
-                version_config,
-            )
+            .update_from_file_path(file, attr_path, expr_file_path, version_config)
             .await?;
 
         Ok(())
