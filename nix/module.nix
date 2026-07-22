@@ -7,6 +7,7 @@
 
 let
   cfg = config.services.ekapkgs-update;
+  settingsFormat = pkgs.formats.toml { };
 
   # The Cachix auth token can be supplied two ways:
   #
@@ -17,15 +18,18 @@ let
   #
   # - cachix.authTokenFile → a path containing the bare token value (no
   #                          `KEY=` prefix). Loaded via systemd
-  #                          `LoadCredential=` and exported into the
-  #                          environment by an ExecStartPre helper. Use
-  #                          this for stricter sandboxing.
+  #                          `LoadCredential=` and exported by a helper.
   useCredential = cfg.cachix.authTokenFile != null;
 
-  # Helper script: read the credential file (if any), append it to a
-  # runtime env file, then exec the daemon. We can't use only
-  # `EnvironmentFile=` for credentials because the credentials directory is
-  # only available inside the unit, not at unit-load time.
+  # Merge user settings with computed defaults.
+  effectiveSettings = lib.recursiveUpdate {
+    database = "/var/lib/${cfg.stateDirectory}/updates.db";
+    file = cfg.packagesFile;
+  } cfg.settings;
+
+  configFile = settingsFormat.generate "ekapkgs-update.toml" effectiveSettings;
+
+  # Helper script: inject credentials into env, then exec the daemon.
   startScript = pkgs.writeShellScript "ekapkgs-update-start" ''
     set -eu
 
@@ -47,8 +51,7 @@ let
     set +a
 
     exec ${cfg.package}/bin/ekapkgs-update run \
-      --file ${lib.escapeShellArg cfg.packagesFile} \
-      --database ${lib.escapeShellArg "/var/lib/${cfg.stateDirectory}/updates.db"} \
+      --config-file ${configFile} \
       ${
         lib.optionalString (
           cfg.cachix.cacheName != null
@@ -56,6 +59,109 @@ let
       } \
       ${lib.escapeShellArgs cfg.extraArgs}
   '';
+
+  # ── Settings submodule types ──────────────────────────────────────────
+
+  llmType = lib.types.submodule {
+    freeformType = settingsFormat.type;
+    options = {
+      base_url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "http://llm-server:8080";
+        description = ''
+          Base URL of the OpenAI-compatible API server used by the autofix
+          pipeline. When `null`, autofix commands will look for the
+          `EKAPKGS_LLM_BASE_URL` environment variable.
+        '';
+      };
+      model = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "qwen2.5-coder:3b";
+        description = ''
+          Model name for chat completions and embeddings.
+        '';
+      };
+      max_tokens = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 2048;
+        description = "Maximum tokens in LLM responses.";
+      };
+      temperature = lib.mkOption {
+        type = lib.types.nullOr lib.types.float;
+        default = null;
+        example = 0.1;
+        description = "Sampling temperature (0.0 = deterministic).";
+      };
+      timeout_secs = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 300;
+        description = "Request timeout in seconds for LLM calls.";
+      };
+    };
+  };
+
+  autofixType = lib.types.submodule {
+    freeformType = settingsFormat.type;
+    options = {
+      max_attempts = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 3;
+        description = ''
+          Maximum LLM fix attempts per package before escalating to human review.
+        '';
+      };
+    };
+  };
+
+  nixBuildType = lib.types.submodule {
+    freeformType = settingsFormat.type;
+    options = {
+      builders = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "ssh://builder";
+        description = ''
+          Nix builders string passed as `--builders` to `nix-build`.
+        '';
+      };
+      max_jobs = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.unsigned;
+        default = null;
+        example = 4;
+        description = ''
+          Maximum number of local build jobs passed as `--max-jobs` to
+          `nix-build`. Set to 0 to force all builds to remote builders.
+        '';
+      };
+    };
+  };
+
+  settingsType = lib.types.submodule {
+    freeformType = settingsFormat.type;
+    options = {
+      llm = lib.mkOption {
+        type = llmType;
+        default = { };
+        description = "LLM server configuration for the autofix pipeline.";
+      };
+      autofix = lib.mkOption {
+        type = autofixType;
+        default = { };
+        description = "Autofix pipeline settings.";
+      };
+      nix = lib.mkOption {
+        type = nixBuildType;
+        default = { };
+        description = "Nix build settings applied globally.";
+      };
+    };
+  };
+
 in
 {
   options.services.ekapkgs-update = {
@@ -109,15 +215,15 @@ in
       default = null;
       description = ''
         Path to a file containing additional environment variables for
-        the service, in the format <literal>KEY=VALUE</literal> per line.
-        Useful for supplying <literal>GITHUB_TOKEN</literal>,
-        <literal>CACHIX_AUTH_TOKEN</literal>, or
-        <literal>CACHIX_CACHE_NAME</literal>.
+        the service, in the format `KEY=VALUE` per line.
+        Useful for supplying `GITHUB_TOKEN`,
+        `CACHIX_AUTH_TOKEN`, or
+        `CACHIX_CACHE_NAME`.
 
         This is the recommended way to deliver secrets and is compatible
         with sops-nix, agenix, and other secret-management modules.
 
-        See also <option>services.ekapkgs-update.cachix.authTokenFile</option>
+        See also {option}`services.ekapkgs-update.cachix.authTokenFile`
         for an alternative, credential-based delivery mechanism.
       '';
     };
@@ -132,7 +238,7 @@ in
       ];
       description = ''
         Additional command-line arguments passed to the
-        <literal>ekapkgs-update run</literal> invocation.
+        `ekapkgs-update run` invocation.
       '';
     };
 
@@ -143,8 +249,8 @@ in
         example = "ekapkgs";
         description = ''
           Name of the Cachix cache to push successful builds to. When set,
-          the corresponding <literal>--cachix-cache</literal> CLI flag is
-          appended automatically. Set to <literal>null</literal> to leave
+          the corresponding `--cachix-cache` CLI flag is
+          appended automatically. Set to `null` to leave
           Cachix push disabled regardless of any token.
         '';
       };
@@ -154,17 +260,28 @@ in
         default = null;
         description = ''
           Path to a file containing the raw Cachix auth token (no
-          <literal>KEY=</literal> prefix, just the token value). When set,
-          the file is loaded via systemd's <literal>LoadCredential=</literal>
-          mechanism and exported as the <literal>CACHIX_AUTH_TOKEN</literal>
+          `KEY=` prefix, just the token value). When set,
+          the file is loaded via systemd's `LoadCredential=`
+          mechanism and exported as the `CACHIX_AUTH_TOKEN`
           environment variable to the service.
 
-          Prefer <option>environmentFile</option> if you already manage
-          other secrets (<literal>GITHUB_TOKEN</literal> etc.) through
+          Prefer {option}`environmentFile` if you already manage
+          other secrets (`GITHUB_TOKEN` etc.) through
           a single sops-nix/agenix file; this option exists for
           deployments that want stricter credential sandboxing.
         '';
       };
+    };
+
+    settings = lib.mkOption {
+      type = settingsType;
+      default = { };
+      description = ''
+        Configuration for ekapkgs-update, serialised to
+        `config.toml` and passed via `--config-file`.
+        The submodule is freeform: any key not explicitly modelled here
+        is still accepted and forwarded as-is to the TOML output.
+      '';
     };
 
     web = {
@@ -182,8 +299,8 @@ in
         default = "127.0.0.1";
         example = "0.0.0.0";
         description = ''
-          Host address to bind the web server to. Use <literal>0.0.0.0</literal>
-          to listen on all interfaces, or <literal>127.0.0.1</literal> for
+          Host address to bind the web server to. Use `0.0.0.0`
+          to listen on all interfaces, or `127.0.0.1` for
           localhost only.
         '';
       };
