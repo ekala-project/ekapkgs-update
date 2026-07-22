@@ -65,8 +65,13 @@ ekapkgs-update/                     # Main CLI crate
         git.rs                      #   Git commit creation
         pr.rs                       #   PR body assembly
         variants.rs                 #   mkManyVariants support
+      audit/                        # Package correctness auditing
+        mod.rs                      #   Standalone command entry + target resolution
+        types.rs                    #   Severity, CheckCategory, AuditFinding, AuditReport, AuditConfig
+        checks.rs                   #   Check implementations (symlinks, layout, RPATH, shebangs, .pc files, etc.)
+        report.rs                   #   Terminal (ANSI), markdown (PR body), and JSON formatters
       migrate/                      # nixpkgs → ekapkgs paradigm migration
-      pr_enhancements.rs            # PrEnhancementsConfig (CVE, Repology, rebuilds, Cachix)
+      pr_enhancements.rs            # PrEnhancementsConfig (CVE, Repology, rebuilds, Cachix, audit)
       autofix/                        # LLM-assisted automatic fix pipeline
         config.rs                   #   AutofixConfig
         queue.rs                    #   Queue management (SQLite autofix_queue/autofix_attempts)
@@ -75,7 +80,8 @@ ekapkgs-update/                     # Main CLI crate
         validator.rs                #   Apply changes + nix-build validation
         processor.rs                #   Serial queue processing loop
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
-      export.rs, apply.rs           # LLM integration (export failure context, apply fixes)
+      export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
+      apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
       log.rs, inspect.rs            # Per-package failure inspection
       query.rs, report.rs, status.rs  # Database query/reporting commands
@@ -196,6 +202,65 @@ Failed updates use stepped backoff: **2 days → 4 days → 6 days** (max). Succ
 - **Worktrees** (default): Each update in an isolated git worktree. Full concurrency and PR support.
 - **Branch**: Direct commits to current branch. Git serialized via `Arc<Mutex<()>>`. No PRs.
 
+### Package Audit (`commands/audit/`)
+
+The `audit` command inspects built Nix package outputs for correctness issues. It has two surfaces:
+
+1. **Standalone command** (`ekapkgs-update audit <target>`) — accepts a `.drv` path, store path, or attr path. Builds if needed, walks outputs, runs all checks, and reports findings. Exits with code 1 if any errors are found (CI-friendly).
+
+2. **Run integration** (`ekapkgs-update run --audit`) — after each successful build during batch updates, audits the package and includes findings in the PR body.
+
+#### Checks performed (`commands/audit/checks.rs`)
+
+| Check | Category | Severity | Description |
+|-------|----------|----------|-------------|
+| `broken_symlink` | BrokenReferences | Error | Symlinks that don't resolve |
+| `missing_store_reference` | BrokenReferences | Warning | Hardcoded `/nix/store/...` paths that don't exist (scans first 8KB) |
+| `missing_shared_lib` | BrokenReferences | Error | `ldd` reports "not found" for shared libraries |
+| `pkg_config_bad_path` | BrokenReferences | Error | `.pc` file path fields or `-L`/`-I` flags reference non-existent dirs |
+| `empty_output` | LayoutIssues | Error | Output directory contains no entries |
+| `no_regular_files` | LayoutIssues | Warning | Output has directories but no regular files |
+| `unexpected_top_level` | LayoutIssues | Warning | Top-level entries outside `bin/`, `lib/`, `share/`, `etc/`, `include/`, etc. |
+| `misplaced_executable` | LayoutIssues | Info | Executable files outside `bin/`, `sbin/`, `libexec/` |
+| `build_dir_in_rpath` | BinaryIssues | Error | RPATH contains `/build/`, `/tmp/`, or `/homeless-shelter/` |
+| `fhs_rpath` | BinaryIssues | Warning | RPATH contains FHS paths like `/usr/lib` |
+| `fhs_shebang` | ScriptIssues | Error | Shebang points to `/usr/bin/`, `/bin/` (except `/bin/sh`) |
+| `bin_sh_shebang` | ScriptIssues | Info | Uses `/bin/sh` (works on NixOS but not fully pure) |
+| `fhs_path_reference` | ScriptIssues | Warning | Scripts contain hardcoded `/usr/`, `/opt/`, `/etc/` paths |
+| `missing_description` | MetadataIssues | Info | `meta.description` not set |
+| `missing_license` | MetadataIssues | Warning | `meta.license` not set |
+| `missing_homepage` | MetadataIssues | Info | `meta.homepage` not set |
+
+Checks that depend on external tools (`ldd`, `patchelf`) gracefully skip if the tool is unavailable.
+
+The pkg-config check parses `.pc` variable definitions, resolves `${var}` substitutions, and validates that path-valued fields (`prefix`, `libdir`, `includedir`, etc.) and `-L`/`-I` flags in `Libs`/`Cflags` lines point to existing directories.
+
+#### Integration with `run` command
+
+Controlled by `PrEnhancementsConfig.run_audit`. When enabled, `perform_worktree_audit()` builds the package in the worktree, runs all checks, and returns markdown for the PR body. Audit findings are informational — they do not block the update.
+
+### Export (`commands/export.rs`)
+
+The `export` command extracts failure context from preserved worktrees into LLM-friendly formats for analysis or feeding to the autofix pipeline.
+
+```
+ekapkgs-update export <attr_path> [--format json|markdown] [-o file]
+```
+
+Collects from preserved failure artifacts:
+- **Error context** — Structured JSON from the failed update phase
+- **Git diff** — Changes made before failure (truncated to 10KB in markdown)
+- **Build log** — Nix build stderr (last 5KB in markdown)
+- **Test output** — passthru.tests output if applicable
+- **Package metadata** — Nix evaluation metadata
+- **Previous attempts** — Historical phase/status/duration from database
+
+Output formats:
+- **JSON** (`--format json`) — Complete `LlmContext` struct serialized with serde
+- **Markdown** (`--format markdown`) — Sections with fenced code blocks, suitable for pasting into LLM conversations
+
+Requires `--preserve-failures` to have been set during the `run` that produced the failure.
+
 ## Important Types
 
 | Type | Location | Purpose |
@@ -220,6 +285,9 @@ Failed updates use stepped backoff: **2 days → 4 days → 6 days** (max). Succ
 | `LlmClient` | `llm/mod.rs` | OpenAI-compatible chat completion client |
 | `AutofixQueueItem` | `commands/autofix/queue.rs` | Queue entry for LLM fix attempt |
 | `AutofixAttemptRecord` | `commands/autofix/queue.rs` | Single LLM attempt with prompt/response/outcome |
+| `AuditReport` | `commands/audit/types.rs` | Complete audit result (findings, timing, store paths) |
+| `AuditFinding` | `commands/audit/types.rs` | Single finding (severity, category, check name, file path) |
+| `AuditConfig` | `commands/audit/types.rs` | Controls which checks to run and minimum severity |
 
 ## External Dependencies
 
@@ -231,6 +299,8 @@ Runtime tools (provided by Nix dev shell):
 - `git` — Worktree management, commits, branches
 - `nixfmt` — Optional Nix file formatting
 - `cachix` — Optional binary cache pushing
+- `patchelf` — Optional RPATH inspection (used by audit)
+- `ldd` — Optional shared library checking (used by audit)
 
 API integrations (via reqwest):
 
