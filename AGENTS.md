@@ -13,6 +13,7 @@ ekapkgs-update automates Nix package updates: it discovers upstream releases (Gi
 
 - **No commit attribution** — Do not add `Co-Authored-By:` or similar attribution lines to commits.
 - **Zero warnings before committing** — Run `cargo clippy --workspace` and resolve all warnings before any commit. All compiler warnings must also be clean.
+- **Format before committing** — Run `cargo fmt` and `nix fmt .` before committing to ensure consistent formatting across Rust and Nix files.
 - **Keep this file current** — If you alter the project structure (add/remove/rename modules, crates, or significant files), update this file to reflect the change.
 
 ## Hard Constraints
