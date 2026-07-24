@@ -56,6 +56,14 @@ pub struct NixEvalError {
     pub error: String,
 }
 
+impl NixEvalError {
+    /// Whether this error is from a top-level function attribute (not a real failure).
+    pub fn is_function_error(&self) -> bool {
+        self.error
+            .contains("cannot evaluate a function that has an argument without a value")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Context;
@@ -80,5 +88,24 @@ mod tests {
         let _item: NixEvalItem = serde_json::from_str(err)
             .context("nix-eval-jobs sample error fixture must parse as NixEvalItem")?;
         Ok(())
+    }
+
+    #[test]
+    fn test_function_error_detection() {
+        let function_error = NixEvalError {
+            attr: "myHelper".to_string(),
+            attr_path: vec!["myHelper".to_string()],
+            error: "error: cannot evaluate a function that has an argument \
+                    without a value ('name')"
+                .to_string(),
+        };
+        assert!(function_error.is_function_error());
+
+        let real_error = NixEvalError {
+            attr: "brokenPkg".to_string(),
+            attr_path: vec!["brokenPkg".to_string()],
+            error: "error: attribute 'src' missing".to_string(),
+        };
+        assert!(!real_error.is_function_error());
     }
 }

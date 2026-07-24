@@ -109,12 +109,16 @@ pub async fn release_checker_service_with_limits(
                 });
             },
             Ok(NixEvalItem::Error(e)) => {
-                warn!(
-                    "Evaluation error for {}: {}",
-                    e.attr,
-                    e.error.lines().last().unwrap_or(&e.error)
-                );
-                error_count += 1;
+                if e.is_function_error() {
+                    debug!("Skipping function attribute: {}", e.attr);
+                } else {
+                    warn!(
+                        "Evaluation error for {}: {}",
+                        e.attr,
+                        e.error.lines().last().unwrap_or(&e.error)
+                    );
+                    error_count += 1;
+                }
             },
             Err(e) => {
                 warn!("Stream error: {}", e);
