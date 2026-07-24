@@ -550,16 +550,30 @@ fn find_best_release(
 /// Compare two version strings descendingly (newest first).
 ///
 /// Tries to parse both sides as semver (after stripping a leading `v`) and
-/// returns `b.cmp(&a)` so that the larger version sorts first. Falls back to
-/// lexicographic comparison if either side fails to parse, in which case the
-/// fallback is also reversed (`b.cmp(a)`) to preserve newest-first ordering.
+/// returns `b.cmp(&a)` so that the larger version sorts first.
+///
+/// To maintain a valid total order (required by Rust's sort), this function
+/// ensures parseable and non-parseable versions are partitioned consistently:
+/// parseable versions always sort before non-parseable versions (when descending,
+/// this means parseable versions are considered "newer" and appear first).
 fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
     match (
         Version::parse(a.trim_start_matches('v')),
         Version::parse(b.trim_start_matches('v')),
     ) {
+        // Both parse as semver: use semantic version comparison (descending)
         (Ok(va), Ok(vb)) => vb.cmp(&va),
-        _ => b.cmp(a),
+
+        // Both fail to parse: use string comparison (descending)
+        (Err(_), Err(_)) => b.cmp(a),
+
+        // One parses, one doesn't: parseable versions always sort first (descending)
+        // This ensures transitivity: if a and c both parse, and b doesn't, then
+        // a > b and c > b, and a vs c is compared via semver (transitive).
+        (Ok(_), Err(_)) => Ordering::Less,  // a is parseable, sorts first (less in descending)
+        (Err(_), Ok(_)) => Ordering::Greater, // b is parseable, sorts first
     }
 }
 

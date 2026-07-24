@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -14,6 +15,19 @@ use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::SemverStrategy;
+
+/// Derive the repository directory from the Nix evaluation entry point
+///
+/// Extracts the directory containing the Nix file used as the entry point.
+/// For example, `/home/user/repo/default.nix` -> `/home/user/repo`
+fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathBuf> {
+    let path = std::fs::canonicalize(eval_entry_point)
+        .with_context(|| format!("Cannot resolve entry point path: {eval_entry_point}"))?;
+    let repo_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine repository directory from entry point: {}", path.display()))?;
+    Ok(repo_dir.to_path_buf())
+}
 
 /// Perform a package update
 pub(super) async fn perform_update(
@@ -41,8 +55,19 @@ pub(super) async fn perform_update(
         });
     }
 
+    // Derive repository directory from eval entry point
+    let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point) {
+        Ok(dir) => dir,
+        Err(e) => {
+            warn!("{}: Failed to determine repository directory: {}", attr_path, e);
+            return Ok(UpdateResult::Skipped(format!(
+                "Repository directory determination failed: {e}"
+            )));
+        },
+    };
+
     // Create a worktree for this update
-    let worktree_path = match create_worktree(attr_path).await {
+    let worktree_path = match create_worktree(&repo_dir, attr_path).await {
         Ok(path) => path,
         Err(e) => {
             warn!("{}: Failed to create worktree: {}", attr_path, e);
@@ -57,15 +82,20 @@ pub(super) async fn perform_update(
         Ok(loc) => loc,
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
-            cleanup_worktree(&worktree_path).await.ok();
+            cleanup_worktree(&repo_dir, &worktree_path).await.ok();
             return Ok(UpdateResult::Skipped("Could not locate file".to_owned()));
         },
     };
 
     debug!("{}: File location: {}", attr_path, file_location);
 
-    // Convert the file path to be relative to the worktree
-    let worktree_file_path = worktree_path.join(&file_location);
+    // Convert the absolute file path to be relative to the repository root,
+    // then join with the worktree path so edits happen inside the worktree.
+    let file_location_path = Path::new(&file_location);
+    let relative_file_location = file_location_path
+        .strip_prefix(&repo_dir)
+        .unwrap_or(file_location_path);
+    let worktree_file_path = worktree_path.join(relative_file_location);
     let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
 
     // Attempt the update in the worktree
@@ -82,9 +112,17 @@ pub(super) async fn perform_update(
         pr_enhancements: PrEnhancementsConfig::default(),
     };
 
+    // Resolve the eval entry point relative to the worktree so that all nix
+    // builds/evaluations use the worktree's (modified) files, not the originals.
+    let entry_point_filename = Path::new(eval_entry_point)
+        .file_name()
+        .unwrap_or(std::ffi::OsStr::new("default.nix"));
+    let worktree_entry_point = worktree_path.join(entry_point_filename);
+    let worktree_entry_str = worktree_entry_point.to_string_lossy().to_string();
+
     let update_result = update_config
         .update_from_file_path(
-            eval_entry_point.to_owned(),
+            worktree_entry_str,
             attr_path.clone(),
             worktree_file_str,
             version_config,
@@ -128,7 +166,7 @@ pub(super) async fn perform_update(
                             );
 
                             // Clean up the worktree
-                            if let Err(e) = cleanup_worktree(&worktree_path).await {
+                            if let Err(e) = cleanup_worktree(&repo_dir, &worktree_path).await {
                                 warn!("{}: Failed to clean up worktree: {}", attr_path, e);
                             }
 
@@ -225,7 +263,7 @@ pub(super) async fn perform_update(
             }
 
             // Clean up the worktree
-            if let Err(e) = cleanup_worktree(&worktree_path).await {
+            if let Err(e) = cleanup_worktree(&repo_dir, &worktree_path).await {
                 warn!("{}: Failed to clean up worktree: {}", attr_path, e);
             }
 
@@ -288,7 +326,7 @@ pub(super) async fn perform_update(
 
             // Clean up the worktree (only if not preserved)
             if artifacts_path.is_none() {
-                if let Err(cleanup_err) = cleanup_worktree(&worktree_path).await {
+                if let Err(cleanup_err) = cleanup_worktree(&repo_dir, &worktree_path).await {
                     warn!(
                         "{}: Failed to clean up worktree: {}",
                         attr_path, cleanup_err

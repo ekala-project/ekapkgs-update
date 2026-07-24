@@ -148,10 +148,15 @@ fn copy_dir_all<'a>(
 
         while let Some(entry) = entries.next_entry().await? {
             let ty = entry.file_type().await?;
+            let dest_path = dst.join(entry.file_name());
             if ty.is_dir() {
-                copy_dir_all(&entry.path(), &dst.join(entry.file_name())).await?;
+                copy_dir_all(&entry.path(), &dest_path).await?;
+            } else if ty.is_symlink() {
+                // Preserve symlinks as symlinks instead of following them
+                let target = fs::read_link(entry.path()).await?;
+                tokio::fs::symlink(target, dest_path).await?;
             } else {
-                fs::copy(entry.path(), dst.join(entry.file_name())).await?;
+                fs::copy(entry.path(), dest_path).await?;
             }
         }
         Ok(())

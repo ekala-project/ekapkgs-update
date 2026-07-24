@@ -67,11 +67,16 @@ fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
 
 /// Create a git worktree for an isolated update
 ///
+/// # Arguments
+///
+/// * `repo_dir` - The repository directory where the worktree should be created from
+/// * `attr_path` - The attribute path being updated (used for naming the worktree)
+///
 /// # Errors
 ///
 /// Returns an error if the worktree directory cannot be created, if the `git worktree add`
 /// command fails, or if any I/O operation on the filesystem fails.
-pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
+pub async fn create_worktree(repo_dir: &Path, attr_path: &str) -> anyhow::Result<PathBuf> {
     // Create a safe worktree directory name from attr_path
     let worktree_name = attr_path.replace(['.', '/'], "-");
     let worktree_path = crate::paths::worktrees_dir()?
@@ -84,7 +89,7 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
             "{}: Removing existing worktree at {:?}",
             attr_path, worktree_path
         );
-        cleanup_worktree(&worktree_path).await?;
+        cleanup_worktree(repo_dir, &worktree_path).await?;
     }
 
     // Create parent directory
@@ -94,10 +99,13 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
             .with_context(|| format!("create worktree parent directory {}", parent.display()))?;
     }
 
-    // Create the worktree
-    debug!("{}: Creating worktree at {:?}", attr_path, worktree_path);
+    // Create the worktree from the specified repository
+    debug!(
+        "{}: Creating worktree at {:?} from repository {:?}",
+        attr_path, worktree_path, repo_dir
+    );
     let output = run_git(
-        None,
+        Some(repo_dir),
         [
             OsStr::new("worktree"),
             OsStr::new("add"),
@@ -118,11 +126,16 @@ pub async fn create_worktree(attr_path: &str) -> anyhow::Result<PathBuf> {
 
 /// Clean up a git worktree
 ///
+/// # Arguments
+///
+/// * `repo_dir` - The repository directory containing the worktree
+/// * `worktree_path` - Path to the worktree to remove
+///
 /// # Errors
 ///
 /// Returns an error if the `git worktree remove` command fails and fallback
 /// directory removal also fails.
-pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
+pub async fn cleanup_worktree(repo_dir: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     if !worktree_path.exists() {
         return Ok(());
     }
@@ -131,7 +144,7 @@ pub async fn cleanup_worktree(worktree_path: &Path) -> anyhow::Result<()> {
 
     // Remove the worktree using git worktree remove
     let output = run_git(
-        None,
+        Some(repo_dir),
         [
             OsStr::new("worktree"),
             OsStr::new("remove"),
