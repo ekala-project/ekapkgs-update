@@ -572,7 +572,7 @@ fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
         // One parses, one doesn't: parseable versions always sort first (descending)
         // This ensures transitivity: if a and c both parse, and b doesn't, then
         // a > b and c > b, and a vs c is compared via semver (transitive).
-        (Ok(_), Err(_)) => Ordering::Less,  // a is parseable, sorts first (less in descending)
+        (Ok(_), Err(_)) => Ordering::Less, // a is parseable, sorts first (less in descending)
         (Err(_), Ok(_)) => Ordering::Greater, // b is parseable, sorts first
     }
 }

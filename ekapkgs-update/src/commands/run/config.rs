@@ -49,6 +49,15 @@ pub struct RunConfig {
 
     /// Strategy for committing updates
     pub commit_strategy: CommitStrategy,
+
+    /// Invoke Claude Code CLI on build/test failure to attempt a fix
+    pub claude_fix: bool,
+
+    /// Maximum agent turns per Claude fix attempt
+    pub claude_fix_max_turns: u32,
+
+    /// Timeout in seconds for each Claude fix attempt
+    pub claude_fix_timeout: u64,
 }
 
 impl RunConfig {
@@ -78,6 +87,9 @@ impl RunConfig {
         preserve_failures: bool,
         commit_strategy: CommitStrategy,
         audit: bool,
+        claude_fix: bool,
+        claude_fix_max_turns: u32,
+        claude_fix_timeout: u64,
     ) -> Self {
         // Resolve cache precedence: CLI flag → env var → None. The CLI value
         // is moved when present; any whitespace-only value is treated as
@@ -108,6 +120,9 @@ impl RunConfig {
             interactive,
             preserve_failures,
             commit_strategy,
+            claude_fix,
+            claude_fix_max_turns,
+            claude_fix_timeout,
         }
     }
 
@@ -129,6 +144,9 @@ impl RunConfig {
             interactive,
             preserve_failures,
             commit_strategy,
+            claude_fix,
+            claude_fix_max_turns,
+            claude_fix_timeout,
         } = self;
 
         info!("Running nix-eval-jobs on: {}", file);
@@ -222,6 +240,9 @@ impl RunConfig {
             interactive,
             preserve_failures,
             commit_strategy,
+            claude_fix,
+            claude_fix_max_turns,
+            claude_fix_timeout,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -352,6 +373,15 @@ pub struct UpdaterServiceConfig {
 
     /// Strategy for committing updates
     pub commit_strategy: CommitStrategy,
+
+    /// Invoke Claude Code CLI on build/test failure to attempt a fix
+    pub claude_fix: bool,
+
+    /// Maximum agent turns per Claude fix attempt
+    pub claude_fix_max_turns: u32,
+
+    /// Timeout in seconds for each Claude fix attempt
+    pub claude_fix_timeout: u64,
 }
 
 impl UpdaterServiceConfig {
@@ -376,7 +406,20 @@ impl UpdaterServiceConfig {
             interactive,
             preserve_failures,
             commit_strategy,
+            claude_fix,
+            claude_fix_max_turns,
+            claude_fix_timeout,
         } = self;
+
+        // Build Claude fix config if enabled
+        let claude_fix_config = if claude_fix {
+            Some(Arc::new(super::claude_fix::ClaudeFixConfig {
+                max_turns: claude_fix_max_turns,
+                timeout_secs: claude_fix_timeout,
+            }))
+        } else {
+            None
+        };
 
         // Mutex to serialize git operations in branch mode (concurrent builds
         // modify different files, but git add/commit must not race)
@@ -427,6 +470,7 @@ impl UpdaterServiceConfig {
                             let fork_clone = Arc::clone(&fork); // O(1) clone
                             let pr_enhancements_clone = pr_enhancements.clone();
                             let attr_path_clone = req.attr_path.clone();
+                            let claude_fix_clone = claude_fix_config.clone();
 
                             // Spawn the update task
                             let is_branch_mode = commit_strategy == CommitStrategy::Branch;
@@ -440,6 +484,7 @@ impl UpdaterServiceConfig {
                                         &req,
                                         run_passthru_tests,
                                         git_mutex_clone,
+                                        claude_fix_clone.as_deref(),
                                     )
                                     .await
                                 } else {
@@ -455,6 +500,7 @@ impl UpdaterServiceConfig {
                                         &pr_enhancements_clone,
                                         interactive,
                                         preserve_failures,
+                                        claude_fix_clone.as_deref(),
                                     )
                                     .await
                                 };

@@ -170,6 +170,16 @@ pub enum Commands {
         /// Run package audits after each successful build and include findings in PR body
         #[arg(long)]
         audit: bool,
+        /// On build/test failure in worktree mode, invoke Claude Code CLI to attempt
+        /// an automated fix before giving up. Requires `claude` on PATH.
+        #[arg(long)]
+        claude_fix: bool,
+        /// Maximum number of Claude Code agent turns per fix attempt
+        #[arg(long, default_value = "10")]
+        claude_fix_max_turns: u32,
+        /// Timeout in seconds for each Claude Code fix attempt
+        #[arg(long, default_value = "300")]
+        claude_fix_timeout: u64,
     },
     /// Update a package in a Nix file
     Update {
@@ -562,6 +572,9 @@ impl Commands {
                 max_jobs,
                 commit_strategy,
                 audit,
+                claude_fix,
+                claude_fix_max_turns,
+                claude_fix_timeout,
             } => {
                 let mut extra_args = Vec::new();
                 if let Some(ref builders_val) = builders {
@@ -595,6 +608,9 @@ impl Commands {
                     preserve_failures,
                     commit_strategy,
                     audit,
+                    claude_fix,
+                    claude_fix_max_turns,
+                    claude_fix_timeout,
                 )
                 .execute()
                 .await

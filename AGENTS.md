@@ -48,6 +48,7 @@ ekapkgs-update/                     # Main CLI crate
         config.rs                   #   RunConfig, UpdaterServiceConfig
         checker.rs                  #   Release discovery (Semaphore-limited)
         updater.rs                  #   Update performer (worktree or branch)
+        claude_fix.rs               #   Claude Code CLI subagent for build fix (--claude-fix)
         preservation.rs             #   Failed worktree preservation
         types.rs                    #   UpdateRequest, UpdateResult
       update/                       # Single-package update workflow

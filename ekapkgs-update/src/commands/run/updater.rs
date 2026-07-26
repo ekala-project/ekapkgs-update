@@ -23,9 +23,12 @@ use crate::vcs_sources::SemverStrategy;
 fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathBuf> {
     let path = std::fs::canonicalize(eval_entry_point)
         .with_context(|| format!("Cannot resolve entry point path: {eval_entry_point}"))?;
-    let repo_dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine repository directory from entry point: {}", path.display()))?;
+    let repo_dir = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot determine repository directory from entry point: {}",
+            path.display()
+        )
+    })?;
     Ok(repo_dir.to_path_buf())
 }
 
@@ -42,6 +45,7 @@ pub(super) async fn perform_update(
     pr_enhancements: &PrEnhancementsConfig,
     interactive: bool,
     preserve_failures: bool,
+    claude_fix: Option<&super::claude_fix::ClaudeFixConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -59,7 +63,10 @@ pub(super) async fn perform_update(
     let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point) {
         Ok(dir) => dir,
         Err(e) => {
-            warn!("{}: Failed to determine repository directory: {}", attr_path, e);
+            warn!(
+                "{}: Failed to determine repository directory: {}",
+                attr_path, e
+            );
             return Ok(UpdateResult::Skipped(format!(
                 "Repository directory determination failed: {e}"
             )));
@@ -119,6 +126,9 @@ pub(super) async fn perform_update(
         .unwrap_or(std::ffi::OsStr::new("default.nix"));
     let worktree_entry_point = worktree_path.join(entry_point_filename);
     let worktree_entry_str = worktree_entry_point.to_string_lossy().to_string();
+
+    // Keep copies for the Claude fix path (originals are moved into update_from_file_path)
+    let worktree_entry_str_for_fix = worktree_entry_str.clone();
 
     let update_result = update_config
         .update_from_file_path(
@@ -277,6 +287,127 @@ pub(super) async fn perform_update(
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
 
+            // Attempt Claude Code fix if enabled and error is plausibly fixable
+            if let Some(fix_config) = claude_fix {
+                if !super::claude_fix::should_attempt_claude_fix(&error_message) {
+                    debug!(
+                        "{}: Skipping Claude fix — error is not fixable by editing Nix files",
+                        attr_path
+                    );
+                } else {
+                    // Read the Nix file content for context
+                    let nix_file_content = tokio::fs::read_to_string(&worktree_file_path)
+                        .await
+                        .unwrap_or_default();
+                    let relative_path = relative_file_location.to_string_lossy().to_string();
+
+                    let fix_result = super::claude_fix::attempt_claude_fix(
+                        &worktree_path,
+                        &worktree_entry_str_for_fix,
+                        attr_path,
+                        &error_message,
+                        Some(&error_message),
+                        &relative_path,
+                        &nix_file_content,
+                        current_version,
+                        new_version,
+                        fix_config,
+                    )
+                    .await;
+
+                    match fix_result {
+                        super::claude_fix::ClaudeFixResult::Fixed => {
+                            info!(
+                                "{}: Claude Code fixed the build! Proceeding with update.",
+                                attr_path
+                            );
+
+                            // Record successful update in database
+                            if let Err(db_err) = db
+                                .record_successful_update_with_rebuild_count(
+                                    attr_path,
+                                    current_version,
+                                    new_version,
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(
+                                    "{}: Failed to record successful update: {}",
+                                    attr_path, db_err
+                                );
+                            }
+
+                            // Create PR if configured
+                            if let Some(config) = pr_config {
+                                match create_pr_for_update(
+                                    db,
+                                    &worktree_path,
+                                    attr_path,
+                                    current_version,
+                                    new_version,
+                                    config,
+                                    fork,
+                                    None, // No rebuild analysis for Claude-fixed updates
+                                    pr_enhancements,
+                                    &crate::commands::update::TestResult::NotRequested,
+                                )
+                                .await
+                                {
+                                    Ok((pr_url, pr_number)) => {
+                                        info!(
+                                            "{}: Created PR #{} (Claude-fixed): {}",
+                                            attr_path, pr_number, pr_url
+                                        );
+                                    },
+                                    Err(pr_err) => {
+                                        warn!("{}: Failed to create PR: {}", attr_path, pr_err);
+                                    },
+                                }
+                            }
+
+                            // Clean up the worktree
+                            if let Err(cleanup_err) =
+                                cleanup_worktree(&repo_dir, &worktree_path).await
+                            {
+                                warn!(
+                                    "{}: Failed to clean up worktree: {}",
+                                    attr_path, cleanup_err
+                                );
+                            }
+
+                            return Ok(UpdateResult::Updated {
+                                old_version: current_version.clone(),
+                                new_version: new_version.clone(),
+                            });
+                        },
+                        super::claude_fix::ClaudeFixResult::StillBroken { stderr } => {
+                            info!(
+                                "{}: Claude Code fix did not resolve the build failure, continuing",
+                                attr_path
+                            );
+                            debug!(
+                                "{}: Post-fix build stderr: {}",
+                                attr_path,
+                                &stderr[..stderr.len().min(500)]
+                            );
+                        },
+                        super::claude_fix::ClaudeFixResult::ClaudeNotAvailable => {
+                            warn!(
+                                "{}: claude CLI not found on PATH, skipping fix attempt",
+                                attr_path
+                            );
+                        },
+                        super::claude_fix::ClaudeFixResult::TimedOut => {
+                            warn!("{}: Claude Code fix attempt timed out", attr_path);
+                        },
+                        super::claude_fix::ClaudeFixResult::InvocationError { message } => {
+                            warn!("{}: Claude Code invocation error: {}", attr_path, message);
+                        },
+                    }
+                } // else (should_attempt_claude_fix)
+            }
+
             // Preserve failure artifacts if requested
             let artifacts_path = if preserve_failures {
                 // Create a structured error from the anyhow error
@@ -398,6 +529,7 @@ pub(super) async fn perform_direct_update(
     req: &UpdateRequest,
     run_passthru_tests: bool,
     git_mutex: Arc<Mutex<()>>,
+    claude_fix: Option<&super::claude_fix::ClaudeFixConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -564,6 +696,131 @@ pub(super) async fn perform_direct_update(
         Err(e) => {
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
+
+            // Attempt Claude Code fix if enabled (files are still dirty)
+            if let Some(fix_config) = claude_fix {
+                if !super::claude_fix::should_attempt_claude_fix(&error_message) {
+                    debug!(
+                        "{}: Skipping Claude fix — error is not fixable by editing Nix files",
+                        attr_path
+                    );
+                } else {
+                    let nix_file_content = tokio::fs::read_to_string(&file_location)
+                        .await
+                        .unwrap_or_default();
+
+                    // In branch mode, use the repo working directory as the "worktree"
+                    let repo_dir = std::path::Path::new(&file_location)
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."));
+
+                    let fix_result = super::claude_fix::attempt_claude_fix(
+                        repo_dir,
+                        eval_entry_point,
+                        attr_path,
+                        &error_message,
+                        Some(&error_message),
+                        &file_location,
+                        &nix_file_content,
+                        current_version,
+                        new_version,
+                        fix_config,
+                    )
+                    .await;
+
+                    if matches!(fix_result, super::claude_fix::ClaudeFixResult::Fixed) {
+                        info!("{}: Claude Code fixed the build! Committing.", attr_path);
+
+                        // Commit the fix under the git mutex
+                        {
+                            let _lock = git_mutex.lock().await;
+
+                            let add_output = tokio::process::Command::new("git")
+                                .args(["add", &pkg_dir])
+                                .output()
+                                .await;
+
+                            match &add_output {
+                                Ok(output) if !output.status.success() => {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    warn!("{}: git add failed: {}", attr_path, stderr);
+                                },
+                                Err(e) => {
+                                    warn!("{}: Failed to stage changes: {}", attr_path, e);
+                                },
+                                _ => {},
+                            }
+
+                            let commit_msg =
+                                format!("{attr_path}: {current_version} -> {new_version}");
+                            let commit_output = tokio::process::Command::new("git")
+                                .args(["commit", "-m", &commit_msg])
+                                .output()
+                                .await;
+
+                            match commit_output {
+                                Ok(output) if output.status.success() => {
+                                    info!(
+                                        "{}: Committed (Claude-fixed): {}",
+                                        attr_path, commit_msg
+                                    );
+                                },
+                                Ok(output) => {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    warn!("{}: git commit failed: {}", attr_path, stderr);
+                                },
+                                Err(commit_err) => {
+                                    warn!(
+                                        "{}: Failed to run git commit: {}",
+                                        attr_path, commit_err
+                                    );
+                                },
+                            }
+                        }
+
+                        // Record successful update in database
+                        if let Err(db_err) = db
+                            .record_successful_update_with_rebuild_count(
+                                attr_path,
+                                current_version,
+                                new_version,
+                                None,
+                            )
+                            .await
+                        {
+                            warn!(
+                                "{}: Failed to record successful update: {}",
+                                attr_path, db_err
+                            );
+                        }
+
+                        return Ok(UpdateResult::Updated {
+                            old_version: current_version.clone(),
+                            new_version: new_version.clone(),
+                        });
+                    }
+
+                    // Log non-Fixed outcomes
+                    match fix_result {
+                        super::claude_fix::ClaudeFixResult::Fixed => unreachable!(),
+                        super::claude_fix::ClaudeFixResult::StillBroken { .. } => {
+                            info!(
+                                "{}: Claude Code fix did not resolve the build failure",
+                                attr_path
+                            );
+                        },
+                        super::claude_fix::ClaudeFixResult::ClaudeNotAvailable => {
+                            warn!("{}: claude CLI not found on PATH", attr_path);
+                        },
+                        super::claude_fix::ClaudeFixResult::TimedOut => {
+                            warn!("{}: Claude Code fix attempt timed out", attr_path);
+                        },
+                        super::claude_fix::ClaudeFixResult::InvocationError { message } => {
+                            warn!("{}: Claude Code invocation error: {}", attr_path, message);
+                        },
+                    }
+                } // else (should_attempt_claude_fix)
+            }
 
             // Revert only this package's files under the mutex
             {
