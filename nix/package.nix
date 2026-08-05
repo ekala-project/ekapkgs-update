@@ -19,13 +19,23 @@ rustPlatform.buildRustPackage {
   pname = "ekapkgs-update";
   version =
     let
-      cargo_toml = builtins.readFile ../Cargo.toml;
+      cargo_toml = builtins.readFile ../ekapkgs-update/Cargo.toml;
       cargo_info = builtins.fromTOML cargo_toml;
     in
     cargo_info.package.version;
 
   cargoLock.lockFile = ../Cargo.lock;
   src = ../.;
+
+  # Build only the main binary from the workspace
+  cargoBuildFlags = [
+    "-p"
+    "ekapkgs-update"
+  ];
+  cargoTestFlags = [
+    "-p"
+    "ekapkgs-update"
+  ];
 
   nativeBuildInputs = [
     perl
