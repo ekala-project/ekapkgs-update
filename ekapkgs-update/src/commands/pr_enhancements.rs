@@ -42,6 +42,9 @@ pub struct PrEnhancementsConfig {
 
     /// Whether to run package audits after successful builds
     pub run_audit: bool,
+
+    /// Whether to skip security checks during audits
+    pub skip_security: bool,
 }
 
 impl PrEnhancementsConfig {
@@ -233,7 +236,10 @@ impl PrEnhancementsConfig {
 
         cleanup_result_symlinks().ok();
 
-        let config = AuditConfig::default();
+        let config = AuditConfig {
+            check_security: !self.skip_security,
+            ..AuditConfig::default()
+        };
         let audit_report =
             checks::run_audit(&outputs, Some(eval_entry_point), Some(attr_path), &config).await;
 

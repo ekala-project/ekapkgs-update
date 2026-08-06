@@ -38,6 +38,7 @@ pub enum CheckCategory {
     BinaryIssues,
     ScriptIssues,
     MetadataIssues,
+    SecurityIssues,
 }
 
 impl CheckCategory {
@@ -48,6 +49,7 @@ impl CheckCategory {
             CheckCategory::BinaryIssues => "Binary Issues",
             CheckCategory::ScriptIssues => "Script Issues",
             CheckCategory::MetadataIssues => "Metadata Issues",
+            CheckCategory::SecurityIssues => "Security Issues",
         }
     }
 }
@@ -119,6 +121,7 @@ pub struct AuditConfig {
     pub check_fhs_references: bool,
     pub check_pkg_config: bool,
     pub check_metadata: bool,
+    pub check_security: bool,
     /// Minimum severity to include in report (findings below this are filtered)
     pub min_severity: Severity,
 }
@@ -135,6 +138,7 @@ impl Default for AuditConfig {
             check_fhs_references: true,
             check_pkg_config: true,
             check_metadata: true,
+            check_security: true,
             min_severity: Severity::Info,
         }
     }

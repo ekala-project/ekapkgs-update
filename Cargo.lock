@@ -606,6 +606,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "sqlx",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

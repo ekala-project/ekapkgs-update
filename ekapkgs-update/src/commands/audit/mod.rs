@@ -167,6 +167,7 @@ pub async fn execute(
     min_severity: String,
     skip_metadata: bool,
     skip_binary_checks: bool,
+    no_security: bool,
 ) -> anyhow::Result<()> {
     let output_format = OutputFormat::parse(&format)?;
     let severity = parse_severity(&min_severity)?;
@@ -176,6 +177,7 @@ pub async fn execute(
         check_metadata: !skip_metadata,
         check_shared_libs: !skip_binary_checks,
         check_rpaths: !skip_binary_checks,
+        check_security: !no_security,
         ..AuditConfig::default()
     };
 

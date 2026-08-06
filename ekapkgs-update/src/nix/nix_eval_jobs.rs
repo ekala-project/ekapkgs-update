@@ -95,8 +95,8 @@ mod tests {
         let function_error = NixEvalError {
             attr: "myHelper".to_string(),
             attr_path: vec!["myHelper".to_string()],
-            error: "error: cannot evaluate a function that has an argument \
-                    without a value ('name')"
+            error: "error: cannot evaluate a function that has an argument without a value \
+                    ('name')"
                 .to_string(),
         };
         assert!(function_error.is_function_error());

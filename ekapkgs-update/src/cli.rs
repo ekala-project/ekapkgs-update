@@ -170,6 +170,10 @@ pub enum Commands {
         /// Run package audits after each successful build and include findings in PR body
         #[arg(long)]
         audit: bool,
+        /// Disable security checks during audit (setuid/setgid, credentials, suspicious URLs,
+        /// etc.)
+        #[arg(long)]
+        no_security: bool,
         /// On build/test failure in worktree mode, invoke Claude Code CLI to attempt
         /// an automated fix before giving up. Requires `claude` on PATH.
         #[arg(long)]
@@ -417,6 +421,9 @@ pub enum Commands {
         /// Skip binary/ELF checks (RPATH, shared libs)
         #[arg(long)]
         skip_binary_checks: bool,
+        /// Disable security checks (setuid/setgid, credentials, suspicious URLs, etc.)
+        #[arg(long)]
+        no_security: bool,
         /// Nix builders to use for builds (passed as --builders to nix-build)
         #[arg(long)]
         builders: Option<String>,
@@ -572,6 +579,7 @@ impl Commands {
                 max_jobs,
                 commit_strategy,
                 audit,
+                no_security,
                 claude_fix,
                 claude_fix_max_turns,
                 claude_fix_timeout,
@@ -608,6 +616,7 @@ impl Commands {
                     preserve_failures,
                     commit_strategy,
                     audit,
+                    no_security,
                     claude_fix,
                     claude_fix_max_turns,
                     claude_fix_timeout,
@@ -838,6 +847,7 @@ impl Commands {
                 min_severity,
                 skip_metadata,
                 skip_binary_checks,
+                no_security,
                 builders,
                 max_jobs,
             } => {
@@ -860,6 +870,7 @@ impl Commands {
                     min_severity,
                     skip_metadata,
                     skip_binary_checks,
+                    no_security,
                 )
                 .await
             },

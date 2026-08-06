@@ -231,14 +231,26 @@ The `audit` command inspects built Nix package outputs for correctness issues. I
 | `missing_description` | MetadataIssues | Info | `meta.description` not set |
 | `missing_license` | MetadataIssues | Warning | `meta.license` not set |
 | `missing_homepage` | MetadataIssues | Info | `meta.homepage` not set |
+| `world_writable_file` | SecurityIssues | Warning | File is world-writable (mode o+w) |
+| `hidden_files_in_output` | SecurityIssues | Info | Sensitive dotfiles (`.env`, `.ssh`, `.npmrc`, etc.) in output |
+| `suspicious_binary_in_share` | SecurityIssues | Warning | ELF binary in unexpected location (`share/`, `etc/`, `include/`) |
+| `embedded_credentials` | SecurityIssues | Warning | Hardcoded API keys, tokens, or passwords (AWS, GitHub, GitLab, OpenAI/Stripe) |
+| `suspicious_network_in_output` | SecurityIssues | Warning | References to pastebin/ngrok/tunnel hosts, IP-literal URLs, or non-HTTPS URLs |
+| `shell_download_pattern` | SecurityIssues | Warning | Download-and-execute patterns (`curl\|sh`, `wget\|bash`, etc.) |
+| `crypto_miner_indicators` | SecurityIssues | Warning | Crypto mining pool URLs or miner binary names |
+| `data_exfiltration_pattern` | SecurityIssues | Warning | Script reads sensitive files and has network send capability |
+| `eval_of_remote_content` | SecurityIssues | Warning | Dynamic code execution of fetched content (`eval "$(curl ...)"`) |
+| `high_entropy_strings` | SecurityIssues | Info | High-entropy strings (≥40 chars, >4.5 bits/char) that may be secrets or obfuscated code |
 
 Checks that depend on external tools (`ldd`, `patchelf`) gracefully skip if the tool is unavailable.
 
 The pkg-config check parses `.pc` variable definitions, resolves `${var}` substitutions, and validates that path-valued fields (`prefix`, `libdir`, `includedir`, etc.) and `-L`/`-I` flags in `Libs`/`Cflags` lines point to existing directories.
 
+Security checks are enabled by default. Use `--no-security` to disable them on both the standalone `audit` command and the `run --audit` command.
+
 #### Integration with `run` command
 
-Controlled by `PrEnhancementsConfig.run_audit`. When enabled, `perform_worktree_audit()` builds the package in the worktree, runs all checks, and returns markdown for the PR body. Audit findings are informational — they do not block the update.
+Controlled by `PrEnhancementsConfig.run_audit`. When enabled, `perform_worktree_audit()` builds the package in the worktree, runs all checks, and returns markdown for the PR body. Audit findings are informational — they do not block the update. Security checks can be disabled via `PrEnhancementsConfig.skip_security` (CLI: `--no-security`).
 
 ### Export (`commands/export.rs`)
 
