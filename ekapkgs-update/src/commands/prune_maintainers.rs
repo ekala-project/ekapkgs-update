@@ -5,12 +5,12 @@ use tokio::fs;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-use crate::rewrite::replace_maintainers_with_empty;
+use crate::rewrite::{replace_maintainers_with_empty, replace_teams_with_empty};
 
-/// Prune maintainers from all .nix files in a directory
+/// Prune maintainers and teams from all .nix files in a directory
 ///
 /// This command recursively searches for all .nix files in the given directory
-/// and replaces `meta.maintainers` with an empty array `[ ]`.
+/// and replaces `meta.maintainers` and `meta.teams` with empty arrays `[ ]`.
 ///
 /// # Arguments
 /// * `directory` - Path to the directory to process
@@ -32,11 +32,14 @@ pub async fn prune_maintainers(directory: String, check: bool) -> anyhow::Result
 
     if check {
         info!(
-            "Checking for maintainers to prune in .nix files in: {}",
+            "Checking for maintainers/teams to prune in .nix files in: {}",
             directory
         );
     } else {
-        info!("Pruning maintainers from .nix files in: {}", directory);
+        info!(
+            "Pruning maintainers/teams from .nix files in: {}",
+            directory
+        );
     }
 
     let mut processed_count = 0;
@@ -123,11 +126,15 @@ async fn process_file(path: &Path) -> anyhow::Result<bool> {
         .with_context(|| format!("read file {}", path.display()))?;
 
     // Replace maintainers
-    let (updated_content, changed) = replace_maintainers_with_empty(&content)?;
+    let (content, maintainers_changed) = replace_maintainers_with_empty(&content)?;
+
+    // Replace teams
+    let (content, teams_changed) = replace_teams_with_empty(&content)?;
+
+    let changed = maintainers_changed || teams_changed;
 
     if changed {
-        // Write back the modified content only if not in check mode
-        fs::write(path, updated_content)
+        fs::write(path, content)
             .await
             .with_context(|| format!("write file {}", path.display()))?;
         Ok(true)

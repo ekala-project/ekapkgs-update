@@ -1272,9 +1272,7 @@ fn check_security_issues(output_name: &str, output_path: &Path) -> Vec<AuditFind
                             || token.starts_with("sha256-")
                             || token.starts_with("sha512-")
                             || token.starts_with("sha1-")
-                            || token
-                                .bytes()
-                                .all(|b| b.is_ascii_hexdigit());
+                            || token.bytes().all(|b| b.is_ascii_hexdigit());
                         if !looks_like_hash {
                             let preview = if token.len() > 40 {
                                 format!("{}...", &token[..40])

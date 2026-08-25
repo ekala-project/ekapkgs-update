@@ -86,7 +86,7 @@ ekapkgs-update/                     # Main CLI crate
       retry.rs, worktrees.rs        # Failure recovery and worktree management
       log.rs, inspect.rs            # Per-package failure inspection
       query.rs, report.rs, status.rs  # Database query/reporting commands
-      prune_maintainers.rs          # Remove deprecated maintainers from .nix files
+      prune_maintainers.rs          # Remove deprecated maintainers and teams from .nix files
     llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
@@ -181,7 +181,7 @@ Uses **regex with rnix AST validation**, not pure AST transformation:
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
-Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `update_variant_attr()`.
+Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`.
 
 Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is returned for a version attribute, `file_update.rs` falls back to searching sibling files (mkManyVariants pattern).
 
