@@ -440,16 +440,14 @@ pub async fn update_composer_deps_hash_if_needed(
 ///
 /// For packages with `passthru.ekapkgs-update.platform-hashes`, the normal update
 /// flow only discovers the hash for the build machine's platform. This function
-/// handles the remaining platforms by evaluating `src.outputHash` with `--system`
-/// to get each stale hash, invalidating it, building `.src` for that system to
-/// trigger a FOD mismatch, and writing back the correct hash.
+/// handles the remaining platforms by evaluating `src.url` with `--system` to get
+/// the platform-specific download URL, then prefetching it to compute the hash.
 pub async fn update_platform_hashes(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
     platforms: &[String],
 ) -> anyhow::Result<()> {
-    use super::build::build_nix_expr_for_system;
     use crate::nix::{eval_nix_expr_for_system, normalize_entry_point};
 
     let native_system = std::env::consts::ARCH.to_owned()
@@ -460,7 +458,6 @@ pub async fn update_platform_hashes(
             os => os,
         };
 
-    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let normalized_entry = normalize_entry_point(eval_entry_point);
 
     for platform in platforms {
@@ -493,7 +490,35 @@ pub async fn update_platform_hashes(
             },
         };
 
-        // Step 2: Invalidate the stale hash in the file
+        // Step 2: Evaluate the source URL for this platform
+        let url_expr = format!(
+            "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+            normalized_entry, attr_path, attr_path
+        );
+        let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {
+            Ok(u) => u,
+            Err(e) => {
+                warn!(
+                    "{}: Could not evaluate src.url for {}: {}",
+                    attr_path, platform, e
+                );
+                continue;
+            },
+        };
+
+        // Step 3: Prefetch the URL to get the correct hash
+        let correct_hash = match prefetch_url_hash(&src_url).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(
+                    "{}: Could not prefetch {} for {}: {}",
+                    attr_path, src_url, platform, e
+                );
+                continue;
+            },
+        };
+
+        // Step 4: Replace the stale hash in the file
         let content = tokio::fs::read_to_string(file_location).await?;
         if !content.contains(&stale_hash) {
             warn!(
@@ -504,51 +529,7 @@ pub async fn update_platform_hashes(
             );
             continue;
         }
-        let updated = content.replacen(&stale_hash, invalid_hash, 1);
-        tokio::fs::write(file_location, &updated).await?;
-
-        debug!(
-            "{}: Invalidated hash for {} in {}",
-            attr_path,
-            platform,
-            file_location.display()
-        );
-
-        // Step 3: Build .src for this platform to trigger FOD mismatch
-        let (success, _stdout, stderr) =
-            build_nix_expr_for_system(eval_entry_point, attr_path, Some("src"), platform).await?;
-
-        if success {
-            warn!(
-                "{}: Build succeeded with invalid hash for {} — restoring",
-                attr_path, platform
-            );
-            // Restore the original hash
-            let content = tokio::fs::read_to_string(file_location).await?;
-            let restored = content.replacen(invalid_hash, &stale_hash, 1);
-            tokio::fs::write(file_location, &restored).await?;
-            continue;
-        }
-
-        // Step 4: Extract correct hash from build error
-        let correct_hash = match hash_discovery::extract_hash(&stderr) {
-            Some(h) => h,
-            None => {
-                warn!(
-                    "{}: Could not extract hash for {} from build error, restoring",
-                    attr_path, platform
-                );
-                // Restore the original hash so the file isn't left broken
-                let content = tokio::fs::read_to_string(file_location).await?;
-                let restored = content.replacen(invalid_hash, &stale_hash, 1);
-                tokio::fs::write(file_location, &restored).await?;
-                continue;
-            },
-        };
-
-        // Step 5: Write the correct hash
-        let content = tokio::fs::read_to_string(file_location).await?;
-        let updated = content.replacen(invalid_hash, &correct_hash, 1);
+        let updated = content.replacen(&stale_hash, &correct_hash, 1);
         tokio::fs::write(file_location, &updated).await?;
 
         info!(
@@ -558,4 +539,30 @@ pub async fn update_platform_hashes(
     }
 
     Ok(())
+}
+
+/// Prefetch a URL and return its SRI hash
+///
+/// Uses `nix store prefetch-file --json <url>` to download the file and
+/// compute its hash without requiring a full build.
+async fn prefetch_url_hash(url: &str) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new("nix")
+        .args(["store", "prefetch-file", "--json", url])
+        .output()
+        .await
+        .context("Failed to execute nix store prefetch-file")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix store prefetch-file failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).context("Failed to parse prefetch-file JSON output")?;
+
+    json["hash"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("No hash field in prefetch-file output"))
 }

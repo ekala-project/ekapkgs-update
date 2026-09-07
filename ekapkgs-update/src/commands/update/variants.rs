@@ -152,8 +152,8 @@ pub async fn update_single_variant(
 
     // Check if this package uses platform-specific hashes
     if let Some(ref platforms) = metadata.platform_hashes {
-        // Platform-hash flow: update version, then discover each platform's hash
-        // by invalidating and building with --system
+        // Platform-hash flow: update version, then for each platform evaluate
+        // src.url with --system and prefetch it to discover the correct hash.
         tokio::fs::write(&variants_file_path, &updated_content)
             .await
             .with_context(|| format!("write variants file {variants_file_path}"))?;
@@ -182,8 +182,37 @@ pub async fn update_single_variant(
                 },
             };
 
-            // Invalidate it
-            let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            // Evaluate the source URL for this platform
+            let url_expr = format!(
+                "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+                normalized_entry, variant_attr_path, variant_attr_path
+            );
+            let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(
+                        "Could not evaluate src.url for {} on {}: {}",
+                        variant_name, platform, e
+                    );
+                    continue;
+                },
+            };
+
+            debug!("Prefetching {} for {}", src_url, platform);
+
+            // Prefetch the URL to get the correct hash
+            let correct_hash = match prefetch_url_hash(&src_url).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(
+                        "Could not prefetch {} for {}: {}",
+                        src_url, platform, e
+                    );
+                    continue;
+                },
+            };
+
+            // Replace the stale hash in the file
             let content = tokio::fs::read_to_string(&variants_file_path).await?;
             if !content.contains(&stale_hash) {
                 warn!(
@@ -192,39 +221,7 @@ pub async fn update_single_variant(
                 );
                 continue;
             }
-            let invalidated = content.replacen(&stale_hash, invalid_hash, 1);
-            tokio::fs::write(&variants_file_path, &invalidated).await?;
-
-            // Build .src with --system to get correct hash
-            let (success, _stdout, stderr) =
-                super::build::build_nix_expr_for_system(file, &variant_attr_path, Some("src"), platform)
-                    .await?;
-
-            if success {
-                warn!("Build succeeded with invalid hash for {} — restoring", platform);
-                let content = tokio::fs::read_to_string(&variants_file_path).await?;
-                let restored = content.replacen(invalid_hash, &stale_hash, 1);
-                tokio::fs::write(&variants_file_path, &restored).await?;
-                continue;
-            }
-
-            let correct_hash = match hash_discovery::extract_hash(&stderr) {
-                Some(h) => h,
-                None => {
-                    warn!(
-                        "Could not extract hash for {} from build error, restoring",
-                        platform
-                    );
-                    let content = tokio::fs::read_to_string(&variants_file_path).await?;
-                    let restored = content.replacen(invalid_hash, &stale_hash, 1);
-                    tokio::fs::write(&variants_file_path, &restored).await?;
-                    continue;
-                },
-            };
-
-            // Write the correct hash
-            let content = tokio::fs::read_to_string(&variants_file_path).await?;
-            let fixed = content.replacen(invalid_hash, &correct_hash, 1);
+            let fixed = content.replacen(&stale_hash, &correct_hash, 1);
             tokio::fs::write(&variants_file_path, &fixed).await?;
             info!("Updated hash for {} on {}: {}", variant_name, platform, correct_hash);
         }
@@ -347,6 +344,32 @@ async fn discover_hash_for_variant(
         warn!("Could not extract hash from build error: {}", stderr);
         Ok(None)
     }
+}
+
+/// Prefetch a URL and return its SRI hash
+///
+/// Uses `nix store prefetch-file --json <url>` to download the file and
+/// compute its hash without requiring a full build.
+async fn prefetch_url_hash(url: &str) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new("nix")
+        .args(["store", "prefetch-file", "--json", url])
+        .output()
+        .await
+        .context("Failed to execute nix store prefetch-file")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix store prefetch-file failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).context("Failed to parse prefetch-file JSON output")?;
+
+    json["hash"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("No hash field in prefetch-file output"))
 }
 
 /// Find version and hash in sibling files for mkManyVariants pattern
