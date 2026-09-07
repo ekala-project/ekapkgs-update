@@ -341,10 +341,10 @@ impl UpdateParams {
 
             info!("Variants to update: {:?}", variants_to_update);
 
-            // Update each variant
-            for variant_name in variants_to_update {
+            // Update each existing variant
+            for variant_name in &variants_to_update {
                 // Skip pinned variants (3+ version components)
-                if is_variant_pinned(&variant_name) {
+                if is_variant_pinned(variant_name) {
                     info!(
                         "Skipping pinned variant '{}' (3+ version components)",
                         variant_name
@@ -353,7 +353,7 @@ impl UpdateParams {
                 }
 
                 // Infer or use explicit strategy for this variant
-                let variant_strategy = match infer_strategy_from_variant(&variant_name) {
+                let variant_strategy = match infer_strategy_from_variant(variant_name) {
                     Some(inferred) => {
                         info!(
                             "Inferred {} strategy for variant '{}'",
@@ -377,13 +377,46 @@ impl UpdateParams {
                 );
                 match update_config
                     .clone()
-                    .update_single_variant(&file, &attr_path, &variant_name, variant_strategy)
+                    .update_single_variant(&file, &attr_path, variant_name, variant_strategy)
                     .await
                 {
                     Ok(()) => info!("Successfully updated variant '{}'", variant_name),
                     Err(e) => {
                         warn!("Failed to update variant '{}': {}", variant_name, e);
                         // Continue with other variants
+                    },
+                }
+            }
+
+            // Discover and add new variant series from upstream
+            if variant_config.all_variants {
+                match super::discover_new_variants(&file, &attr_path, &variants_to_update).await {
+                    Ok(new_variants) => {
+                        for (variant_name, version) in new_variants {
+                            info!(
+                                "Adding new variant '{}' (version {})",
+                                variant_name, version
+                            );
+                            match super::add_new_variant(
+                                &file,
+                                &attr_path,
+                                &variant_name,
+                                &version,
+                                update_config.clone(),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    info!("Successfully added variant '{}'", variant_name);
+                                },
+                                Err(e) => {
+                                    warn!("Failed to add variant '{}': {}", variant_name, e);
+                                },
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to discover new variants: {}", e);
                     },
                 }
             }

@@ -122,6 +122,76 @@ pub fn extract_version_prefix(variant_name: &str) -> Option<String> {
     })
 }
 
+/// Extract the first N dot-separated components from a version string
+///
+/// Used to group upstream releases by version series, matching the
+/// granularity of existing variant names.
+///
+/// Examples:
+/// - `version_series_key("0.27.3", 2)` -> Some("0.27")
+/// - `version_series_key("3.1.0", 1)` -> Some("3")
+/// - `version_series_key("1.2", 2)` -> Some("1.2")
+/// - `version_series_key("invalid", 2)` -> None
+pub fn version_series_key(version: &str, component_count: usize) -> Option<String> {
+    if component_count == 0 {
+        return None;
+    }
+
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() < component_count {
+        return None;
+    }
+
+    // Verify all requested components are numeric
+    for part in &parts[..component_count] {
+        if part.parse::<u32>().is_err() {
+            return None;
+        }
+    }
+
+    Some(parts[..component_count].join("."))
+}
+
+/// Build a variant attribute name from a version series key
+///
+/// This is the inverse of [`extract_version_prefix`]: replaces `.` with `_`
+/// and prepends `v`.
+///
+/// Examples:
+/// - `"0.27"` -> `"v0_27"`
+/// - `"3"` -> `"v3"`
+pub fn variant_name_from_series_key(series_key: &str) -> String {
+    format!("v{}", series_key.replace('.', "_"))
+}
+
+/// Determine the component count used by existing variant names
+///
+/// Returns `Some(N)` when all parseable variant names have exactly N
+/// components (1 or 2). Returns `None` when the set is empty, contains
+/// no parseable variants, or uses mixed component counts.
+///
+/// Non-versioned variants (e.g., "latest", "default") and pinned variants
+/// (3+ components) are ignored when inferring the count.
+pub fn infer_variant_component_count(variants: &[String]) -> Option<usize> {
+    let mut counts = std::collections::HashSet::new();
+
+    for name in variants {
+        if let Some(components) = parse_variant_components(name) {
+            let len = components.len();
+            // Only consider 1 or 2 component variants (not pinned 3+)
+            if len <= 2 {
+                counts.insert(len);
+            }
+        }
+    }
+
+    if counts.len() == 1 {
+        counts.into_iter().next()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +268,89 @@ mod tests {
         assert_eq!(extract_version_prefix("v1"), Some("1".to_owned()));
         assert_eq!(extract_version_prefix("v1_2_3"), Some("1.2.3".to_owned()));
         assert_eq!(extract_version_prefix("latest"), None);
+    }
+
+    #[test]
+    fn test_version_series_key() {
+        // Two components
+        assert_eq!(version_series_key("0.27.3", 2), Some("0.27".to_owned()));
+        assert_eq!(version_series_key("1.2.0", 2), Some("1.2".to_owned()));
+
+        // One component
+        assert_eq!(version_series_key("3.1.0", 1), Some("3".to_owned()));
+        assert_eq!(version_series_key("0.27.3", 1), Some("0".to_owned()));
+
+        // Exact component count
+        assert_eq!(version_series_key("1.2", 2), Some("1.2".to_owned()));
+        assert_eq!(version_series_key("3", 1), Some("3".to_owned()));
+
+        // Not enough components
+        assert_eq!(version_series_key("3", 2), None);
+        assert_eq!(version_series_key("", 1), None);
+
+        // Non-numeric
+        assert_eq!(version_series_key("abc.def", 2), None);
+        assert_eq!(version_series_key("1.beta", 2), None);
+
+        // Zero component count
+        assert_eq!(version_series_key("1.2.3", 0), None);
+    }
+
+    #[test]
+    fn test_variant_name_from_series_key() {
+        assert_eq!(variant_name_from_series_key("0.27"), "v0_27");
+        assert_eq!(variant_name_from_series_key("3"), "v3");
+        assert_eq!(variant_name_from_series_key("1.18"), "v1_18");
+    }
+
+    #[test]
+    fn test_infer_variant_component_count() {
+        // Homogeneous 2-component
+        assert_eq!(
+            infer_variant_component_count(&[
+                "v0_20".to_owned(),
+                "v0_23".to_owned(),
+                "v0_27".to_owned(),
+            ]),
+            Some(2)
+        );
+
+        // Homogeneous 1-component
+        assert_eq!(
+            infer_variant_component_count(&["v1".to_owned(), "v2".to_owned(), "v3".to_owned()]),
+            Some(1)
+        );
+
+        // Mixed → None
+        assert_eq!(
+            infer_variant_component_count(&["v1".to_owned(), "v1_2".to_owned()]),
+            None
+        );
+
+        // Empty → None
+        assert_eq!(infer_variant_component_count(&[]), None);
+
+        // Only non-parseable → None
+        assert_eq!(
+            infer_variant_component_count(&["latest".to_owned(), "default".to_owned()]),
+            None
+        );
+
+        // Pinned (3+) variants are ignored, remaining are homogeneous
+        assert_eq!(
+            infer_variant_component_count(&[
+                "v0_20".to_owned(),
+                "v0_23".to_owned(),
+                "v0_20_1".to_owned(), // pinned, ignored
+            ]),
+            Some(2)
+        );
+
+        // Only pinned variants → None
+        assert_eq!(
+            infer_variant_component_count(&["v1_2_3".to_owned(), "v1_2_4".to_owned()]),
+            None
+        );
     }
 
     #[test]

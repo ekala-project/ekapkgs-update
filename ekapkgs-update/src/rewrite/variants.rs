@@ -161,6 +161,118 @@ fn find_variant_range_regex(content: &str, variant_name: &str) -> Result<std::op
     Ok(brace_start..end_pos + 1)
 }
 
+/// Add a new variant entry to a mkManyVariants `variants.nix` file
+///
+/// Inserts a new variant attribute set before the final closing brace of the
+/// top-level attribute set. The new variant is formatted to match the
+/// indentation style of existing variants.
+///
+/// # Arguments
+/// * `content` - The variants.nix file content as a string
+/// * `variant_name` - The variant attribute name (e.g., "v0_27")
+/// * `attrs` - Key-value pairs for the variant (e.g., `[("version", "0.27.0"), ("src-hash", "sha256-...")]`)
+///
+/// # Returns
+/// The updated file content with the new variant added.
+///
+/// # Errors
+/// Returns a [`RewriteError`] if:
+/// - The file has invalid Nix syntax
+/// - The variant already exists
+/// - The result would produce invalid syntax
+///
+/// # Example
+/// ```
+/// use ekapkgs_update::rewrite::add_variant_entry;
+///
+/// let content = r#"{
+///   v0_20 = {
+///     version = "0.20.1";
+///     src-hash = "sha256-old";
+///   };
+///   v0_23 = {
+///     version = "0.23.0";
+///     src-hash = "sha256-other";
+///   };
+/// }"#;
+///
+/// let result = add_variant_entry(content, "v0_27", &[("version", "0.27.0"), ("src-hash", "sha256-new")]);
+/// assert!(result.is_ok());
+/// let updated = result.unwrap();
+/// assert!(updated.contains("v0_27"));
+/// assert!(updated.contains("0.27.0"));
+/// ```
+pub fn add_variant_entry(
+    content: &str,
+    variant_name: &str,
+    attrs: &[(&str, &str)],
+) -> Result<String> {
+    // Validate the input parses correctly
+    let parse = rnix::Root::parse(content);
+    if !parse.errors().is_empty() {
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        return Err(RewriteError::Parse(errors.join(", ")));
+    }
+
+    // Check that the variant doesn't already exist
+    let check_pattern = format!(r"(?m)^\s*{}\s*=", regex::escape(variant_name));
+    let check_re = Regex::new(&check_pattern)?;
+    if check_re.is_match(content) {
+        return Err(RewriteError::Structural(format!(
+            "Variant '{variant_name}' already exists"
+        )));
+    }
+
+    // Detect indentation from an existing variant block
+    let indent = detect_variant_indent(content);
+
+    // Build the new variant block
+    let mut block = format!("{indent}{variant_name} = {{\n");
+    for (key, value) in attrs {
+        block.push_str(&format!("{indent}  {key} = \"{value}\";\n"));
+    }
+    block.push_str(&format!("{indent}}};\n"));
+
+    // Find the final closing brace of the outer attrset
+    let insert_pos = content
+        .rfind('}')
+        .ok_or_else(|| RewriteError::Structural("No closing brace found in content".to_owned()))?;
+
+    // Insert the new variant before the final closing brace
+    let mut result = String::with_capacity(content.len() + block.len());
+    result.push_str(&content[..insert_pos]);
+    result.push_str(&block);
+    result.push_str(&content[insert_pos..]);
+
+    // Validate the result
+    let result_parse = rnix::Root::parse(&result);
+    if !result_parse.errors().is_empty() {
+        return Err(RewriteError::InvalidResult {
+            operation: "AddVariant",
+        });
+    }
+
+    Ok(result)
+}
+
+/// Detect the indentation used for variant blocks in a variants.nix file
+///
+/// Looks for lines matching `<whitespace><identifier> = {` and returns the
+/// leading whitespace. Falls back to two spaces if no variant is found.
+fn detect_variant_indent(content: &str) -> String {
+    let variant_pattern = Regex::new(r"(?m)^(\s+)\w+\s*=\s*\{").expect("indent regex");
+    if let Some(caps) = variant_pattern.captures(content) {
+        caps.get(1)
+            .map_or("  ".to_owned(), |m| m.as_str().to_owned())
+    } else {
+        "  ".to_owned()
+    }
+}
+
 /// Find the position of the closing brace matching an opening brace
 fn find_matching_brace(content: &str, start_pos: usize) -> Result<usize> {
     let mut depth = 0;

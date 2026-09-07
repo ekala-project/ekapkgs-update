@@ -22,6 +22,8 @@ mod tests_patches;
 mod tests_rev;
 #[cfg(test)]
 mod tests_teams;
+#[cfg(test)]
+mod tests_variants;
 
 pub use attributes::find_and_update_attr;
 // `RewriteError` is intentionally kept private to the `rewrite` module: callers
@@ -32,4 +34,4 @@ pub use maintainers::replace_maintainers_with_empty;
 pub use patches::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
 pub use rev_update::try_update_rev_attr;
 pub use teams::replace_teams_with_empty;
-pub use variants::update_variant_attr;
+pub use variants::{add_variant_entry, update_variant_attr};

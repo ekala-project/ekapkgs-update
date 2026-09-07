@@ -276,14 +276,118 @@ impl UpstreamSource {
         parse_pypi_url(url).map(|pypi_pname| UpstreamSource::PyPI { pname: pypi_pname })
     }
 
+    /// Fetch all releases/tags from the upstream VCS platform without filtering
+    ///
+    /// Handles authentication tokens and release-to-tags fallback for each
+    /// platform. Returns the full unfiltered list of releases.
+    ///
+    /// # Errors
+    /// Returns an error if the API request fails.
+    pub async fn fetch_all_releases(&self) -> anyhow::Result<Vec<Release>> {
+        match self {
+            UpstreamSource::GitHub { owner, repo } => {
+                let token = env::var("GITHUB_TOKEN").ok();
+
+                if token.is_none() {
+                    warn!(
+                        "GITHUB_TOKEN not set - using unauthenticated GitHub API (60 \
+                         requests/hour rate limit)"
+                    );
+                }
+
+                let all_releases = fetch_github_releases(owner, repo, token.as_deref()).await;
+                if let Err(e) = &all_releases {
+                    debug!("GitHub releases endpoint failed, falling back to tags: {e}");
+                }
+
+                match all_releases {
+                    Ok(gh_releases) => Ok(gh_releases
+                        .into_iter()
+                        .map(|r| Release {
+                            tag_name: r.tag_name,
+                            is_prerelease: r.prerelease,
+                        })
+                        .collect()),
+                    Err(_) => Ok(fetch_github_tags(owner, repo, token.as_deref())
+                        .await?
+                        .into_iter()
+                        .map(|t| Release {
+                            tag_name: t.name,
+                            is_prerelease: false,
+                        })
+                        .collect()),
+                }
+            },
+            UpstreamSource::GitLab { owner, project } => {
+                let token = env::var("GITLAB_TOKEN").ok();
+
+                if token.is_none() {
+                    warn!(
+                        "GITLAB_TOKEN not set - using unauthenticated GitLab API (~300 \
+                         requests/hour rate limit)"
+                    );
+                }
+
+                let all_releases = fetch_gitlab_releases(owner, project, token.as_deref()).await;
+                if let Err(e) = &all_releases {
+                    debug!("GitLab releases endpoint failed, falling back to tags: {e}");
+                }
+
+                match all_releases {
+                    Ok(gl_releases) => Ok(gl_releases
+                        .into_iter()
+                        .map(|r| Release {
+                            tag_name: r.tag_name,
+                            is_prerelease: r.upcoming_release,
+                        })
+                        .collect()),
+                    Err(_) => Ok(fetch_gitlab_tags(owner, project, token.as_deref())
+                        .await?
+                        .into_iter()
+                        .map(|t| Release {
+                            tag_name: t.name,
+                            is_prerelease: false,
+                        })
+                        .collect()),
+                }
+            },
+            UpstreamSource::SourceHut { owner, repo } => {
+                let token = env::var("SOURCEHUT_TOKEN").ok();
+
+                if token.is_none() {
+                    warn!(
+                        "SOURCEHUT_TOKEN not set - using unauthenticated SourceHut API (limited \
+                         rate limit)"
+                    );
+                }
+
+                let tags = fetch_sourcehut_tags(owner, repo, token.as_deref()).await?;
+                Ok(tags
+                    .into_iter()
+                    .map(|t| Release {
+                        tag_name: t.name,
+                        is_prerelease: false,
+                    })
+                    .collect())
+            },
+            UpstreamSource::PyPI { pname } => {
+                let pypi_response = fetch_pypi_releases(pname).await?;
+                Ok(pypi_response
+                    .releases
+                    .into_iter()
+                    .map(|(version, artifacts)| Release {
+                        tag_name: version,
+                        is_prerelease: artifacts.iter().any(|a| a.yanked),
+                    })
+                    .collect())
+            },
+        }
+    }
+
     /// Get the best compatible release based on semver strategy
     ///
     /// Fetches all releases/tags from the VCS platform and filters them based on
     /// the semver strategy to find the best match for the current version.
-    /// Automatically checks for authentication tokens in environment variables:
-    /// - `GITHUB_TOKEN` for GitHub sources
-    /// - `GITLAB_TOKEN` for GitLab sources
-    /// - `SOURCEHUT_TOKEN` for SourceHut sources
     ///
     /// # Arguments
     /// * `current_version` - The current version to compare against
@@ -305,158 +409,16 @@ impl UpstreamSource {
         version_regex: Option<&str>,
         include_prereleases: bool,
     ) -> anyhow::Result<Release> {
-        match self {
-            UpstreamSource::GitHub { owner, repo } => {
-                let token = env::var("GITHUB_TOKEN").ok();
-
-                if token.is_none() {
-                    warn!(
-                        "GITHUB_TOKEN not set - using unauthenticated GitHub API (60 \
-                         requests/hour rate limit)"
-                    );
-                }
-
-                // Try to fetch all releases first; fall back to tags on failure.
-                let all_releases = fetch_github_releases(owner, repo, token.as_deref()).await;
-                if let Err(e) = &all_releases {
-                    debug!("GitHub releases endpoint failed, falling back to tags: {e}");
-                }
-
-                let releases: Vec<Release> = match all_releases {
-                    Ok(gh_releases) => gh_releases
-                        .into_iter()
-                        .map(|r| Release {
-                            tag_name: r.tag_name,
-                            is_prerelease: r.prerelease,
-                        })
-                        .collect(),
-                    Err(_) => fetch_github_tags(owner, repo, token.as_deref())
-                        .await?
-                        .into_iter()
-                        .map(|t| Release {
-                            tag_name: t.name,
-                            is_prerelease: false,
-                        })
-                        .collect(),
-                };
-
-                // Filter and find best match
-                find_best_release(
-                    releases,
-                    current_version,
-                    strategy,
-                    version_prefix,
-                    explicit_version,
-                    version_regex,
-                    include_prereleases,
-                )
-            },
-            UpstreamSource::GitLab { owner, project } => {
-                let token = env::var("GITLAB_TOKEN").ok();
-
-                if token.is_none() {
-                    warn!(
-                        "GITLAB_TOKEN not set - using unauthenticated GitLab API (~300 \
-                         requests/hour rate limit)"
-                    );
-                }
-
-                // Try to fetch all releases first; fall back to tags on failure.
-                let all_releases = fetch_gitlab_releases(owner, project, token.as_deref()).await;
-                if let Err(e) = &all_releases {
-                    debug!("GitLab releases endpoint failed, falling back to tags: {e}");
-                }
-
-                let releases: Vec<Release> = match all_releases {
-                    Ok(gl_releases) => gl_releases
-                        .into_iter()
-                        .map(|r| Release {
-                            tag_name: r.tag_name,
-                            is_prerelease: r.upcoming_release,
-                        })
-                        .collect(),
-                    Err(_) => fetch_gitlab_tags(owner, project, token.as_deref())
-                        .await?
-                        .into_iter()
-                        .map(|t| Release {
-                            tag_name: t.name,
-                            is_prerelease: false,
-                        })
-                        .collect(),
-                };
-
-                // Filter and find best match
-                find_best_release(
-                    releases,
-                    current_version,
-                    strategy,
-                    version_prefix,
-                    explicit_version,
-                    version_regex,
-                    include_prereleases,
-                )
-            },
-            UpstreamSource::SourceHut { owner, repo } => {
-                let token = env::var("SOURCEHUT_TOKEN").ok();
-
-                if token.is_none() {
-                    warn!(
-                        "SOURCEHUT_TOKEN not set - using unauthenticated SourceHut API (limited \
-                         rate limit)"
-                    );
-                }
-
-                // SourceHut uses tags via GraphQL API
-                let tags = fetch_sourcehut_tags(owner, repo, token.as_deref()).await?;
-
-                let releases: Vec<Release> = tags
-                    .into_iter()
-                    .map(|t| Release {
-                        tag_name: t.name,
-                        is_prerelease: false,
-                    })
-                    .collect();
-
-                // Filter and find best match
-                find_best_release(
-                    releases,
-                    current_version,
-                    strategy,
-                    version_prefix,
-                    explicit_version,
-                    version_regex,
-                    include_prereleases,
-                )
-            },
-            UpstreamSource::PyPI { pname } => {
-                // PyPI doesn't require authentication tokens
-                let pypi_response = fetch_pypi_releases(pname).await?;
-
-                // Convert PyPI releases to our Release struct
-                // PyPI returns a HashMap where keys are version strings
-                // Treat yanked releases as prereleases (a version is yanked when any
-                // of its artifacts has been yanked).
-                let releases: Vec<Release> = pypi_response
-                    .releases
-                    .into_iter()
-                    .map(|(version, artifacts)| Release {
-                        tag_name: version,
-                        is_prerelease: artifacts.iter().any(|a| a.yanked),
-                    })
-                    .collect();
-
-                // Filter and find best match
-                find_best_release(
-                    releases,
-                    current_version,
-                    strategy,
-                    version_prefix,
-                    explicit_version,
-                    version_regex,
-                    include_prereleases,
-                )
-            },
-        }
+        let releases = self.fetch_all_releases().await?;
+        find_best_release(
+            releases,
+            current_version,
+            strategy,
+            version_prefix,
+            explicit_version,
+            version_regex,
+            include_prereleases,
+        )
     }
 
     /// Get a human-readable description of this source
@@ -719,7 +681,7 @@ pub fn normalize_version(version: &str) -> String {
 
 /// Check whether a version string contains common prerelease indicators
 /// (alpha, beta, rc, dev, pre) that the upstream API may not have flagged.
-fn version_looks_prerelease(version: &str) -> bool {
+pub fn version_looks_prerelease(version: &str) -> bool {
     let lower = version.to_lowercase();
     // Check for common prerelease keywords
     if lower.contains("alpha")
@@ -755,7 +717,7 @@ fn version_looks_prerelease(version: &str) -> bool {
 /// Splits on `.`, parses each component as `u64` for numeric comparison,
 /// and falls back to string comparison for non-numeric components.
 /// Missing components are treated as `0`.
-fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
+pub fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
     // Strip any trailing prerelease suffixes for base comparison
     let a_base = a.split('-').next().unwrap_or(a);
     let b_base = b.split('-').next().unwrap_or(b);
