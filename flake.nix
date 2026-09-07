@@ -13,7 +13,8 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
-      overlays = [ localOverlay ];
+
+      overlays.default = localOverlay;
 
       packages = pkgs: {
         default = pkgs.ekapkgs-update;
@@ -28,11 +29,10 @@
         programs.rustfmt.enable = true;
         programs.nixfmt.enable = true;
       };
-    }
-    // {
-      overlays.default = localOverlay;
 
-      nixosModules.default = import ./nix/module.nix;
-      nixosModules.ekapkgs-update = import ./nix/module.nix;
+      nixosModules = {
+        default = import ./nix/module.nix;
+        ekapkgs-update = import ./nix/module.nix;
+      };
     };
 }
