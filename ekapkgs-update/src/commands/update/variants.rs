@@ -642,6 +642,44 @@ pub async fn add_new_variant(
     }
 
     info!("Build successful for new variant '{}'", variant_name);
+
+    // Commit the new variant
+    commit_new_variant(&variants_file_path, attr_path, variant_name, version).await?;
+
+    Ok(())
+}
+
+/// Create a git commit for a newly added variant
+async fn commit_new_variant(
+    variants_file_path: &str,
+    attr_path: &str,
+    variant_name: &str,
+    version: &str,
+) -> anyhow::Result<()> {
+    let add_output = tokio::process::Command::new("git")
+        .args(["add", variants_file_path])
+        .output()
+        .await
+        .context("Failed to run git add")?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        anyhow::bail!("git add failed: {stderr}");
+    }
+
+    let commit_msg = format!("{attr_path}.{variant_name}: init at {version}");
+    let commit_output = tokio::process::Command::new("git")
+        .args(["commit", "-m", &commit_msg])
+        .output()
+        .await
+        .context("Failed to run git commit")?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        anyhow::bail!("git commit failed: {stderr}");
+    }
+
+    info!("Committed: {}", commit_msg);
     Ok(())
 }
 
