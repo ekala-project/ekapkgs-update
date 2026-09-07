@@ -214,6 +214,15 @@ async fn check_for_update(
                 s
             },
         }
+    } else if crate::nix::is_many_variants_package(eval_entry_point, attr_path)
+        .await
+        .unwrap_or(false)
+    {
+        info!(
+            "{}: Defaulting to minor strategy (mkManyVariants package)",
+            attr_path
+        );
+        SemverStrategy::Minor
     } else {
         SemverStrategy::Latest
     };
