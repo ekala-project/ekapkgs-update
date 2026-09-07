@@ -1,6 +1,9 @@
 {
   stdenv,
-  fenix,
+  cargo,
+  clippy,
+  rustc,
+  rustfmt,
   pkg-config,
   openssl,
   sqlite,
@@ -13,15 +16,16 @@ stdenv.mkDerivation {
 
   nativeBuildInputs = [
     nix-eval-jobs
-    cachix
-    (fenix.default.withComponents [
-      "cargo"
-      "clippy"
-      "rust-std"
-      "rustc"
-      "rustfmt-preview"
-    ])
+    # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
+    cargo
+    clippy
+    rustc
+    rustfmt
+    pkg-config
     sqlite
   ];
-  buildInputs = [ sqlite ];
+  buildInputs = [
+    openssl
+    sqlite
+  ];
 }

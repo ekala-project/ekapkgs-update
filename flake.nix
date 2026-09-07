@@ -2,48 +2,45 @@
   description = "EkaCI flake";
 
   inputs = {
-    utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    treefmt-nix.url = "github:numtide/treefmt-nix";
-    fenix.url = "github:nix-community/fenix";
-    fenix.inputs.nixpkgs.follows = "nixpkgs";
+    ekapkgs.url = "github:ekala-project/ekapkgs";
+    treefmt-nix.follows = "ekapkgs/corepkgs/treefmt-nix";
   };
 
   outputs =
     {
       self,
-      nixpkgs,
-      utils,
+      ekapkgs,
       treefmt-nix,
-      fenix,
     }:
     let
       localOverlay = import ./nix/overlay.nix;
     in
-    utils.lib.eachDefaultSystem (system: rec {
-      legacyPackages = import nixpkgs {
-        inherit system;
-        overlays = [
-          localOverlay
-          fenix.overlays.default
-        ];
+    ekapkgs.lib.mkFlake {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      overlays = [ localOverlay ];
+
+      packages = pkgs: {
+        default = pkgs.ekapkgs-update;
+        inherit (pkgs) ekapkgs-update ekapkgs-update-web;
       };
 
-      packages = {
-        default = legacyPackages.ekapkgs-update;
-        ekapkgs-update = legacyPackages.ekapkgs-update;
-        ekapkgs-update-web = legacyPackages.ekapkgs-update-web;
+      devShells = pkgs: {
+        default = pkgs.dev-shell;
       };
-      devShells.default = legacyPackages.dev-shell;
-      formatter =
+
+      formatter = pkgs:
         let
-          fmt = treefmt-nix.lib.evalModule legacyPackages {
+          fmt = treefmt-nix.lib.evalModule pkgs {
             programs.rustfmt.enable = true;
+            programs.rustfmt.package = pkgs.nixfmt-rs;
             programs.nixfmt.enable = true;
           };
         in
         fmt.config.build.wrapper;
-    })
+    }
     // {
       overlays.default = localOverlay;
 

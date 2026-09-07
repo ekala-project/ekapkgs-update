@@ -1,33 +1,110 @@
 {
   "nodes": {
-    "fenix": {
+    "corepkgs": {
       "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ],
-        "rust-analyzer-src": "rust-analyzer-src"
+        "nix-lib": "nix-lib",
+        "systems": "systems",
+        "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1765252472,
-        "narHash": "sha256-byMt/uMi7DJ8tRniFopDFZMO3leSjGp6GS4zWOFT+uQ=",
-        "owner": "nix-community",
-        "repo": "fenix",
-        "rev": "8456b985f6652e3eef0632ee9992b439735c5544",
+        "lastModified": 1788608763,
+        "narHash": "sha256-NdIWae8yd6vnSqO8sZUrD6eH2YGBO8OG/wuJvbFO+9U=",
+        "owner": "ekala-project",
+        "repo": "corepkgs",
+        "rev": "43f4d743d9439fdf01fd2f321607a55a0b6d9274",
         "type": "github"
       },
       "original": {
-        "owner": "nix-community",
-        "repo": "fenix",
+        "owner": "ekala-project",
+        "repo": "corepkgs",
+        "type": "github"
+      }
+    },
+    "cuda": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785456825,
+        "narHash": "sha256-jlCNiGUGY3ykXkp/IpEz9jHDaQipN8nkBWPf7Rwl2oM=",
+        "owner": "ekala-project",
+        "repo": "cuda-pkgs",
+        "rev": "bbd431732bbd86645f8cb8edf0fe2441ecabd89a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ekala-project",
+        "repo": "cuda-pkgs",
+        "type": "github"
+      }
+    },
+    "ekapkgs": {
+      "inputs": {
+        "corepkgs": "corepkgs",
+        "cuda": "cuda",
+        "haskell": "haskell",
+        "nix-lib": [
+          "ekapkgs",
+          "corepkgs",
+          "nix-lib"
+        ],
+        "python": "python",
+        "r-pkgs": "r-pkgs",
+        "systems": [
+          "ekapkgs",
+          "corepkgs",
+          "systems"
+        ],
+        "vim-plugins": "vim-plugins"
+      },
+      "locked": {
+        "lastModified": 1788638166,
+        "narHash": "sha256-VWSkAsun9tzuQ5qCzRduH7Daad3edaqVB/THNlP0UUo=",
+        "path": "/home/jon/projects/ekapkgs",
+        "type": "path"
+      },
+      "original": {
+        "owner": "ekala-project",
+        "repo": "ekapkgs",
+        "type": "github"
+      }
+    },
+    "haskell": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788554633,
+        "narHash": "sha256-3RuM+RoiTjNfGZPUQNGUIBFvekFsPu3/X4nOvoAO4iI=",
+        "owner": "ekala-project",
+        "repo": "haskell-pkgs",
+        "rev": "427f504a7812d9ab787f1c819cc4c42483358b10",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ekala-project",
+        "repo": "haskell-pkgs",
+        "type": "github"
+      }
+    },
+    "nix-lib": {
+      "locked": {
+        "lastModified": 1787401631,
+        "narHash": "sha256-Qko+hdbdmfUT+wSTlcc7TOAMHGhyMI9sdRlKzcyzDqk=",
+        "owner": "ekala-project",
+        "repo": "nix-lib",
+        "rev": "a52fa865318d189e15ecc37ed1d26815309e4e4e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ekala-project",
+        "repo": "nix-lib",
         "type": "github"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1764947035,
-        "narHash": "sha256-EYHSjVM4Ox4lvCXUMiKKs2vETUSL5mx+J2FfutM7T9w=",
+        "lastModified": 1770107345,
+        "narHash": "sha256-tbS0Ebx2PiA1FRW8mt8oejR0qMXmziJmPaU1d4kYY9g=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "a672be65651c80d3f592a89b3945466584a22069",
+        "rev": "4533d9293756b63904b7238acb84ac8fe4c8c2c4",
         "type": "github"
       },
       "original": {
@@ -37,45 +114,46 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
+    "python": {
+      "flake": false,
       "locked": {
-        "lastModified": 1761236834,
-        "narHash": "sha256-+pthv6hrL5VLW2UqPdISGuLiUZ6SnAXdd2DdUE+fV2Q=",
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "d5faa84122bc0a1fd5d378492efce4e289f8eac1",
+        "lastModified": 1788627492,
+        "narHash": "sha256-egLzQt8HeXx4+Zq7a3MFXD3l4ThjpptdIhCdNpU4jaI=",
+        "owner": "ekala-project",
+        "repo": "python-pkgs",
+        "rev": "3228c35ad5a223620535833dc0599c9b1181d5f0",
         "type": "github"
       },
       "original": {
-        "owner": "nixos",
-        "ref": "nixpkgs-unstable",
-        "repo": "nixpkgs",
+        "owner": "ekala-project",
+        "repo": "python-pkgs",
+        "type": "github"
+      }
+    },
+    "r-pkgs": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787667829,
+        "narHash": "sha256-9BfOSMN4gnDEnSVRvpKNHnNfAbJF+PEH7xGiKz/5rMQ=",
+        "owner": "ekala-project",
+        "repo": "r-pkgs",
+        "rev": "3dce8be145a252f59bdc2bc5d96ad24f51be4870",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ekala-project",
+        "repo": "r-pkgs",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
-        "fenix": "fenix",
-        "nixpkgs": "nixpkgs",
-        "treefmt-nix": "treefmt-nix",
-        "utils": "utils"
-      }
-    },
-    "rust-analyzer-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1765120009,
-        "narHash": "sha256-nG76b87rkaDzibWbnB5bYDm6a52b78A+fpm+03pqYIw=",
-        "owner": "rust-lang",
-        "repo": "rust-analyzer",
-        "rev": "5e3e9c4e61bba8a5e72134b9ffefbef8f531d008",
-        "type": "github"
-      },
-      "original": {
-        "owner": "rust-lang",
-        "ref": "nightly",
-        "repo": "rust-analyzer",
-        "type": "github"
+        "ekapkgs": "ekapkgs",
+        "treefmt-nix": [
+          "ekapkgs",
+          "corepkgs",
+          "treefmt-nix"
+        ]
       }
     },
     "systems": {
@@ -95,14 +173,14 @@
     },
     "treefmt-nix": {
       "inputs": {
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1762938485,
-        "narHash": "sha256-AlEObg0syDl+Spi4LsZIBrjw+snSVU4T8MOeuZJUJjM=",
+        "lastModified": 1786901030,
+        "narHash": "sha256-WSFCsDSE5ffgD2MqzkM2CYjeFiKhRF/dJUN8uedb6YE=",
         "owner": "numtide",
         "repo": "treefmt-nix",
-        "rev": "5b4ee75aeefd1e2d5a1cc43cf6ba65eba75e83e4",
+        "rev": "27b3b12a8e6375f28ebe122f07d230ca5459bbfa",
         "type": "github"
       },
       "original": {
@@ -111,21 +189,19 @@
         "type": "github"
       }
     },
-    "utils": {
-      "inputs": {
-        "systems": "systems"
-      },
+    "vim-plugins": {
+      "flake": false,
       "locked": {
-        "lastModified": 1731533236,
-        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
-        "owner": "numtide",
-        "repo": "flake-utils",
-        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "lastModified": 1787405264,
+        "narHash": "sha256-Q+m3ClJgBkezRlL05MPg+KjH0XIB3fASZhyAu9Y/7YM=",
+        "owner": "ekala-project",
+        "repo": "vim-plugins",
+        "rev": "970cbae9e2f8df642a4b7247fe4979f13c38f09d",
         "type": "github"
       },
       "original": {
-        "owner": "numtide",
-        "repo": "flake-utils",
+        "owner": "ekala-project",
+        "repo": "vim-plugins",
         "type": "github"
       }
     }
