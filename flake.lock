@@ -53,11 +53,16 @@
           "corepkgs",
           "systems"
         ],
+        "treefmt-nix": [
+          "ekapkgs",
+          "corepkgs",
+          "treefmt-nix"
+        ],
         "vim-plugins": "vim-plugins"
       },
       "locked": {
-        "lastModified": 1788638166,
-        "narHash": "sha256-VWSkAsun9tzuQ5qCzRduH7Daad3edaqVB/THNlP0UUo=",
+        "lastModified": 1788806376,
+        "narHash": "sha256-lmnx/51YkMAlxRz6W6JU2hPAd6MXnDfic+vUpSnkLKk=",
         "path": "/home/jon/projects/ekapkgs",
         "type": "path"
       },
@@ -148,12 +153,7 @@
     },
     "root": {
       "inputs": {
-        "ekapkgs": "ekapkgs",
-        "treefmt-nix": [
-          "ekapkgs",
-          "corepkgs",
-          "treefmt-nix"
-        ]
+        "ekapkgs": "ekapkgs"
       }
     },
     "systems": {

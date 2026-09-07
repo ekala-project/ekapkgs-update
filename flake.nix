@@ -1,17 +1,10 @@
 {
   description = "EkaCI flake";
 
-  inputs = {
-    ekapkgs.url = "github:ekala-project/ekapkgs";
-    treefmt-nix.follows = "ekapkgs/corepkgs/treefmt-nix";
-  };
+  inputs.ekapkgs.url = "github:ekala-project/ekapkgs";
 
   outputs =
-    {
-      self,
-      ekapkgs,
-      treefmt-nix,
-    }:
+    { self, ekapkgs }:
     let
       localOverlay = import ./nix/overlay.nix;
     in
@@ -31,15 +24,10 @@
         default = pkgs.dev-shell;
       };
 
-      formatter = pkgs:
-        let
-          fmt = treefmt-nix.lib.evalModule pkgs {
-            programs.rustfmt.enable = true;
-            programs.rustfmt.package = pkgs.nixfmt-rs;
-            programs.nixfmt.enable = true;
-          };
-        in
-        fmt.config.build.wrapper;
+      treefmt = {
+        programs.rustfmt.enable = true;
+        programs.nixfmt.enable = true;
+      };
     }
     // {
       overlays.default = localOverlay;
