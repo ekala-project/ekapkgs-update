@@ -195,6 +195,7 @@ mod tests {
             semver_strategy: None,
             include_prereleases: None,
             version_regex: None,
+            platform_hashes: None,
         };
 
         match ecosystem_type {

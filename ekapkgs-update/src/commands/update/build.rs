@@ -49,6 +49,41 @@ pub async fn build_nix_expr(
     Ok((output.status.success(), stdout, stderr))
 }
 
+/// Build Nix expression for a specific target system
+///
+/// Like [`build_nix_expr`] but passes `--system <system>` so that
+/// `builtins.currentSystem` resolves to the requested platform.
+pub async fn build_nix_expr_for_system(
+    eval_entry_point: &str,
+    attr_path: &str,
+    attr_suffix: Option<&str>,
+    system: &str,
+) -> anyhow::Result<(bool, String, String)> {
+    let full_attr = if let Some(suffix) = attr_suffix {
+        format!("{attr_path}.{suffix}")
+    } else {
+        attr_path.to_owned()
+    };
+
+    debug!("Building {} for system {}", full_attr, system);
+
+    let mut cmd = Command::new("nix-build");
+    cmd.arg(eval_entry_point)
+        .arg("-A")
+        .arg(&full_attr)
+        .arg("--system")
+        .arg(system);
+    for arg in get_extra_nix_build_args() {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Ok((output.status.success(), stdout, stderr))
+}
+
 /// Build a flake package and return stdout/stderr
 ///
 /// Uses `nix build <installable>` to build flake packages.

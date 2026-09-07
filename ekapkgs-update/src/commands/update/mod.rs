@@ -34,7 +34,8 @@ pub(super) use git::create_git_commit;
 pub(super) use hash_workflows::{
     TestResult, build_with_patch_recovery, run_package_tests, update_cargo_hash_if_needed,
     update_composer_deps_hash_if_needed, update_npm_deps_hash_if_needed,
-    update_nuget_deps_hash_if_needed, update_source_hash, update_vendor_hash_if_needed,
+    update_nuget_deps_hash_if_needed, update_platform_hashes, update_source_hash,
+    update_vendor_hash_if_needed,
 };
 pub(super) use script::run_update_script;
 use tracing::info;
@@ -114,6 +115,22 @@ pub async fn update_from_file_path(
         metadata.output_hash.as_deref(),
     )
     .await?;
+
+    // Step 4b: Update platform-specific source hashes if needed
+    if let Some(ref platforms) = metadata.platform_hashes {
+        info!(
+            "Discovering source hashes for {} platforms: {:?}",
+            platforms.len(),
+            platforms
+        );
+        update_platform_hashes(
+            &eval_entry_point,
+            &attr_path,
+            &actual_file_location,
+            platforms,
+        )
+        .await?;
+    }
 
     // Step 5: Update dependency hashes (unless --src-only is set)
     if !update_config.src_only {

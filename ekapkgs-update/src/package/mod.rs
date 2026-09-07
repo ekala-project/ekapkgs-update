@@ -27,6 +27,8 @@ pub struct PackageMetadata {
     pub include_prereleases: Option<bool>,
     /// Custom regex for extracting version from tags (from passthru.ekapkgs-update.version-regex)
     pub version_regex: Option<String>,
+    /// Platforms with distinct source hashes (from passthru.ekapkgs-update.platform-hashes)
+    pub platform_hashes: Option<Vec<String>>,
 }
 
 pub struct PackageQuery {
@@ -145,6 +147,26 @@ impl PackageMetadata {
                 }
             });
 
+        // Query passthru.ekapkgs-update.platform-hashes attribute (list of system strings)
+        let platform_hashes = package
+            .get_attr(
+                "builtins.concatStringsSep \" \" (passthru.ekapkgs-update.platform-hashes or [])",
+            )
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        trimmed
+                            .split_whitespace()
+                            .map(String::from)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -162,6 +184,7 @@ impl PackageMetadata {
             semver_strategy,
             include_prereleases,
             version_regex,
+            platform_hashes,
         })
     }
 }
@@ -192,6 +215,7 @@ mod tests {
             semver_strategy: None,
             include_prereleases: None,
             version_regex: None,
+            platform_hashes: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -213,6 +237,7 @@ mod tests {
             semver_strategy: None,
             include_prereleases: None,
             version_regex: None,
+            platform_hashes: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -234,6 +259,7 @@ mod tests {
             semver_strategy: None,
             include_prereleases: None,
             version_regex: None,
+            platform_hashes: None,
         };
 
         assert_eq!(metadata_none.skip, None);
@@ -260,6 +286,7 @@ mod tests {
             semver_strategy: Some(SemverStrategy::Minor),
             include_prereleases: Some(true),
             version_regex: Some("v(.*)".to_string()),
+            platform_hashes: None,
         };
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));

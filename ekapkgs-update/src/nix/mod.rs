@@ -109,6 +109,40 @@ pub async fn eval_nix_expr(expr: impl AsRef<str>) -> anyhow::Result<String> {
     Ok(result)
 }
 
+/// Evaluate a Nix expression for a specific target system
+///
+/// Like [`eval_nix_expr`] but passes `--system <system>` so that
+/// `builtins.currentSystem` resolves to the requested platform.
+pub async fn eval_nix_expr_for_system(
+    expr: impl AsRef<str>,
+    system: &str,
+) -> anyhow::Result<String> {
+    let expr = expr.as_ref();
+
+    let output = Command::new("nix-instantiate")
+        .arg("--eval")
+        .arg("-E")
+        .arg(expr)
+        .arg("--raw")
+        .arg("--system")
+        .arg(system)
+        .output()
+        .await
+        .context("Failed to execute nix-instantiate")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix-instantiate evaluation failed: {}", stderr.trim());
+    }
+
+    let result = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_matches('"')
+        .to_owned();
+
+    Ok(result)
+}
+
 /// Evaluate a Nix expression that returns a boolean, using `--json` for reliable parsing.
 async fn eval_nix_bool(expr: &str) -> anyhow::Result<bool> {
     let output = Command::new("nix-instantiate")

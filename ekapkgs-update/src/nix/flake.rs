@@ -202,6 +202,7 @@ pub async fn get_flake_package_metadata(
         semver_strategy: None,
         include_prereleases: None,
         version_regex: None,
+        platform_hashes: None,
     })
 }
 

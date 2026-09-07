@@ -435,3 +435,127 @@ pub async fn update_composer_deps_hash_if_needed(
 
     Ok(())
 }
+
+/// Discover and update source hashes for non-native platforms.
+///
+/// For packages with `passthru.ekapkgs-update.platform-hashes`, the normal update
+/// flow only discovers the hash for the build machine's platform. This function
+/// handles the remaining platforms by evaluating `src.outputHash` with `--system`
+/// to get each stale hash, invalidating it, building `.src` for that system to
+/// trigger a FOD mismatch, and writing back the correct hash.
+pub async fn update_platform_hashes(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &Path,
+    platforms: &[String],
+) -> anyhow::Result<()> {
+    use super::build::build_nix_expr_for_system;
+    use crate::nix::{eval_nix_expr_for_system, normalize_entry_point};
+
+    let native_system = std::env::consts::ARCH.to_owned()
+        + "-"
+        + match std::env::consts::OS {
+            "linux" => "linux",
+            "macos" => "darwin",
+            os => os,
+        };
+
+    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+
+    for platform in platforms {
+        if platform == &native_system {
+            debug!(
+                "{}: Skipping platform {} (native, already updated)",
+                attr_path, platform
+            );
+            continue;
+        }
+
+        info!(
+            "{}: Discovering source hash for platform {}",
+            attr_path, platform
+        );
+
+        // Step 1: Evaluate the current (stale) hash for this platform
+        let hash_expr = format!(
+            "with import {} {{ }}; {}.src.outputHash",
+            normalized_entry, attr_path
+        );
+        let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(
+                    "{}: Could not evaluate src.outputHash for {}: {}",
+                    attr_path, platform, e
+                );
+                continue;
+            },
+        };
+
+        // Step 2: Invalidate the stale hash in the file
+        let content = tokio::fs::read_to_string(file_location).await?;
+        if !content.contains(&stale_hash) {
+            warn!(
+                "{}: Stale hash for {} not found in {}, skipping",
+                attr_path,
+                platform,
+                file_location.display()
+            );
+            continue;
+        }
+        let updated = content.replacen(&stale_hash, invalid_hash, 1);
+        tokio::fs::write(file_location, &updated).await?;
+
+        debug!(
+            "{}: Invalidated hash for {} in {}",
+            attr_path,
+            platform,
+            file_location.display()
+        );
+
+        // Step 3: Build .src for this platform to trigger FOD mismatch
+        let (success, _stdout, stderr) =
+            build_nix_expr_for_system(eval_entry_point, attr_path, Some("src"), platform).await?;
+
+        if success {
+            warn!(
+                "{}: Build succeeded with invalid hash for {} — restoring",
+                attr_path, platform
+            );
+            // Restore the original hash
+            let content = tokio::fs::read_to_string(file_location).await?;
+            let restored = content.replacen(invalid_hash, &stale_hash, 1);
+            tokio::fs::write(file_location, &restored).await?;
+            continue;
+        }
+
+        // Step 4: Extract correct hash from build error
+        let correct_hash = match hash_discovery::extract_hash(&stderr) {
+            Some(h) => h,
+            None => {
+                warn!(
+                    "{}: Could not extract hash for {} from build error, restoring",
+                    attr_path, platform
+                );
+                // Restore the original hash so the file isn't left broken
+                let content = tokio::fs::read_to_string(file_location).await?;
+                let restored = content.replacen(invalid_hash, &stale_hash, 1);
+                tokio::fs::write(file_location, &restored).await?;
+                continue;
+            },
+        };
+
+        // Step 5: Write the correct hash
+        let content = tokio::fs::read_to_string(file_location).await?;
+        let updated = content.replacen(invalid_hash, &correct_hash, 1);
+        tokio::fs::write(file_location, &updated).await?;
+
+        info!(
+            "{}: Updated hash for {}: {}",
+            attr_path, platform, correct_hash
+        );
+    }
+
+    Ok(())
+}
