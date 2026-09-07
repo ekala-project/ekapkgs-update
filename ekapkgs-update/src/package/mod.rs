@@ -148,24 +148,27 @@ impl PackageMetadata {
             });
 
         // Query passthru.ekapkgs-update.platform-hashes attribute (list of system strings)
-        let platform_hashes = package
-            .get_attr(
-                "builtins.concatStringsSep \" \" (passthru.ekapkgs-update.platform-hashes or [])",
-            )
-            .await
-            .and_then(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(
-                        trimmed
-                            .split_whitespace()
-                            .map(String::from)
-                            .collect::<Vec<_>>(),
-                    )
-                }
-            });
+        // Uses a full expression since builtins.concatStringsSep can't be appended via get_attr
+        let platform_hashes = {
+            let expr = format!(
+                "with import {} {{ }}; builtins.concatStringsSep \" \" ({}.passthru.ekapkgs-update.platform-hashes or [])",
+                package.eval_entry_point, package.attr_path
+            );
+            eval_nix_expr(&expr).await.ok()
+        }
+        .and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    trimmed
+                        .split_whitespace()
+                        .map(String::from)
+                        .collect::<Vec<_>>(),
+                )
+            }
+        });
 
         Ok(PackageMetadata {
             version,

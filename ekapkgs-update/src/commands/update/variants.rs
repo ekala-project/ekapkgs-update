@@ -3,7 +3,8 @@ use regex::Regex;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::nix::{eval_nix_expr, get_variants_list, normalize_entry_point};
+use crate::hash_discovery;
+use crate::nix::{eval_nix_expr, eval_nix_expr_for_system, get_variants_list, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::rewrite::update_variant_attr;
 use crate::variant_strategy::extract_version_prefix;
@@ -149,28 +150,107 @@ pub async fn update_single_variant(
         Some(&metadata.version),
     )?;
 
-    // Discover new hash by building with wrong hash
-    let new_hash =
-        discover_hash_for_variant(file, attr_path, variant_name, &updated_content).await?;
+    // Check if this package uses platform-specific hashes
+    if let Some(ref platforms) = metadata.platform_hashes {
+        // Platform-hash flow: update version, then discover each platform's hash
+        // by invalidating and building with --system
+        tokio::fs::write(&variants_file_path, &updated_content)
+            .await
+            .with_context(|| format!("write variants file {variants_file_path}"))?;
 
-    // Update the hash in the variant
-    let final_content =
-        if let (Some(old_hash), Some(ref new_h)) = (&metadata.output_hash, &new_hash) {
-            update_variant_attr(
-                &updated_content,
-                variant_name,
-                "src-hash",
-                new_h,
-                Some(old_hash),
-            )?
-        } else {
-            updated_content
-        };
+        let normalized_entry = normalize_entry_point(file);
 
-    // Write the updated file
-    tokio::fs::write(&variants_file_path, &final_content)
-        .await
-        .with_context(|| format!("write variants file {variants_file_path}"))?;
+        for platform in platforms {
+            info!(
+                "Discovering hash for variant '{}' on {}",
+                variant_name, platform
+            );
+
+            // Evaluate the stale hash for this platform
+            let hash_expr = format!(
+                "with import {} {{ }}; {}.src.outputHash",
+                normalized_entry, variant_attr_path
+            );
+            let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(
+                        "Could not evaluate src.outputHash for {} on {}: {}",
+                        variant_name, platform, e
+                    );
+                    continue;
+                },
+            };
+
+            // Invalidate it
+            let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            let content = tokio::fs::read_to_string(&variants_file_path).await?;
+            if !content.contains(&stale_hash) {
+                warn!(
+                    "Stale hash for {} not found in {}, skipping",
+                    platform, variants_file_path
+                );
+                continue;
+            }
+            let invalidated = content.replacen(&stale_hash, invalid_hash, 1);
+            tokio::fs::write(&variants_file_path, &invalidated).await?;
+
+            // Build .src with --system to get correct hash
+            let (success, _stdout, stderr) =
+                super::build::build_nix_expr_for_system(file, &variant_attr_path, Some("src"), platform)
+                    .await?;
+
+            if success {
+                warn!("Build succeeded with invalid hash for {} — restoring", platform);
+                let content = tokio::fs::read_to_string(&variants_file_path).await?;
+                let restored = content.replacen(invalid_hash, &stale_hash, 1);
+                tokio::fs::write(&variants_file_path, &restored).await?;
+                continue;
+            }
+
+            let correct_hash = match hash_discovery::extract_hash(&stderr) {
+                Some(h) => h,
+                None => {
+                    warn!(
+                        "Could not extract hash for {} from build error, restoring",
+                        platform
+                    );
+                    let content = tokio::fs::read_to_string(&variants_file_path).await?;
+                    let restored = content.replacen(invalid_hash, &stale_hash, 1);
+                    tokio::fs::write(&variants_file_path, &restored).await?;
+                    continue;
+                },
+            };
+
+            // Write the correct hash
+            let content = tokio::fs::read_to_string(&variants_file_path).await?;
+            let fixed = content.replacen(invalid_hash, &correct_hash, 1);
+            tokio::fs::write(&variants_file_path, &fixed).await?;
+            info!("Updated hash for {} on {}: {}", variant_name, platform, correct_hash);
+        }
+    } else {
+        // Normal single-hash flow
+        let new_hash =
+            discover_hash_for_variant(file, attr_path, variant_name, &updated_content).await?;
+
+        let final_content =
+            if let (Some(old_hash), Some(ref new_h)) = (&metadata.output_hash, &new_hash) {
+                update_variant_attr(
+                    &updated_content,
+                    variant_name,
+                    "src-hash",
+                    new_h,
+                    Some(old_hash),
+                )?
+            } else {
+                updated_content
+            };
+
+        tokio::fs::write(&variants_file_path, &final_content)
+            .await
+            .with_context(|| format!("write variants file {variants_file_path}"))?;
+    }
+
     info!(
         "Updated variant '{}' in {}",
         variant_name, variants_file_path
