@@ -1,14 +1,34 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Context;
 use regex::Regex;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::hash_discovery;
-use crate::nix::{eval_nix_expr, eval_nix_expr_for_system, get_variants_list, normalize_entry_point};
+use crate::nix::{
+    eval_nix_expr, eval_nix_expr_for_system, get_variants_list, normalize_entry_point,
+};
 use crate::package::PackageMetadata;
-use crate::rewrite::update_variant_attr;
-use crate::variant_strategy::extract_version_prefix;
+use crate::rewrite::{add_variant_entry, update_variant_attr};
+use crate::variant_strategy::{
+    extract_version_prefix, infer_variant_component_count, variant_name_from_series_key,
+    version_series_key,
+};
 use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
+
+/// Hash attribute names to try, in order of preference.
+const HASH_ATTR_CANDIDATES: &[&str] = &["src-hash", "hash", "sha256"];
+
+/// Detect which hash attribute name a variants.nix file uses by checking
+/// if any of the candidate names appear in the content.
+fn detect_hash_attr_name(content: &str) -> &'static str {
+    for &attr in HASH_ATTR_CANDIDATES {
+        if content.contains(attr) {
+            return attr;
+        }
+    }
+    HASH_ATTR_CANDIDATES[0] // default
+}
 
 /// Get the default variant name for a mkManyVariants package
 ///
@@ -204,10 +224,7 @@ pub async fn update_single_variant(
             let correct_hash = match prefetch_url_hash(&src_url).await {
                 Ok(h) => h,
                 Err(e) => {
-                    warn!(
-                        "Could not prefetch {} for {}: {}",
-                        src_url, platform, e
-                    );
+                    warn!("Could not prefetch {} for {}: {}", src_url, platform, e);
                     continue;
                 },
             };
@@ -223,7 +240,10 @@ pub async fn update_single_variant(
             }
             let fixed = content.replacen(&stale_hash, &correct_hash, 1);
             tokio::fs::write(&variants_file_path, &fixed).await?;
-            info!("Updated hash for {} on {}: {}", variant_name, platform, correct_hash);
+            info!(
+                "Updated hash for {} on {}: {}",
+                variant_name, platform, correct_hash
+            );
         }
     } else {
         // Normal single-hash flow
@@ -232,13 +252,28 @@ pub async fn update_single_variant(
 
         let final_content =
             if let (Some(old_hash), Some(ref new_h)) = (&metadata.output_hash, &new_hash) {
-                update_variant_attr(
-                    &updated_content,
-                    variant_name,
-                    "src-hash",
-                    new_h,
-                    Some(old_hash),
-                )?
+                // Try multiple hash attribute names
+                let hash_attrs = ["src-hash", "hash", "sha256"];
+                let mut result = None;
+                for attr_name in &hash_attrs {
+                    if let Ok(content) = update_variant_attr(
+                        &updated_content,
+                        variant_name,
+                        attr_name,
+                        new_h,
+                        Some(old_hash),
+                    ) {
+                        result = Some(content);
+                        break;
+                    }
+                }
+                result.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not find hash attribute in variant '{}' (tried: {:?})",
+                        variant_name,
+                        hash_attrs
+                    )
+                })?
             } else {
                 updated_content
             };
@@ -292,6 +327,324 @@ pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<S
     }
 }
 
+/// Discover new upstream version series not covered by existing variants
+///
+/// Fetches all upstream releases, groups them by version series (matching the
+/// component count of existing variant names), and identifies series that are
+/// newer than the highest existing variant but don't have a corresponding
+/// variant entry yet.
+///
+/// # Returns
+/// A vector of `(variant_name, best_version)` pairs for each new series to add.
+pub async fn discover_new_variants(
+    file: &str,
+    attr_path: &str,
+    existing_variants: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
+    // Step 1: Determine the component count from existing variant names
+    let component_count = match infer_variant_component_count(existing_variants) {
+        Some(count) => count,
+        None => {
+            debug!(
+                "{}: Cannot infer variant component count (mixed or no versioned variants), \
+                 skipping new variant discovery",
+                attr_path
+            );
+            return Ok(vec![]);
+        },
+    };
+    debug!(
+        "{}: Variant component count: {} (e.g., {} → {})",
+        attr_path,
+        component_count,
+        existing_variants.first().map_or("?", String::as_str),
+        if component_count == 1 {
+            "Minor"
+        } else {
+            "Patch"
+        }
+    );
+
+    // Step 2: Get metadata from any existing variant to find upstream source
+    let reference_variant = existing_variants
+        .iter()
+        .find(|v| extract_version_prefix(v).is_some())
+        .ok_or_else(|| anyhow::anyhow!("No parseable variant found for {attr_path}"))?;
+
+    let variant_attr_path = format!("{attr_path}.variants.{reference_variant}");
+    let metadata = PackageMetadata::from_attr_path(file, &variant_attr_path).await?;
+
+    let src_url = metadata
+        .src_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{reference_variant}'"))?;
+
+    let upstream_source = UpstreamSource::from_url(src_url)
+        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?;
+
+    let include_prereleases = metadata.include_prereleases.unwrap_or(false);
+
+    // Step 3: Fetch all upstream releases
+    let all_releases = upstream_source.fetch_all_releases().await?;
+    debug!(
+        "{}: Fetched {} upstream releases",
+        attr_path,
+        all_releases.len()
+    );
+
+    // Step 4: Group releases by series key, keeping only the best version per series
+    let mut series_best: HashMap<String, String> = HashMap::new();
+    for release in &all_releases {
+        if release.is_prerelease && !include_prereleases {
+            continue;
+        }
+
+        let version = extract_version_from_tag(&release.tag_name);
+
+        // Skip prerelease-looking versions
+        if !include_prereleases && crate::vcs_sources::version_looks_prerelease(version) {
+            continue;
+        }
+
+        // Skip versions that don't parse well (no dots)
+        if !version.contains('.') {
+            continue;
+        }
+
+        let Some(key) = version_series_key(version, component_count) else {
+            continue;
+        };
+
+        series_best
+            .entry(key)
+            .and_modify(|existing| {
+                // Keep the higher version
+                let existing_version = extract_version_from_tag(existing);
+                if crate::vcs_sources::compare_version_components(version, existing_version)
+                    == std::cmp::Ordering::Greater
+                {
+                    *existing = version.to_owned();
+                }
+            })
+            .or_insert_with(|| version.to_owned());
+    }
+
+    // Step 5: Compute existing series keys
+    let existing_keys: HashSet<String> = existing_variants
+        .iter()
+        .filter_map(|v| extract_version_prefix(v))
+        .collect();
+
+    // Find the highest existing series key (to only add newer ones)
+    let highest_existing = existing_keys
+        .iter()
+        .max_by(|a, b| crate::vcs_sources::compare_version_components(a, b))
+        .cloned();
+
+    let Some(ref highest) = highest_existing else {
+        debug!("{}: No existing version series found, skipping", attr_path);
+        return Ok(vec![]);
+    };
+    debug!(
+        "{}: Highest existing series: {} (from {} variants)",
+        attr_path,
+        highest,
+        existing_keys.len()
+    );
+
+    // Step 6: Find new series that are newer than the highest existing
+    let mut new_variants: Vec<(String, String)> = series_best
+        .into_iter()
+        .filter(|(key, _)| {
+            !existing_keys.contains(key)
+                && crate::vcs_sources::compare_version_components(key, highest)
+                    == std::cmp::Ordering::Greater
+        })
+        .map(|(key, version)| (variant_name_from_series_key(&key), version))
+        .collect();
+
+    // Sort by variant name for deterministic ordering
+    new_variants.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    if new_variants.is_empty() {
+        info!(
+            "{}: No new variant series found upstream (highest existing: {})",
+            attr_path, highest
+        );
+    } else {
+        info!(
+            "{}: Found {} new variant series: {:?}",
+            attr_path,
+            new_variants.len(),
+            new_variants
+                .iter()
+                .map(|(name, ver)| format!("{name} ({ver})"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    Ok(new_variants)
+}
+
+/// Add a new variant entry to a mkManyVariants package
+///
+/// Creates a new variant in `variants.nix` with the specified version,
+/// discovers the correct source hash (handling both single-hash and
+/// platform-hash packages), and verifies the build.
+pub async fn add_new_variant(
+    file: &str,
+    attr_path: &str,
+    variant_name: &str,
+    version: &str,
+    _update_config: super::UpdateConfig,
+) -> anyhow::Result<()> {
+    let variants_file_path = find_variants_file(file, attr_path).await?;
+    info!(
+        "Adding variant '{}' (version {}) to {}",
+        variant_name, version, variants_file_path
+    );
+
+    // Read the current variants file
+    let content = tokio::fs::read_to_string(&variants_file_path)
+        .await
+        .with_context(|| format!("read variants file {variants_file_path}"))?;
+
+    // Detect which hash attribute name the existing variants use
+    let hash_attr = detect_hash_attr_name(&content);
+    debug!("Using hash attribute name: {}", hash_attr);
+
+    // Check if this package uses platform-specific hashes by examining an
+    // existing variant's metadata
+    let existing_variants = get_variants_list(file, attr_path).await?;
+    let reference_variant = existing_variants
+        .iter()
+        .find(|v| extract_version_prefix(v).is_some())
+        .ok_or_else(|| anyhow::anyhow!("No existing variant to use as reference"))?;
+
+    let ref_attr_path = format!("{attr_path}.variants.{reference_variant}");
+    let ref_metadata = PackageMetadata::from_attr_path(file, &ref_attr_path).await?;
+
+    let placeholder_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let variant_attr_path = format!("{attr_path}.variants.{variant_name}");
+
+    if let Some(ref platforms) = ref_metadata.platform_hashes {
+        // Platform-hash flow: insert variant with placeholder, then prefetch each platform
+        let content_with_variant = add_variant_entry(
+            &content,
+            variant_name,
+            &[("version", version), (hash_attr, placeholder_hash)],
+        )?;
+
+        tokio::fs::write(&variants_file_path, &content_with_variant)
+            .await
+            .with_context(|| format!("write variants file {variants_file_path}"))?;
+
+        let normalized_entry = normalize_entry_point(file);
+
+        for platform in platforms {
+            info!(
+                "Discovering hash for new variant '{}' on {}",
+                variant_name, platform
+            );
+
+            let url_expr = format!(
+                "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+                normalized_entry, variant_attr_path, variant_attr_path
+            );
+            let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(
+                        "Could not evaluate src.url for {} on {}: {}",
+                        variant_name, platform, e
+                    );
+                    continue;
+                },
+            };
+
+            debug!("Prefetching {} for {}", src_url, platform);
+
+            let correct_hash = match prefetch_url_hash(&src_url).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("Could not prefetch {} for {}: {}", src_url, platform, e);
+                    continue;
+                },
+            };
+
+            // Replace the placeholder hash (first occurrence still remaining)
+            let current = tokio::fs::read_to_string(&variants_file_path).await?;
+            if !current.contains(placeholder_hash) {
+                // All placeholders consumed — update the stale hash for this platform
+                let hash_expr = format!(
+                    "with import {} {{ }}; {}.src.outputHash",
+                    normalized_entry, variant_attr_path
+                );
+                let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(
+                            "Could not evaluate stale hash for {} on {}: {}",
+                            variant_name, platform, e
+                        );
+                        continue;
+                    },
+                };
+                let fixed = current.replacen(&stale_hash, &correct_hash, 1);
+                tokio::fs::write(&variants_file_path, &fixed).await?;
+            } else {
+                let fixed = current.replacen(placeholder_hash, &correct_hash, 1);
+                tokio::fs::write(&variants_file_path, &fixed).await?;
+            }
+            info!(
+                "Updated hash for {} on {}: {}",
+                variant_name, platform, correct_hash
+            );
+        }
+    } else {
+        // Normal single-hash flow
+        let content_with_variant = add_variant_entry(
+            &content,
+            variant_name,
+            &[("version", version), (hash_attr, placeholder_hash)],
+        )?;
+
+        // Write the variant with placeholder hash, then discover the correct hash
+        let new_hash =
+            discover_hash_for_variant(file, attr_path, variant_name, &content_with_variant).await?;
+
+        // discover_hash_for_variant restores the backup (which is the content WITH
+        // the new variant and placeholder hash, since we wrote it to disk first).
+        // We need to re-read and update with the correct hash.
+        let final_content = if let Some(ref hash) = new_hash {
+            update_variant_attr(
+                &content_with_variant,
+                variant_name,
+                hash_attr,
+                hash,
+                Some(placeholder_hash),
+            )?
+        } else {
+            content_with_variant
+        };
+
+        tokio::fs::write(&variants_file_path, &final_content)
+            .await
+            .with_context(|| format!("write variants file {variants_file_path}"))?;
+    }
+
+    // Build to verify
+    info!("Building new variant '{}' to verify...", variant_name);
+    let (success, _stdout, stderr) = super::build_nix_expr(file, &variant_attr_path, None).await?;
+
+    if !success {
+        anyhow::bail!("Build failed for new variant '{variant_name}': {stderr}");
+    }
+
+    info!("Build successful for new variant '{}'", variant_name);
+    Ok(())
+}
+
 /// Discover hash for a variant by writing temporary file and building
 async fn discover_hash_for_variant(
     file: &str,
@@ -305,14 +658,25 @@ async fn discover_hash_for_variant(
         .await
         .with_context(|| format!("read variants file {variants_file_path}"))?;
 
-    // Set a known invalid hash
-    let temp_with_bad_hash = update_variant_attr(
-        temp_content,
-        variant_name,
-        "src-hash",
-        "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        None,
-    )?;
+    // Set a known invalid hash — try multiple attribute names
+    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let hash_attrs = ["src-hash", "hash", "sha256"];
+    let mut temp_with_bad_hash = None;
+    for attr_name in &hash_attrs {
+        if let Ok(content) =
+            update_variant_attr(temp_content, variant_name, attr_name, invalid_hash, None)
+        {
+            temp_with_bad_hash = Some(content);
+            break;
+        }
+    }
+    let temp_with_bad_hash = temp_with_bad_hash.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not find hash attribute in variant '{}' (tried: {:?})",
+            variant_name,
+            hash_attrs
+        )
+    })?;
 
     tokio::fs::write(&variants_file_path, &temp_with_bad_hash)
         .await
