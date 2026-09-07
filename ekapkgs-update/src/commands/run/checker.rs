@@ -173,8 +173,22 @@ async fn check_for_update(
         return Ok(());
     }
 
-    // Determine upstream source
-    let upstream_source = if let Some(ref src_url) = metadata.src_url {
+    // Determine upstream source (explicit github-repo > src.url > pname)
+    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
+        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            UpstreamSource::GitHub {
+                owner: parts[0].to_owned(),
+                repo: parts[1].to_owned(),
+            }
+        } else {
+            debug!(
+                "{}: Invalid github-repo format '{}': expected 'owner/repo'",
+                attr_path, gh_repo
+            );
+            return Ok(());
+        }
+    } else if let Some(ref src_url) = metadata.src_url {
         match UpstreamSource::from_url(src_url) {
             Some(source) => source,
             None => {

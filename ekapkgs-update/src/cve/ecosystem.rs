@@ -107,6 +107,7 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
+            github_repo: None,
         }
     }
 

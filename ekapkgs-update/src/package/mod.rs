@@ -29,6 +29,8 @@ pub struct PackageMetadata {
     pub version_regex: Option<String>,
     /// Platforms with distinct source hashes (from passthru.ekapkgs-update.platform-hashes)
     pub platform_hashes: Option<Vec<String>>,
+    /// Explicit GitHub repo override (from passthru.ekapkgs-update.github-repo, e.g. "owner/repo")
+    pub github_repo: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -170,6 +172,19 @@ impl PackageMetadata {
             }
         });
 
+        // Query passthru.ekapkgs-update.github-repo attribute (e.g. "owner/repo")
+        let github_repo = package
+            .get_attr("passthru.ekapkgs-update.github-repo or null")
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim().trim_matches('"');
+                if trimmed.is_empty() || trimmed == "null" {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -188,6 +203,7 @@ impl PackageMetadata {
             include_prereleases,
             version_regex,
             platform_hashes,
+            github_repo,
         })
     }
 }
@@ -219,6 +235,7 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
+            github_repo: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -241,6 +258,7 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
+            github_repo: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -263,6 +281,7 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
+            github_repo: None,
         };
 
         assert_eq!(metadata_none.skip, None);
@@ -290,6 +309,7 @@ mod tests {
             include_prereleases: Some(true),
             version_regex: Some("v(.*)".to_string()),
             platform_hashes: None,
+            github_repo: None,
         };
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));

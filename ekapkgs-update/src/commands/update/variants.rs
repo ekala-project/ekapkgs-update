@@ -97,14 +97,23 @@ pub async fn update_single_variant(
         variant_name, metadata.version
     );
 
-    // Find the upstream source
-    let src_url = metadata
-        .src_url
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{variant_name}'"))?;
-
-    let upstream_source = UpstreamSource::from_url(src_url)
-        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?;
+    // Find the upstream source (explicit github-repo > src.url > error)
+    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
+        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            UpstreamSource::GitHub {
+                owner: parts[0].to_owned(),
+                repo: parts[1].to_owned(),
+            }
+        } else {
+            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
+        }
+    } else if let Some(ref src_url) = metadata.src_url {
+        UpstreamSource::from_url(src_url)
+            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
+    } else {
+        anyhow::bail!("No src_url or github-repo found for variant '{variant_name}'");
+    };
 
     info!("Upstream source: {:?}", upstream_source);
 
@@ -374,13 +383,24 @@ pub async fn discover_new_variants(
     let variant_attr_path = format!("{attr_path}.variants.{reference_variant}");
     let metadata = PackageMetadata::from_attr_path(file, &variant_attr_path).await?;
 
-    let src_url = metadata
-        .src_url
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No src_url found for variant '{reference_variant}'"))?;
-
-    let upstream_source = UpstreamSource::from_url(src_url)
-        .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?;
+    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
+        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            UpstreamSource::GitHub {
+                owner: parts[0].to_owned(),
+                repo: parts[1].to_owned(),
+            }
+        } else {
+            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
+        }
+    } else {
+        let src_url = metadata.src_url.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No src_url or github-repo found for variant '{reference_variant}'")
+        })?;
+        UpstreamSource::from_url(src_url).ok_or_else(|| {
+            anyhow::anyhow!("Could not parse upstream source from URL: {src_url}")
+        })?
+    };
 
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
 

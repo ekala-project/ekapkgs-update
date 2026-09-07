@@ -203,6 +203,7 @@ pub async fn get_flake_package_metadata(
         include_prereleases: None,
         version_regex: None,
         platform_hashes: None,
+        github_repo: None,
     })
 }
 

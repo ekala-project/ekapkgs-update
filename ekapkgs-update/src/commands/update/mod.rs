@@ -65,7 +65,22 @@ pub async fn update_from_file_path(
     info!("Current version: {}", metadata.version);
 
     // Step 2: Determine upstream source
-    let upstream_source = if let Some(ref src_url) = metadata.src_url {
+    // Priority: explicit github-repo passthru > src.url parsing > pname (PyPI)
+    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
+        // Explicit GitHub repo from passthru.ekapkgs-update.github-repo = "owner/repo"
+        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            UpstreamSource::GitHub {
+                owner: parts[0].to_owned(),
+                repo: parts[1].to_owned(),
+            }
+        } else {
+            anyhow::bail!(
+                "Invalid github-repo format '{}': expected 'owner/repo'",
+                gh_repo
+            );
+        }
+    } else if let Some(ref src_url) = metadata.src_url {
         UpstreamSource::from_url(src_url)
             .context("Source is not from a supported VCS platform (GitHub, GitLab, PyPI)")?
     } else if let Some(ref pname) = metadata.pname {
