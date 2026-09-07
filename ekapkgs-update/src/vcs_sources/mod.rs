@@ -255,6 +255,15 @@ impl UpstreamSource {
     /// # Returns
     /// `Some(UpstreamSource)` if the URL matches a known VCS platform, `None` otherwise
     pub fn from_url(url: &str) -> Option<Self> {
+        // Normalize mirror:// URLs to their real hosts before parsing.
+        // mirror://github/owner/repo/... → https://github.com/owner/repo/...
+        let normalized = if let Some(rest) = url.strip_prefix("mirror://github/") {
+            format!("https://github.com/{rest}")
+        } else {
+            url.to_owned()
+        };
+        let url = &normalized;
+
         if let Some(github_repo) = parse_github_url(url) {
             return Some(UpstreamSource::GitHub {
                 owner: github_repo.owner,
