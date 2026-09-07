@@ -157,6 +157,10 @@ pub enum UpstreamSource {
     },
     SourceHut { owner: String, repo: String },
     PyPI { pname: String },
+    /// Directory listing-based source (GNU FTP, SourceForge, etc.)
+    /// `base_url` is the directory listing URL, `pname` is the project name
+    /// used to extract versions from filenames like `<pname>-<version>.tar.*`
+    DirectoryListing { base_url: String, pname: String },
 }
 
 /// Parse PyPI URL to extract package name
@@ -267,6 +271,24 @@ impl UpstreamSource {
             url.to_owned()
         };
         let url = &normalized;
+
+        // Handle mirror://gnu/<pkg>/... and mirror://sourceforge/<pkg>/...
+        // These map to directory listings where we scrape tarball filenames.
+        if let Some(rest) = url.strip_prefix("mirror://gnu/") {
+            // rest = "autoconf/autoconf-2.73.tar.xz" → pname = "autoconf"
+            let pname = rest.split('/').next()?;
+            return Some(UpstreamSource::DirectoryListing {
+                base_url: format!("https://ftp.gnu.org/gnu/{pname}/"),
+                pname: pname.to_owned(),
+            });
+        }
+        if let Some(rest) = url.strip_prefix("mirror://sourceforge/") {
+            let pname = rest.split('/').next()?;
+            return Some(UpstreamSource::DirectoryListing {
+                base_url: format!("https://sourceforge.net/projects/{pname}/files/"),
+                pname: pname.to_owned(),
+            });
+        }
 
         if let Some(github_repo) = parse_github_url(url) {
             return Some(UpstreamSource::GitHub {
@@ -400,6 +422,9 @@ impl UpstreamSource {
                     })
                     .collect())
             },
+            UpstreamSource::DirectoryListing { base_url, pname } => {
+                fetch_directory_listing_releases(base_url, pname).await
+            },
         }
     }
 
@@ -455,6 +480,9 @@ impl UpstreamSource {
                 format!("SourceHut repo: {owner}/{repo}")
             },
             UpstreamSource::PyPI { pname } => format!("PyPI package: {pname}"),
+            UpstreamSource::DirectoryListing { base_url, pname } => {
+                format!("Directory listing: {pname} ({base_url})")
+            },
         }
     }
 }
@@ -926,6 +954,63 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
             },
         }
     }
+}
+
+/// Fetch release versions from an HTTP directory listing.
+///
+/// Scrapes an HTML directory listing page for tarball filenames matching
+/// `<pname>-<version>.tar.*` and returns them as `Release` objects.
+async fn fetch_directory_listing_releases(
+    base_url: &str,
+    pname: &str,
+) -> anyhow::Result<Vec<Release>> {
+    use regex::Regex;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(base_url)
+        .header("User-Agent", "ekapkgs-update")
+        .send()
+        .await
+        .with_context(|| format!("GET {base_url}"))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Directory listing request failed with status: {}",
+            response.status()
+        );
+    }
+
+    let body = response.text().await?;
+
+    // Match tarball filenames: <pname>-<version>.tar.{gz,xz,bz2,lz,zst}
+    let pattern = format!(
+        r"(?i){}-([0-9][0-9a-zA-Z._-]*)\.tar\.(?:gz|xz|bz2|lz|zst)",
+        regex::escape(pname)
+    );
+    let re = Regex::new(&pattern)?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut releases = Vec::new();
+
+    for caps in re.captures_iter(&body) {
+        let version = caps.get(1).unwrap().as_str().to_owned();
+        if seen.insert(version.clone()) {
+            releases.push(Release {
+                tag_name: version,
+                is_prerelease: false,
+            });
+        }
+    }
+
+    debug!(
+        "Found {} releases for {} from {}",
+        releases.len(),
+        pname,
+        base_url
+    );
+
+    Ok(releases)
 }
 
 #[cfg(test)]
