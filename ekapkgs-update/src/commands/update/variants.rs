@@ -496,7 +496,7 @@ pub async fn add_new_variant(
     attr_path: &str,
     variant_name: &str,
     version: &str,
-    _update_config: super::UpdateConfig,
+    update_config: super::UpdateConfig,
 ) -> anyhow::Result<()> {
     let variants_file_path = find_variants_file(file, attr_path).await?;
     info!(
@@ -643,8 +643,10 @@ pub async fn add_new_variant(
 
     info!("Build successful for new variant '{}'", variant_name);
 
-    // Commit the new variant
-    commit_new_variant(&variants_file_path, attr_path, variant_name, version).await?;
+    // Commit the new variant if --commit is set
+    if update_config.commit {
+        commit_new_variant(&variants_file_path, attr_path, variant_name, version).await?;
+    }
 
     Ok(())
 }
