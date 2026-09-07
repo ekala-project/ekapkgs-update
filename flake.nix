@@ -1,5 +1,5 @@
 {
-  description = "EkaCI flake";
+  description = "Ekapkgs-update flake, a tool for updating and curating packages";
 
   inputs.ekapkgs.url = "github:ekala-project/ekapkgs";
 
