@@ -20,6 +20,8 @@ pub struct GitlabRelease {
 pub struct GitlabProject {
     pub owner: String,
     pub project: String,
+    /// GitLab instance domain (e.g., "gitlab.com", "gitlab.freedesktop.org")
+    pub instance: String,
 }
 
 /// GitLab tag information from the API
@@ -50,18 +52,35 @@ pub struct GitlabTag {
 /// assert_eq!(project.owner, "owner");
 /// assert_eq!(project.project, "project");
 /// ```
+/// Known GitLab instances beyond gitlab.com
+const KNOWN_GITLAB_INSTANCES: &[&str] = &[
+    "gitlab.com",
+    "gitlab.freedesktop.org",
+    "gitlab.gnome.org",
+    "gitlab.alpinelinux.org",
+    "gitlab.archlinux.org",
+    "invent.kde.org",
+    "salsa.debian.org",
+];
+
 pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
-    // Match gitlab.com with support for nested groups (but we'll only take last two parts)
+    // Match any known GitLab instance
     static GITLAB_URL_REGEX: OnceLock<Regex> = OnceLock::new();
     let gitlab_regex = GITLAB_URL_REGEX.get_or_init(|| {
-        Regex::new(r"gitlab\.com[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)")
-            .expect("hard-coded GitLab URL regex must compile")
+        let instances = KNOWN_GITLAB_INSTANCES
+            .iter()
+            .map(|i| regex::escape(i))
+            .collect::<Vec<_>>()
+            .join("|");
+        Regex::new(&format!(r"({})[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)", instances))
+            .expect("GitLab URL regex must compile")
     });
     let caps = gitlab_regex.captures(url)?;
 
     Some(GitlabProject {
-        owner: caps.get(1)?.as_str().to_owned(),
-        project: caps.get(2)?.as_str().to_owned(),
+        instance: caps.get(1)?.as_str().to_owned(),
+        owner: caps.get(2)?.as_str().to_owned(),
+        project: caps.get(3)?.as_str().to_owned(),
     })
 }
 
@@ -78,13 +97,14 @@ pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
 /// # Returns
 /// A vector of tags, or an empty vector if no tags exist
 pub async fn fetch_gitlab_tags(
+    instance: &str,
     owner: &str,
     project: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GitlabTag>> {
     let encoded_path = format!("{owner}%2F{project}");
     let url = format!(
-        "https://gitlab.com/api/v4/projects/{encoded_path}/repository/tags?order_by=updated&sort=desc"
+        "https://{instance}/api/v4/projects/{encoded_path}/repository/tags?order_by=updated&sort=desc"
     );
 
     debug!("Fetching tags from {}", url);
@@ -126,12 +146,13 @@ pub async fn fetch_gitlab_tags(
 /// # Returns
 /// A vector of releases
 pub async fn fetch_gitlab_releases(
+    instance: &str,
     owner: &str,
     project: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GitlabRelease>> {
     let encoded_path = format!("{owner}%2F{project}");
-    let url = format!("https://gitlab.com/api/v4/projects/{encoded_path}/releases");
+    let url = format!("https://{instance}/api/v4/projects/{encoded_path}/releases");
 
     debug!("Fetching all releases from {}", url);
 

@@ -150,7 +150,11 @@ impl fmt::Display for SemverStrategy {
 #[derive(Debug)]
 pub enum UpstreamSource {
     GitHub { owner: String, repo: String },
-    GitLab { owner: String, project: String },
+    GitLab {
+        instance: String,
+        owner: String,
+        project: String,
+    },
     SourceHut { owner: String, repo: String },
     PyPI { pname: String },
 }
@@ -272,6 +276,7 @@ impl UpstreamSource {
         }
         if let Some(gitlab_project) = parse_gitlab_url(url) {
             return Some(UpstreamSource::GitLab {
+                instance: gitlab_project.instance,
                 owner: gitlab_project.owner,
                 project: gitlab_project.project,
             });
@@ -327,7 +332,11 @@ impl UpstreamSource {
                         .collect()),
                 }
             },
-            UpstreamSource::GitLab { owner, project } => {
+            UpstreamSource::GitLab {
+                instance,
+                owner,
+                project,
+            } => {
                 let token = env::var("GITLAB_TOKEN").ok();
 
                 if token.is_none() {
@@ -337,7 +346,8 @@ impl UpstreamSource {
                     );
                 }
 
-                let all_releases = fetch_gitlab_releases(owner, project, token.as_deref()).await;
+                let all_releases =
+                    fetch_gitlab_releases(instance, owner, project, token.as_deref()).await;
                 if let Err(e) = &all_releases {
                     debug!("GitLab releases endpoint failed, falling back to tags: {e}");
                 }
@@ -350,7 +360,7 @@ impl UpstreamSource {
                             is_prerelease: r.upcoming_release,
                         })
                         .collect()),
-                    Err(_) => Ok(fetch_gitlab_tags(owner, project, token.as_deref())
+                    Err(_) => Ok(fetch_gitlab_tags(instance, owner, project, token.as_deref())
                         .await?
                         .into_iter()
                         .map(|t| Release {
@@ -434,8 +444,12 @@ impl UpstreamSource {
     pub fn description(&self) -> String {
         match self {
             UpstreamSource::GitHub { owner, repo } => format!("GitHub repo: {owner}/{repo}"),
-            UpstreamSource::GitLab { owner, project } => {
-                format!("GitLab project: {owner}/{project}")
+            UpstreamSource::GitLab {
+                instance,
+                owner,
+                project,
+            } => {
+                format!("GitLab project: {instance}/{owner}/{project}")
             },
             UpstreamSource::SourceHut { owner, repo } => {
                 format!("SourceHut repo: {owner}/{repo}")

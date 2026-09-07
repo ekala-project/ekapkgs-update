@@ -17,8 +17,8 @@ fn test_from_url_gitlab() {
     let source = UpstreamSource::from_url(url);
     assert!(matches!(
         source,
-        Some(UpstreamSource::GitLab { ref owner, ref project })
-            if owner == "owner" && project == "project"
+        Some(UpstreamSource::GitLab { ref instance, ref owner, ref project })
+            if instance == "gitlab.com" && owner == "owner" && project == "project"
     ));
 }
 
@@ -91,10 +91,14 @@ fn test_description_github() {
 #[test]
 fn test_description_gitlab() {
     let source = UpstreamSource::GitLab {
+        instance: "gitlab.com".to_owned(),
         owner: "owner".to_owned(),
         project: "project".to_owned(),
     };
-    assert_eq!(source.description(), "GitLab project: owner/project");
+    assert_eq!(
+        source.description(),
+        "GitLab project: gitlab.com/owner/project"
+    );
 }
 
 #[test]
