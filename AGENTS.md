@@ -90,7 +90,7 @@ ekapkgs-update/                     # Main CLI crate
     llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
-    github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients
+    github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
     nix/                            # Nix eval helpers, nix-eval-jobs, eval cache
@@ -193,8 +193,17 @@ Some packages use a `mkManyVariants` pattern with multiple version variants (e.g
 - `SemverStrategy` inferred from variant name (`v1_2` → Patch, `v1` → Minor)
 - 3+ component variants considered pinned (`v1_2_3` → no auto-update)
 - Searches sibling files when version isn't found in the primary file
-- **New variant discovery** (`--all-variants`): After updating existing variants, fetches all upstream releases, groups by version series, and adds new variant entries to `variants.nix` for series newer than the highest existing variant. Handles both single-hash and platform-hash packages.
+- **New variant discovery** (`--all-variants`): After updating existing variants, fetches all upstream releases, groups by version series, and adds new variant entries to `variants.nix` for series newer than the highest existing variant. Handles both single-hash and platform-hash packages. Each new variant is auto-committed individually when `--commit` is passed.
 - **`run` command default**: mkManyVariants packages default to `SemverStrategy::Minor` in the batch checker, constraining updates to the same major version series.
+- **Hash attribute flexibility**: Variant hash discovery tries `src-hash`, `hash`, and `sha256` attribute names, supporting different naming conventions across packages.
+
+### Platform-Specific Hashes
+
+Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system strings like `["x86_64-linux" "aarch64-linux"]`) get per-platform hash discovery. After the version is bumped, the tool evaluates `src.url` with `--system <platform>` to get each platform's download URL, then prefetches it with `nix store prefetch-file --json` to compute the SRI hash. This avoids needing to build for foreign platforms.
+
+### Explicit Upstream Source
+
+When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can set `passthru.ekapkgs-update.github-repo = "owner/repo"` to explicitly specify the GitHub repository for release discovery. This takes priority over URL-based detection.
 
 ### Database Backoff (`database/mod.rs`)
 
@@ -281,7 +290,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | Type | Location | Purpose |
 |------|----------|---------|
 | `PackageMetadata` | `package/mod.rs` | Metadata from Nix eval (version, hashes, passthru attrs) |
-| `UpstreamSource` | `vcs_sources/mod.rs` | Enum: GitHub, GitLab, SourceHut, PyPI |
+| `UpstreamSource` | `vcs_sources/mod.rs` | Enum: GitHub, GitLab (multi-instance), SourceHut, PyPI, DirectoryListing |
 | `SemverStrategy` | `vcs_sources/mod.rs` | Enum: Latest, Major, Minor, Patch |
 | `Release` | `vcs_sources/mod.rs` | Upstream release with version extraction and matching |
 | `UpdatePhase` | `commands/update/types.rs` | 9 phases from MetadataExtraction through PrCreation |
@@ -309,7 +318,8 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 Runtime tools (provided by Nix dev shell):
 
 - `nix-instantiate` — Nix expression evaluation
-- `nix-build` — Package building
+- `nix-build` — Package building (supports `--system` for cross-platform eval)
+- `nix store prefetch-file` — URL hash prefetching for platform-hashes
 - `nix-eval-jobs` — Parallel package evaluation (streaming JSON)
 - `git` — Worktree management, commits, branches
 - `nixfmt` — Optional Nix file formatting
@@ -320,9 +330,10 @@ Runtime tools (provided by Nix dev shell):
 API integrations (via reqwest):
 
 - **GitHub REST API** — Release fetching and PR creation (uses `GITHUB_TOKEN`)
-- **GitLab API** — Release/tag fetching
+- **GitLab API** — Release/tag fetching (supports gitlab.com, freedesktop.org, GNOME, KDE, Alpine, Arch, Debian instances)
 - **SourceHut API** — Tag fetching
 - **PyPI JSON API** — Python package releases
+- **HTTP directory listings** — Version scraping from GNU FTP / SourceForge directory pages
 - **OSV.dev** — CVE vulnerability checking (24h cache)
 - **Repology** — Cross-distribution version validation (72h cache, 1 req/sec rate limit)
 
