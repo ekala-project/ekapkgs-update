@@ -181,7 +181,7 @@ Uses **regex with rnix AST validation**, not pure AST transformation:
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
-Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`.
+Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`.
 
 Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is returned for a version attribute, `file_update.rs` falls back to searching sibling files (mkManyVariants pattern).
 
@@ -193,6 +193,8 @@ Some packages use a `mkManyVariants` pattern with multiple version variants (e.g
 - `SemverStrategy` inferred from variant name (`v1_2` → Patch, `v1` → Minor)
 - 3+ component variants considered pinned (`v1_2_3` → no auto-update)
 - Searches sibling files when version isn't found in the primary file
+- **New variant discovery** (`--all-variants`): After updating existing variants, fetches all upstream releases, groups by version series, and adds new variant entries to `variants.nix` for series newer than the highest existing variant. Handles both single-hash and platform-hash packages.
+- **`run` command default**: mkManyVariants packages default to `SemverStrategy::Minor` in the batch checker, constraining updates to the same major version series.
 
 ### Database Backoff (`database/mod.rs`)
 
