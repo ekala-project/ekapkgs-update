@@ -40,6 +40,7 @@
 - Platform-hash aware — handles both single-hash and multi-platform-hash variants
 - 3+ component variants treated as pinned (no auto-update)
 - Default Minor strategy in batch mode keeps variants within their major series
+- Tries `src-hash`, `hash`, and `sha256` attribute names for hash discovery/update
 
 ### Package Audit (`audit`)
 
@@ -75,9 +76,20 @@
 
 ### Upstream Sources
 
-- GitHub, GitLab, SourceHut, PyPI
+- GitHub, GitLab (multi-instance), SourceHut, PyPI, HTTP directory listings
+- `mirror://github/` URLs automatically normalized to GitHub API
+- `mirror://gnu/` and `mirror://sourceforge/` URLs scraped via directory listing
+- Custom GitLab instances: freedesktop.org, GNOME, KDE, Alpine, Arch, Debian
+- Explicit override via `passthru.ekapkgs-update.github-repo = "owner/repo"` for packages with non-parseable URLs
 - Release and tag fetching with authentication token support
 - Prerelease filtering (API flags + version string heuristics)
+
+### Platform-Specific Hash Discovery
+
+- `passthru.ekapkgs-update.platform-hashes` lists systems with distinct source archives
+- After version bump, evaluates `src.url` with `--system` per platform
+- Prefetches each URL via `nix store prefetch-file --json` to compute SRI hash
+- Gracefully skips platforms that can't be evaluated (e.g., darwin on linux-only repos)
 
 ### Web Dashboard (`ekapkgs-update-web`)
 
