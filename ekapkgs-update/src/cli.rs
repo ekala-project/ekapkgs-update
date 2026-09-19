@@ -431,6 +431,62 @@ pub enum Commands {
         #[arg(long)]
         max_jobs: Option<usize>,
     },
+    /// Watch upstream sources for new releases and update packages reactively.
+    ///
+    /// Builds a reverse index mapping upstream sources to attr_paths, then
+    /// polls RSS/Atom feeds and APIs at a configurable interval.  When a new
+    /// release is detected, it runs the same update pipeline as the `run`
+    /// command but only for affected packages.
+    Watch {
+        /// Nix file to evaluate
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Poll interval in minutes (how often to check feeds)
+        #[arg(long, default_value = "10")]
+        poll_interval: u64,
+        /// Index refresh interval in hours (how often to rebuild the full index)
+        #[arg(long, default_value = "24")]
+        index_refresh_hours: u64,
+        /// Upstream git remote. Inferred if left unset.
+        #[arg(long)]
+        upstream: Option<String>,
+        /// Remote repository to push branches
+        #[arg(long, default_value = "origin")]
+        fork: String,
+        /// Run passthru.tests if available
+        #[arg(long)]
+        run_passthru_tests: bool,
+        /// Check for updates without performing them
+        #[arg(long)]
+        dry_run: bool,
+        /// Maximum number of concurrent package updates
+        #[arg(long)]
+        concurrent_updates: Option<usize>,
+        /// Strategy for committing updates
+        #[arg(long, default_value = "worktrees")]
+        commit_strategy: CommitStrategy,
+        /// Preserve failed worktrees and artifacts for later inspection
+        #[arg(long)]
+        preserve_failures: bool,
+        /// Nix builders (passed as --builders to nix-build)
+        #[arg(long)]
+        builders: Option<String>,
+        /// Max local nix build jobs (passed as --max-jobs to nix-build)
+        #[arg(long)]
+        max_jobs: Option<usize>,
+        /// On build/test failure, invoke Claude Code CLI to attempt a fix
+        #[arg(long)]
+        claude_fix: bool,
+        /// Maximum Claude Code agent turns per fix attempt
+        #[arg(long, default_value = "10")]
+        claude_fix_max_turns: u32,
+        /// Timeout in seconds for each Claude Code fix attempt
+        #[arg(long, default_value = "300")]
+        claude_fix_timeout: u64,
+    },
 }
 
 /// Autofix subcommands
@@ -872,6 +928,55 @@ impl Commands {
                     skip_binary_checks,
                     no_security,
                 )
+                .await
+            },
+            Commands::Watch {
+                file,
+                database,
+                poll_interval,
+                index_refresh_hours,
+                upstream,
+                fork,
+                run_passthru_tests,
+                dry_run,
+                concurrent_updates,
+                commit_strategy,
+                preserve_failures,
+                builders,
+                max_jobs,
+                claude_fix,
+                claude_fix_max_turns,
+                claude_fix_timeout,
+            } => {
+                let mut extra_args = Vec::new();
+                if let Some(ref builders_val) = builders {
+                    extra_args.push("--builders".to_owned());
+                    extra_args.push(builders_val.clone());
+                }
+                if let Some(max_jobs_val) = max_jobs {
+                    extra_args.push("--max-jobs".to_owned());
+                    extra_args.push(max_jobs_val.to_string());
+                }
+                if !extra_args.is_empty() {
+                    commands::update::set_extra_nix_build_args(extra_args);
+                }
+                commands::watch::WatchConfig::from_args(
+                    file,
+                    database,
+                    poll_interval,
+                    index_refresh_hours,
+                    upstream,
+                    fork,
+                    run_passthru_tests,
+                    dry_run,
+                    concurrent_updates,
+                    commit_strategy,
+                    preserve_failures,
+                    claude_fix,
+                    claude_fix_max_turns,
+                    claude_fix_timeout,
+                )
+                .execute()
                 .await
             },
         }

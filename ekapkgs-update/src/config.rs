@@ -64,6 +64,9 @@ pub struct ConfigFile {
 
     /// Nix build settings.
     pub nix: NixConfig,
+
+    /// Watch (passive/event-driven) mode settings.
+    pub watch: WatchFileConfig,
 }
 
 /// LLM server configuration.
@@ -113,6 +116,17 @@ pub struct NixConfig {
     /// Maximum number of local build jobs.
     /// Passed as `--max-jobs` to `nix-build`.
     pub max_jobs: Option<usize>,
+}
+
+/// Watch (passive/event-driven) mode settings.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WatchFileConfig {
+    /// Feed poll interval in minutes (default: 10).
+    pub poll_interval_minutes: Option<u64>,
+
+    /// Full index refresh interval in hours (default: 24).
+    pub index_refresh_hours: Option<u64>,
 }
 
 impl ConfigFile {
