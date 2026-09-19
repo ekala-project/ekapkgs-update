@@ -29,6 +29,42 @@ let
 
   configFile = settingsFormat.generate "ekapkgs-update.toml" effectiveSettings;
 
+  # Watch mode effective settings: merge defaults with user-supplied watch settings.
+  watchEffectiveSettings = lib.recursiveUpdate {
+    database = "/var/lib/${cfg.stateDirectory}/updates.db";
+    file = cfg.packagesFile;
+  } cfg.settings;
+
+  watchConfigFile = settingsFormat.generate "ekapkgs-update-watch.toml" watchEffectiveSettings;
+
+  watchStartScript = pkgs.writeShellScript "ekapkgs-update-watch-start" ''
+    set -eu
+
+    runtime_env="$RUNTIME_DIRECTORY/env"
+    : > "$runtime_env"
+    chmod 600 "$runtime_env"
+
+    ${lib.optionalString useCredential ''
+      if [ -r "$CREDENTIALS_DIRECTORY/cachix-token" ]; then
+        token="$(cat "$CREDENTIALS_DIRECTORY/cachix-token")"
+        printf 'CACHIX_AUTH_TOKEN=%s\n' "$token" >> "$runtime_env"
+      fi
+    ''}
+
+    set -a
+    # shellcheck disable=SC1090
+    . "$runtime_env"
+    set +a
+
+    exec ${cfg.package}/bin/ekapkgs-update watch \
+      --config-file ${watchConfigFile} \
+      --poll-interval ${toString cfg.watch.pollIntervalMinutes} \
+      --index-refresh-hours ${toString cfg.watch.indexRefreshHours} \
+      ${lib.optionalString (cfg.watch.commitStrategy != null)
+        "--commit-strategy ${cfg.watch.commitStrategy}"} \
+      ${lib.escapeShellArgs cfg.watch.extraArgs}
+  '';
+
   # Helper script: inject credentials into env, then exec the daemon.
   startScript = pkgs.writeShellScript "ekapkgs-update-start" ''
     set -eu
@@ -360,6 +396,51 @@ in
         '';
       };
     };
+
+    watch = {
+      enable = lib.mkEnableOption "the ekapkgs-update watch (passive/event-driven) daemon";
+
+      pollIntervalMinutes = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 10;
+        example = 5;
+        description = ''
+          How often (in minutes) to poll upstream RSS/Atom feeds and APIs for
+          new releases.
+        '';
+      };
+
+      indexRefreshHours = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 24;
+        example = 12;
+        description = ''
+          How often (in hours) to rebuild the full upstream index via
+          `nix-eval-jobs`. The index maps upstream sources to Nix attr_paths.
+        '';
+      };
+
+      commitStrategy = lib.mkOption {
+        type = lib.types.nullOr (lib.types.enum [ "worktrees" "branch" ]);
+        default = null;
+        example = "worktrees";
+        description = ''
+          Strategy for committing updates. `worktrees` (default) uses isolated
+          git worktrees and optionally creates PRs; `branch` commits directly
+          to the current branch.
+        '';
+      };
+
+      extraArgs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "--dry-run" "--preserve-failures" ];
+        description = ''
+          Additional command-line arguments passed to the
+          `ekapkgs-update watch` invocation.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -488,6 +569,54 @@ in
 
         # Only needs read access to database directory
         ReadOnlyPaths = [ "/var/lib/${cfg.stateDirectory}" ];
+      };
+    };
+
+    # Watch (passive/event-driven) service
+    systemd.services.ekapkgs-update-watch = lib.mkIf cfg.watch.enable {
+      description = "ekapkgs-update watch daemon (RSS/event-driven updates)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+
+      path = [ cfg.package ];
+
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${watchStartScript}";
+        Restart = "always";
+        RestartSec = "60s";
+
+        User = cfg.user;
+        Group = cfg.group;
+
+        StateDirectory = cfg.stateDirectory;
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "ekapkgs-update-watch";
+        RuntimeDirectoryMode = "0700";
+        WorkingDirectory = "/var/lib/${cfg.stateDirectory}";
+
+        EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
+
+        LoadCredential = lib.optional useCredential "cachix-token:${toString cfg.cachix.authTokenFile}";
+
+        # Same hardening as the main daemon — needs Nix daemon access
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+
+        ReadWritePaths = [
+          "/nix/var/nix/daemon-socket"
+          "/nix/var/nix/profiles/per-user"
+          "/nix/var/nix/gcroots/per-user"
+        ];
       };
     };
 
