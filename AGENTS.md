@@ -41,7 +41,7 @@ ekapkgs-update/                     # Main CLI crate
     cli.rs                          # Clap definitions, Commands enum, thin dispatch
     init.rs                         # Process bootstrap (increase_fd_limit)
     paths.rs                        # Centralized XDG cache/data paths
-    config.rs                       # Placeholder
+    config.rs                       # TOML config file (LLM, autofix, nix, watch settings)
     database/                       # SQLite via sqlx: updates, logs, sessions, caches
     commands/
       run/                          # Batch mode: checker + updater services
@@ -81,6 +81,11 @@ ekapkgs-update/                     # Main CLI crate
         validator.rs                #   Apply changes + nix-build validation
         processor.rs                #   Serial queue processing loop
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
+      watch/                          # RSS/event-driven passive update mode
+        mod.rs                      #   WatchConfig
+        index.rs                    #   Upstream index builder (nix-eval-jobs → upstream_index table)
+        feeds.rs                    #   Feed polling (RSS/Atom/API), UpstreamSource reconstruction
+        listener.rs                 #   Main event loop: poll feeds, dispatch UpdateRequests
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
@@ -157,6 +162,36 @@ The 9-phase workflow for each package:
 6. **Build** — Build with patch recovery (detect and remove obsolete patches)
 7. **Testing** — Run passthru.tests (if configured)
 8. **PrCreation** — Commit + push + create PR via GitHub REST API
+
+## Architecture: The `watch` Command (Passive Mode)
+
+The `watch` command is an event-driven alternative to `run`. Instead of evaluating all packages on every cycle, it builds a reverse index and polls upstream feeds:
+
+```
+nix-eval-jobs (one-time index build)
+        │
+        ▼
+  upstream_index table ←──── periodic re-index (default: 24h)
+  (upstream_type, upstream_key → attr_path)
+        │
+        ▼
+  Feed Poller ────────────── RSS/Atom (GitHub, PyPI) + API (GitLab, SourceHut)
+  (Semaphore-limited)
+        │ new version detected
+        ▼
+  mpsc::unbounded_channel
+        │
+        ▼
+  UpdaterServiceConfig::run_service  (reused unchanged from `run`)
+```
+
+**Index builder** (`commands/watch/index.rs`): Scans all packages via `nix-eval-jobs`, extracts `PackageMetadata`, determines `UpstreamSource`, stores mapping in the `upstream_index` database table.
+
+**Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub and PyPI (cheaper than API), falls back to existing `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing.
+
+**Event loop** (`commands/watch/listener.rs`): Polls all indexed sources at configurable intervals, compares against known versions, dispatches `UpdateRequest`s to the updater. Respects database backoff, deduplicates by (upstream_key, version).
+
+**NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database, `Restart=always`.
 
 ## Key Patterns
 
@@ -312,6 +347,8 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `AuditReport` | `commands/audit/types.rs` | Complete audit result (findings, timing, store paths) |
 | `AuditFinding` | `commands/audit/types.rs` | Single finding (severity, category, check name, file path) |
 | `AuditConfig` | `commands/audit/types.rs` | Controls which checks to run and minimum severity |
+| `WatchConfig` | `commands/watch/mod.rs` | Watch (passive/RSS-driven) mode configuration |
+| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (source → attr_path mapping) |
 
 ## External Dependencies
 
