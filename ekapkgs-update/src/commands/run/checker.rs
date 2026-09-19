@@ -414,7 +414,7 @@ async fn check_for_update(
 
     let update_req = UpdateRequest {
         attr_path: attr_path.to_owned(),
-        drv: drv.clone(),
+        drv_path: Some(drv.drv_path.clone()),
         current_version: current_version.clone(),
         new_version: latest_version.clone(),
     };
