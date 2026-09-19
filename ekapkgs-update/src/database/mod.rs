@@ -690,4 +690,138 @@ impl Database {
 
         Ok(count)
     }
+
+    // ── Upstream index (watch command) ──────────────────────────────
+
+    /// Insert or update an upstream index entry mapping an attr_path to its
+    /// upstream source.
+    pub async fn upsert_upstream_index(
+        &self,
+        attr_path: &str,
+        upstream_type: &str,
+        upstream_key: &str,
+        instance: Option<&str>,
+        current_version: &str,
+        src_url: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_index
+                (attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attr_path, upstream_type, upstream_key)
+            DO UPDATE SET
+                instance = excluded.instance,
+                current_version = excluded.current_version,
+                src_url = excluded.src_url,
+                indexed_at = excluded.indexed_at
+            "#,
+        )
+        .bind(attr_path)
+        .bind(upstream_type)
+        .bind(upstream_key)
+        .bind(instance)
+        .bind(current_version)
+        .bind(src_url)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .context("upsert upstream_index")?;
+
+        Ok(())
+    }
+
+    /// Look up all attr_paths that track a given upstream source.
+    pub async fn get_attr_paths_for_source(
+        &self,
+        upstream_type: &str,
+        upstream_key: &str,
+        instance: Option<&str>,
+    ) -> Result<Vec<UpstreamIndexEntry>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at
+            FROM upstream_index
+            WHERE upstream_type = ? AND upstream_key = ?
+              AND (instance IS ? OR (instance IS NOT NULL AND instance = ?))
+            "#,
+        )
+        .bind(upstream_type)
+        .bind(upstream_key)
+        .bind(instance)
+        .bind(instance)
+        .fetch_all(&self.pool)
+        .await
+        .context("get attr_paths for source")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| UpstreamIndexEntry {
+                attr_path: row.get("attr_path"),
+                upstream_type: row.get("upstream_type"),
+                upstream_key: row.get("upstream_key"),
+                instance: row.get("instance"),
+                current_version: row.get("current_version"),
+                src_url: row.get("src_url"),
+            })
+            .collect())
+    }
+
+    /// Get all unique upstream sources from the index, for feed subscription.
+    pub async fn get_all_upstream_sources(&self) -> Result<Vec<UpstreamIndexEntry>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT upstream_type, upstream_key, instance,
+                   MIN(attr_path) AS attr_path, MIN(current_version) AS current_version,
+                   MIN(src_url) AS src_url
+            FROM upstream_index
+            GROUP BY upstream_type, upstream_key, instance
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("get all upstream sources")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| UpstreamIndexEntry {
+                attr_path: row.get("attr_path"),
+                upstream_type: row.get("upstream_type"),
+                upstream_key: row.get("upstream_key"),
+                instance: row.get("instance"),
+                current_version: row.get("current_version"),
+                src_url: row.get("src_url"),
+            })
+            .collect())
+    }
+
+    /// Remove all entries from the upstream index before a full re-index.
+    pub async fn clear_upstream_index(&self) -> Result<()> {
+        sqlx::query("DELETE FROM upstream_index")
+            .execute(&self.pool)
+            .await
+            .context("clear upstream_index")?;
+        Ok(())
+    }
+
+    /// Count entries in the upstream index.
+    pub async fn upstream_index_count(&self) -> Result<i64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_index")
+            .fetch_one(&self.pool)
+            .await
+            .context("count upstream_index")?;
+        Ok(count)
+    }
+}
+
+/// A row from the `upstream_index` table.
+#[derive(Debug, Clone)]
+pub struct UpstreamIndexEntry {
+    pub attr_path: String,
+    pub upstream_type: String,
+    pub upstream_key: String,
+    pub instance: Option<String>,
+    pub current_version: Option<String>,
+    pub src_url: Option<String>,
 }
