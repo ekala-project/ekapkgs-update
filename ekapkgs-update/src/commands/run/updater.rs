@@ -472,7 +472,7 @@ pub(super) async fn perform_update(
 
             if let Err(db_err) = db
                 .record_failed_update(
-                    &req.drv.drv_path,
+                    req.drv_path.as_deref().unwrap_or("unknown"),
                     attr_path,
                     &error_message,
                     Some(current_version),
@@ -609,7 +609,7 @@ pub(super) async fn perform_direct_update(
                     format!("passthru.tests failed after update to {new_version}:\n{stderr}");
                 if let Err(db_err) = db
                     .record_failed_update(
-                        &req.drv.drv_path,
+                        req.drv_path.as_deref().unwrap_or("unknown"),
                         attr_path,
                         &error_message,
                         Some(current_version),
@@ -848,7 +848,7 @@ pub(super) async fn perform_direct_update(
             // Record failure in database
             if let Err(db_err) = db
                 .record_failed_update(
-                    &req.drv.drv_path,
+                    req.drv_path.as_deref().unwrap_or("unknown"),
                     attr_path,
                     &error_message,
                     Some(current_version),
