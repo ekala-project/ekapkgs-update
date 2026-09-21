@@ -68,8 +68,14 @@ async fn poll_feed(url: &str) -> anyhow::Result<Vec<Release>> {
         .await
         .with_context(|| format!("read feed body from {url}"))?;
 
-    let feed =
-        feed_rs::parser::parse(&body[..]).with_context(|| format!("parse feed from {url}"))?;
+    parse_feed_bytes(&body)
+}
+
+/// Parse raw RSS/Atom feed bytes into releases.
+///
+/// Separated from [`poll_feed`] so feed parsing can be tested with fixture data.
+pub fn parse_feed_bytes(data: &[u8]) -> anyhow::Result<Vec<Release>> {
+    let feed = feed_rs::parser::parse(data).context("parse feed")?;
 
     let releases: Vec<Release> = feed
         .entries
@@ -99,8 +105,6 @@ async fn poll_feed(url: &str) -> anyhow::Result<Vec<Release>> {
             })
         })
         .collect();
-
-    debug!("Parsed {} releases from feed {}", releases.len(), url);
 
     Ok(releases)
 }
