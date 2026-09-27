@@ -72,8 +72,11 @@ pub fn parse_gitlab_url(url: &str) -> Option<GitlabProject> {
             .map(|i| regex::escape(i))
             .collect::<Vec<_>>()
             .join("|");
-        Regex::new(&format!(r"({})[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)", instances))
-            .expect("GitLab URL regex must compile")
+        Regex::new(&format!(
+            r"({})[:/]([^/]+)/([^/]+?)(?:\.git|/-|/|$)",
+            instances
+        ))
+        .expect("GitLab URL regex must compile")
     });
     let caps = gitlab_regex.captures(url)?;
 
