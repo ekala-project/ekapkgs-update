@@ -397,9 +397,8 @@ pub async fn discover_new_variants(
         let src_url = metadata.src_url.as_ref().ok_or_else(|| {
             anyhow::anyhow!("No src_url or github-repo found for variant '{reference_variant}'")
         })?;
-        UpstreamSource::from_url(src_url).ok_or_else(|| {
-            anyhow::anyhow!("Could not parse upstream source from URL: {src_url}")
-        })?
+        UpstreamSource::from_url(src_url)
+            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
     };
 
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
