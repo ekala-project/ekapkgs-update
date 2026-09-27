@@ -61,12 +61,10 @@
         "vim-plugins": "vim-plugins"
       },
       "locked": {
-        "lastModified": 1788808261,
-        "narHash": "sha256-nHemcTFWVMugN8W+YyGiA34pAM6dPztHZgn7by0WiNc=",
-        "owner": "ekala-project",
-        "repo": "ekapkgs",
-        "rev": "6ef2e2f2ce426908122a12fe34b614fa402d073a",
-        "type": "github"
+        "lastModified": 1788877779,
+        "narHash": "sha256-Gl+LRguPZwj6+7++Kv2//tF7zlZhm2NnxDBY3PPjcQo=",
+        "path": "/home/jon/projects/ekapkgs",
+        "type": "path"
       },
       "original": {
         "owner": "ekala-project",
