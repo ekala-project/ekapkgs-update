@@ -59,12 +59,26 @@ async fn upstream_index_multiple_attr_paths_same_source() {
 
     // Two packages from the same upstream (e.g., python312Packages.foo and
     // python313Packages.foo sharing the same source)
-    db.upsert_upstream_index("python312Packages.requests", "pypi", "requests", None, "2.31.0", None)
-        .await
-        .unwrap();
-    db.upsert_upstream_index("python313Packages.requests", "pypi", "requests", None, "2.31.0", None)
-        .await
-        .unwrap();
+    db.upsert_upstream_index(
+        "python312Packages.requests",
+        "pypi",
+        "requests",
+        None,
+        "2.31.0",
+        None,
+    )
+    .await
+    .unwrap();
+    db.upsert_upstream_index(
+        "python313Packages.requests",
+        "pypi",
+        "requests",
+        None,
+        "2.31.0",
+        None,
+    )
+    .await
+    .unwrap();
 
     let entries = db
         .get_attr_paths_for_source("pypi", "requests", None)
@@ -134,15 +148,36 @@ async fn upstream_index_get_all_unique_sources() {
     let db = setup_db().await;
 
     // Multiple packages, some sharing upstream
-    db.upsert_upstream_index("ripgrep", "github", "BurntSushi/ripgrep", None, "14.1.0", None)
-        .await
-        .unwrap();
-    db.upsert_upstream_index("python3Packages.requests", "pypi", "requests", None, "2.31.0", None)
-        .await
-        .unwrap();
-    db.upsert_upstream_index("python3Packages.flask", "pypi", "flask", None, "3.0.0", None)
-        .await
-        .unwrap();
+    db.upsert_upstream_index(
+        "ripgrep",
+        "github",
+        "BurntSushi/ripgrep",
+        None,
+        "14.1.0",
+        None,
+    )
+    .await
+    .unwrap();
+    db.upsert_upstream_index(
+        "python3Packages.requests",
+        "pypi",
+        "requests",
+        None,
+        "2.31.0",
+        None,
+    )
+    .await
+    .unwrap();
+    db.upsert_upstream_index(
+        "python3Packages.flask",
+        "pypi",
+        "flask",
+        None,
+        "3.0.0",
+        None,
+    )
+    .await
+    .unwrap();
     // Alias for the same upstream
     db.upsert_upstream_index("rg", "github", "BurntSushi/ripgrep", None, "14.1.0", None)
         .await
