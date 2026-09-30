@@ -215,6 +215,11 @@ pub async fn build_with_patch_recovery(
                         .with_context(|| format!("write nix file {}", file_location.display()))?;
                     info!("Removed obsolete patch: {}", patch_name);
                     removed_patches.push(patch_name.clone());
+
+                    // Delete the patch file from the tree if it's a local file
+                    // with no other references
+                    delete_unreferenced_patch_file(file_location, &patch_name).await;
+
                     // Continue loop to retry the build
                 },
                 Err(e) => {
@@ -239,6 +244,63 @@ pub async fn build_with_patch_recovery(
     }
 
     Ok(removed_patches)
+}
+
+/// Delete a patch file from the tree if it exists as a local file and has no
+/// other references in the repository.
+///
+/// This is best-effort: failures are logged but do not block the update.
+async fn delete_unreferenced_patch_file(nix_file: &Path, patch_name: &str) {
+    let Some(pkg_dir) = nix_file.parent() else {
+        return;
+    };
+    let patch_path = pkg_dir.join(patch_name);
+
+    // Only act on local patch files that actually exist on disk
+    if !patch_path.is_file() {
+        return;
+    }
+
+    // Check whether any .nix file in the repo still references this patch name.
+    // We restrict to *.nix so the patch file's own contents are never a false
+    // positive. `git grep` searches the working tree, which already has the
+    // updated .nix file (patch reference removed).
+    let has_other_refs = match tokio::process::Command::new("git")
+        .args([
+            "grep",
+            "-l",
+            "--fixed-strings",
+            patch_name,
+            "--",
+            "*.nix",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        Err(e) => {
+            debug!("git grep failed for patch {}: {}", patch_name, e);
+            // If we can't determine references, err on the safe side
+            return;
+        },
+    };
+
+    if has_other_refs {
+        debug!(
+            "Patch file {} is still referenced elsewhere, keeping it",
+            patch_path.display()
+        );
+        return;
+    }
+
+    match tokio::fs::remove_file(&patch_path).await {
+        Ok(()) => info!("Deleted unreferenced patch file: {}", patch_path.display()),
+        Err(e) => warn!(
+            "Could not delete patch file {}: {}",
+            patch_path.display(),
+            e
+        ),
+    }
 }
 
 /// Result of running passthru.tests
