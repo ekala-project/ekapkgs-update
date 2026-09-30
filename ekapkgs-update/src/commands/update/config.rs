@@ -132,7 +132,6 @@ impl VersionConfig {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_explicit_version(mut self, version: Option<String>) -> Self {
         self.explicit_version = version;
         self

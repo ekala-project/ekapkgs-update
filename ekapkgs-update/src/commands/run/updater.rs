@@ -105,8 +105,12 @@ pub(super) async fn perform_update(
     let worktree_file_path = worktree_path.join(relative_file_location);
     let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
 
-    // Attempt the update in the worktree
-    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
+    // Attempt the update in the worktree.
+    // Use the checker's validated new_version as the explicit target so that
+    // update_from_file_path does not re-discover with Latest strategy, which
+    // could select a version outside the checker's semver constraints.
+    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest)
+        .with_explicit_version(Some(new_version.clone()));
     let update_config = crate::commands::update::UpdateConfig {
         commit: false,             // Don't auto-commit in run mode
         create_pr: false,          // Don't create PR here (handled separately)
@@ -546,8 +550,12 @@ pub(super) async fn perform_direct_update(
 
     debug!("{}: File location: {}", attr_path, file_location);
 
-    // Perform the update directly in the working tree (commit handled separately under mutex)
-    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest);
+    // Perform the update directly in the working tree (commit handled separately under mutex).
+    // Use the checker's validated new_version as the explicit target so that
+    // update_from_file_path does not re-discover with Latest strategy, which
+    // could select a version outside the checker's semver constraints.
+    let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest)
+        .with_explicit_version(Some(new_version.clone()));
     let update_config = crate::commands::update::UpdateConfig {
         commit: false,
         create_pr: false,
