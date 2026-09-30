@@ -7,11 +7,11 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1788608763,
-        "narHash": "sha256-NdIWae8yd6vnSqO8sZUrD6eH2YGBO8OG/wuJvbFO+9U=",
+        "lastModified": 1790518605,
+        "narHash": "sha256-KuXbuJUW1VyuPFX48C/o1+fInmMsAAYr45pkkVzrpEI=",
         "owner": "ekala-project",
         "repo": "corepkgs",
-        "rev": "43f4d743d9439fdf01fd2f321607a55a0b6d9274",
+        "rev": "782d557e8758ce7ea383d991ba238cb3abcee21f",
         "type": "github"
       },
       "original": {
@@ -61,10 +61,12 @@
         "vim-plugins": "vim-plugins"
       },
       "locked": {
-        "lastModified": 1788877779,
-        "narHash": "sha256-Gl+LRguPZwj6+7++Kv2//tF7zlZhm2NnxDBY3PPjcQo=",
-        "path": "/home/jon/projects/ekapkgs",
-        "type": "path"
+        "lastModified": 1790708168,
+        "narHash": "sha256-CigfsiUoF6GKG0YD3aTbCFRAzC0HGl448bDq2YTd7mY=",
+        "owner": "ekala-project",
+        "repo": "ekapkgs",
+        "rev": "0ce2cf0821994ccc5d7eabb56794e1f24e5f268a",
+        "type": "github"
       },
       "original": {
         "owner": "ekala-project",
@@ -75,11 +77,11 @@
     "haskell": {
       "flake": false,
       "locked": {
-        "lastModified": 1788554633,
-        "narHash": "sha256-3RuM+RoiTjNfGZPUQNGUIBFvekFsPu3/X4nOvoAO4iI=",
+        "lastModified": 1790439774,
+        "narHash": "sha256-upEaNx9c9/7NPy56IyVTHTCYPjJRzTpHe4Y8H6I7g90=",
         "owner": "ekala-project",
         "repo": "haskell-pkgs",
-        "rev": "427f504a7812d9ab787f1c819cc4c42483358b10",
+        "rev": "b466fca502c60fb53d19fb7dbd958c44cb4c03f2",
         "type": "github"
       },
       "original": {
@@ -122,11 +124,11 @@
     "python": {
       "flake": false,
       "locked": {
-        "lastModified": 1788627492,
-        "narHash": "sha256-egLzQt8HeXx4+Zq7a3MFXD3l4ThjpptdIhCdNpU4jaI=",
+        "lastModified": 1790358704,
+        "narHash": "sha256-lNIFh3V/wAGqcnwXXAcimM39H+0s2Jly40btOTSoQkY=",
         "owner": "ekala-project",
         "repo": "python-pkgs",
-        "rev": "3228c35ad5a223620535833dc0599c9b1181d5f0",
+        "rev": "43d74d961ad5cb03cb1a450059a6c76d26d10c5a",
         "type": "github"
       },
       "original": {
