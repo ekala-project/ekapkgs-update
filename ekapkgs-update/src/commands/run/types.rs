@@ -2,7 +2,10 @@
 #[derive(Debug, Clone)]
 pub struct UpdateRequest {
     pub attr_path: String,
-    pub drv: crate::nix::nix_eval_jobs::NixEvalDrv,
+    /// Derivation store path for failure recording. `None` when the request
+    /// originates from a source that doesn't have nix-eval-jobs output (e.g.
+    /// the `watch` command).
+    pub drv_path: Option<String>,
     pub current_version: String,
     pub new_version: String,
 }

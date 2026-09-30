@@ -5,4 +5,5 @@ pub mod preservation;
 mod types;
 mod updater;
 
-pub use config::RunConfig;
+pub use config::{RunConfig, UpdaterServiceConfig};
+pub use types::UpdateRequest;

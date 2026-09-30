@@ -149,18 +149,29 @@ impl fmt::Display for SemverStrategy {
 /// Upstream VCS source (GitHub, GitLab, SourceHut, PyPI, etc.)
 #[derive(Debug)]
 pub enum UpstreamSource {
-    GitHub { owner: String, repo: String },
+    GitHub {
+        owner: String,
+        repo: String,
+    },
     GitLab {
         instance: String,
         owner: String,
         project: String,
     },
-    SourceHut { owner: String, repo: String },
-    PyPI { pname: String },
+    SourceHut {
+        owner: String,
+        repo: String,
+    },
+    PyPI {
+        pname: String,
+    },
     /// Directory listing-based source (GNU FTP, SourceForge, etc.)
     /// `base_url` is the directory listing URL, `pname` is the project name
     /// used to extract versions from filenames like `<pname>-<version>.tar.*`
-    DirectoryListing { base_url: String, pname: String },
+    DirectoryListing {
+        base_url: String,
+        pname: String,
+    },
 }
 
 /// Parse PyPI URL to extract package name
@@ -382,14 +393,16 @@ impl UpstreamSource {
                             is_prerelease: r.upcoming_release,
                         })
                         .collect()),
-                    Err(_) => Ok(fetch_gitlab_tags(instance, owner, project, token.as_deref())
-                        .await?
-                        .into_iter()
-                        .map(|t| Release {
-                            tag_name: t.name,
-                            is_prerelease: false,
-                        })
-                        .collect()),
+                    Err(_) => Ok(
+                        fetch_gitlab_tags(instance, owner, project, token.as_deref())
+                            .await?
+                            .into_iter()
+                            .map(|t| Release {
+                                tag_name: t.name,
+                                is_prerelease: false,
+                            })
+                            .collect(),
+                    ),
                 }
             },
             UpstreamSource::SourceHut { owner, repo } => {
@@ -483,6 +496,62 @@ impl UpstreamSource {
             UpstreamSource::DirectoryListing { base_url, pname } => {
                 format!("Directory listing: {pname} ({base_url})")
             },
+        }
+    }
+
+    /// Returns a canonical type string for database storage and feed routing.
+    pub fn source_type(&self) -> &'static str {
+        match self {
+            Self::GitHub { .. } => "github",
+            Self::GitLab { .. } => "gitlab",
+            Self::SourceHut { .. } => "sourcehut",
+            Self::PyPI { .. } => "pypi",
+            Self::DirectoryListing { .. } => "directory",
+        }
+    }
+
+    /// Returns a canonical key string for database lookups.
+    ///
+    /// - GitHub: `"owner/repo"`
+    /// - GitLab: `"owner/project"`
+    /// - SourceHut: `"~owner/repo"`
+    /// - PyPI: `"pname"`
+    /// - DirectoryListing: the `base_url`
+    pub fn source_key(&self) -> String {
+        match self {
+            Self::GitHub { owner, repo } => format!("{owner}/{repo}"),
+            Self::GitLab { owner, project, .. } => format!("{owner}/{project}"),
+            Self::SourceHut { owner, repo } => format!("~{owner}/{repo}"),
+            Self::PyPI { pname } => pname.clone(),
+            Self::DirectoryListing { base_url, .. } => base_url.clone(),
+        }
+    }
+
+    /// Returns the hosting instance, if applicable.
+    ///
+    /// Only meaningful for GitLab (e.g. `"gitlab.freedesktop.org"`).
+    /// Returns `None` for all other source types.
+    pub fn instance(&self) -> Option<&str> {
+        match self {
+            Self::GitLab { instance, .. } => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// Returns an RSS/Atom feed URL if the platform provides one natively.
+    ///
+    /// - GitHub: `https://github.com/{owner}/{repo}/releases.atom`
+    /// - PyPI: `https://pypi.org/rss/project/{pname}/releases.xml`
+    /// - Others: `None` (use API polling instead)
+    pub fn feed_url(&self) -> Option<String> {
+        match self {
+            Self::GitHub { owner, repo } => {
+                Some(format!("https://github.com/{owner}/{repo}/releases.atom"))
+            },
+            Self::PyPI { pname } => {
+                Some(format!("https://pypi.org/rss/project/{pname}/releases.xml"))
+            },
+            _ => None,
         }
     }
 }
