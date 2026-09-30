@@ -266,14 +266,7 @@ async fn delete_unreferenced_patch_file(nix_file: &Path, patch_name: &str) {
     // positive. `git grep` searches the working tree, which already has the
     // updated .nix file (patch reference removed).
     let has_other_refs = match tokio::process::Command::new("git")
-        .args([
-            "grep",
-            "-l",
-            "--fixed-strings",
-            patch_name,
-            "--",
-            "*.nix",
-        ])
+        .args(["grep", "-l", "--fixed-strings", patch_name, "--", "*.nix"])
         .output()
         .await
     {

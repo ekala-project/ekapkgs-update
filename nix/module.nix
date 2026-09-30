@@ -60,8 +60,11 @@ let
       --config-file ${watchConfigFile} \
       --poll-interval ${toString cfg.watch.pollIntervalMinutes} \
       --index-refresh-hours ${toString cfg.watch.indexRefreshHours} \
-      ${lib.optionalString (cfg.watch.commitStrategy != null)
-        "--commit-strategy ${cfg.watch.commitStrategy}"} \
+      ${
+        lib.optionalString (
+          cfg.watch.commitStrategy != null
+        ) "--commit-strategy ${cfg.watch.commitStrategy}"
+      } \
       ${lib.escapeShellArgs cfg.watch.extraArgs}
   '';
 
@@ -421,7 +424,12 @@ in
       };
 
       commitStrategy = lib.mkOption {
-        type = lib.types.nullOr (lib.types.enum [ "worktrees" "branch" ]);
+        type = lib.types.nullOr (
+          lib.types.enum [
+            "worktrees"
+            "branch"
+          ]
+        );
         default = null;
         example = "worktrees";
         description = ''
@@ -434,7 +442,10 @@ in
       extraArgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
-        example = [ "--dry-run" "--preserve-failures" ];
+        example = [
+          "--dry-run"
+          "--preserve-failures"
+        ];
         description = ''
           Additional command-line arguments passed to the
           `ekapkgs-update watch` invocation.
