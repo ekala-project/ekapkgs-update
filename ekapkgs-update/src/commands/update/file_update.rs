@@ -4,8 +4,11 @@ use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::variants::find_version_in_siblings;
+use crate::commands::migrate::{convert_to_final_attrs_pattern_generic, fix_closing_brace};
 use crate::nix::is_many_variants_package;
-use crate::rewrite::{find_and_update_attr, try_update_rev_attr};
+use crate::rewrite::{
+    find_and_update_attr, needs_final_attrs_conversion, try_fixup_stale_rev, try_update_rev_attr,
+};
 
 /// Update version and hash in a Nix file
 ///
@@ -18,6 +21,7 @@ pub async fn update_nix_file(
     new_version: &str,
     old_hash: Option<&str>,
     new_hash: Option<&str>,
+    tag_name: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     debug!(
         "Updating Nix file at {} using AST manipulation",
@@ -85,8 +89,13 @@ pub async fn update_nix_file(
                 content
             },
             Err(e) if e.is_not_found() => {
-                debug!("No rev attribute to update (or skipped): {}", e);
-                updated_content
+                // Check if this is a commit SHA that needs fixing via finalAttrs
+                if let Some(tag) = tag_name {
+                    try_fixup_commit_sha_rev(&updated_content, tag, new_version)
+                } else {
+                    debug!("No rev attribute to update (or skipped): {}", e);
+                    updated_content
+                }
             },
             Err(e) => {
                 warn!("Failed to update rev attribute: {}", e);
@@ -260,4 +269,52 @@ pub async fn update_composer_deps_hash(
         .await
         .with_context(|| format!("write nix file {}", file_path.display()))?;
     Ok(())
+}
+
+/// Attempt to fix a stale commit-SHA `rev` by converting to `finalAttrs`
+/// (if needed) and rewriting `rev` to reference the version via the tag format.
+///
+/// Returns the fixed content on success, or the original content unchanged
+/// if the fixup is not applicable.
+fn try_fixup_commit_sha_rev(content: &str, tag_name: &str, new_version: &str) -> String {
+    use crate::rewrite::rev_update::{extract_rev_value, is_likely_commit_sha};
+
+    // Only attempt fixup when rev is actually a commit SHA
+    let is_sha = extract_rev_value(content)
+        .map(|rev| is_likely_commit_sha(&rev))
+        .unwrap_or(false);
+    if !is_sha {
+        debug!("No rev attribute to update (not a commit SHA)");
+        return content.to_owned();
+    }
+
+    info!("Detected stale commit SHA in rev, attempting to fix");
+
+    let mut fixable = content.to_owned();
+
+    // Convert to finalAttrs if the builder doesn't use rec or finalAttrs
+    if needs_final_attrs_conversion(&fixable) {
+        match convert_to_final_attrs_pattern_generic(&fixable).and_then(|c| fix_closing_brace(&c)) {
+            Ok(converted) => {
+                info!("Converted to finalAttrs pattern for version reference");
+                fixable = converted;
+            },
+            Err(e) => {
+                warn!("Could not convert to finalAttrs: {}", e);
+                return content.to_owned();
+            },
+        }
+    }
+
+    // Rewrite rev to reference version
+    match try_fixup_stale_rev(&fixable, tag_name, new_version) {
+        Ok(fixed) => {
+            info!("Fixed stale rev to reference version via tag format");
+            fixed
+        },
+        Err(e) => {
+            debug!("Rev fixup not applicable: {}", e);
+            content.to_owned()
+        },
+    }
 }

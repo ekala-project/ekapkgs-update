@@ -130,6 +130,7 @@ pub async fn update_from_file_path(
         &metadata.version,
         new_version,
         metadata.output_hash.as_deref(),
+        Some(&best_release.tag_name),
     )
     .await?;
 

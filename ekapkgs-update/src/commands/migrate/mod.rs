@@ -4,7 +4,11 @@ mod transforms;
 
 use anyhow::Context;
 use arguments::add_run_unit_tests_argument;
-use final_attrs::{convert_to_final_attrs_pattern, fix_closing_brace};
+use final_attrs::convert_to_final_attrs_pattern;
+pub use final_attrs::{
+    convert_to_final_attrs_pattern_generic, fix_closing_brace, has_final_attrs_pattern,
+    has_rec_pattern,
+};
 use tracing::{debug, info};
 use transforms::{add_unittests_to_passthru, ensure_do_check_false, update_test_comments};
 
