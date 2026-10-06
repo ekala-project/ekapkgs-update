@@ -7,11 +7,11 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1790518605,
-        "narHash": "sha256-KuXbuJUW1VyuPFX48C/o1+fInmMsAAYr45pkkVzrpEI=",
+        "lastModified": 1790783063,
+        "narHash": "sha256-ZmqppL1F/JkEMMdCGvaZE9lHp9MEn9FdPtFGuxnirh8=",
         "owner": "ekala-project",
         "repo": "corepkgs",
-        "rev": "782d557e8758ce7ea383d991ba238cb3abcee21f",
+        "rev": "c8282a99f20a940a41af8710c34a4e9812bbfd2e",
         "type": "github"
       },
       "original": {
@@ -61,11 +61,11 @@
         "vim-plugins": "vim-plugins"
       },
       "locked": {
-        "lastModified": 1790708168,
-        "narHash": "sha256-CigfsiUoF6GKG0YD3aTbCFRAzC0HGl448bDq2YTd7mY=",
+        "lastModified": 1790875401,
+        "narHash": "sha256-OG1C5PTw5bJgZmJ7rCImSgIF6xbt+mbEUAea0reIODQ=",
         "owner": "ekala-project",
         "repo": "ekapkgs",
-        "rev": "0ce2cf0821994ccc5d7eabb56794e1f24e5f268a",
+        "rev": "f71be0bc47e653c0772bd8e0a19980dd52826298",
         "type": "github"
       },
       "original": {
@@ -77,11 +77,11 @@
     "haskell": {
       "flake": false,
       "locked": {
-        "lastModified": 1790439774,
-        "narHash": "sha256-upEaNx9c9/7NPy56IyVTHTCYPjJRzTpHe4Y8H6I7g90=",
+        "lastModified": 1790794721,
+        "narHash": "sha256-u2Koo/5gCYPi2wY7RIGO96WtdNB7yIKM6/PqE3qdCvg=",
         "owner": "ekala-project",
         "repo": "haskell-pkgs",
-        "rev": "b466fca502c60fb53d19fb7dbd958c44cb4c03f2",
+        "rev": "31cac3eac23e40bf973b2d4cf69efde5bbf31147",
         "type": "github"
       },
       "original": {
