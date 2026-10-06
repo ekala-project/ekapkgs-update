@@ -83,7 +83,7 @@ pub fn try_update_rev_attr(content: &str, old_version: &str, new_version: &str) 
 ///
 /// Returns the string value without quotes.
 /// Returns error if rev attribute is not found or has unexpected format.
-fn extract_rev_value(content: &str) -> Result<String> {
+pub(crate) fn extract_rev_value(content: &str) -> Result<String> {
     use regex::Regex;
 
     // Match: rev = "...";
@@ -110,7 +110,7 @@ fn extract_rev_value(content: &str) -> Result<String> {
 /// assert!(!is_likely_commit_sha("v1.2.3"));
 /// assert!(!is_likely_commit_sha("abc123")); // Too short
 /// ```
-fn is_likely_commit_sha(value: &str) -> bool {
+pub(crate) fn is_likely_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 

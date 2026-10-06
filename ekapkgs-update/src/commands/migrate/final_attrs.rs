@@ -20,6 +20,43 @@ pub fn convert_to_final_attrs_pattern(content: &str) -> anyhow::Result<String> {
     Ok(result.into_owned())
 }
 
+/// Like [`convert_to_final_attrs_pattern`] but handles any common Nix builder,
+/// not just `stdenv.mkDerivation`.
+pub fn convert_to_final_attrs_pattern_generic(content: &str) -> anyhow::Result<String> {
+    let pattern = Regex::new(
+        r"(\b(?:[\w.]*\.)?(?:mkDerivation|buildPythonPackage|buildPythonApplication|buildGoModule|buildRustPackage|buildNpmPackage|buildDotnetModule)\s+)(rec\s+)?(\{)",
+    )?;
+
+    let result = pattern.replace(content, |caps: &regex::Captures<'_>| {
+        let prefix = &caps[1];
+        let has_rec = caps.get(2).is_some();
+
+        if has_rec {
+            format!("{prefix}(finalAttrs: rec {{")
+        } else {
+            format!("{prefix}(finalAttrs: {{")
+        }
+    });
+
+    Ok(result.into_owned())
+}
+
+/// Check whether the builder invocation uses `rec {`.
+pub fn has_rec_pattern(content: &str) -> bool {
+    let pattern = Regex::new(
+        r"\b(?:[\w.]*\.)?(?:mkDerivation|buildPythonPackage|buildPythonApplication|buildGoModule|buildRustPackage|buildNpmPackage|buildDotnetModule)\s+rec\s*\{",
+    );
+    match pattern {
+        Ok(re) => re.is_match(content),
+        Err(_) => false,
+    }
+}
+
+/// Check whether the file already uses the `(finalAttrs:` pattern.
+pub fn has_final_attrs_pattern(content: &str) -> bool {
+    content.contains("(finalAttrs:")
+}
+
 /// Fix the closing brace to add the closing parenthesis for finalAttrs
 pub fn fix_closing_brace(content: &str) -> anyhow::Result<String> {
     // Find the last closing brace that closes stdenv.mkDerivation

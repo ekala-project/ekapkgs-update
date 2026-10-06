@@ -17,6 +17,7 @@ pub async fn update_source_hash(
     old_version: &str,
     new_version: &str,
     old_hash: Option<&str>,
+    tag_name: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     // Step 1: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -28,6 +29,7 @@ pub async fn update_source_hash(
         new_version,
         old_hash,
         Some(invalid_hash),
+        tag_name,
     )
     .await?;
 
@@ -60,6 +62,7 @@ pub async fn update_source_hash(
         new_version,
         Some(invalid_hash),
         Some(&correct_hash),
+        None, // rev already fixed in step 1
     )
     .await?;
 
