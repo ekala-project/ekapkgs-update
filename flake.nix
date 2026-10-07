@@ -21,22 +21,24 @@
         inherit (pkgs) ekapkgs-update ekapkgs-update-web;
       };
 
-      ekaShell = { pkgs, ... }: {
-        modules = [
-          {
-            languages.rust.enable = true;
-          }
-        ];
-        packages = [
-          pkgs.pkg-config
-          pkgs.sqlite
-          pkgs.nix-eval-jobs
-          # pkgs.cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
-        ];
-        buildInputs = [
-          pkgs.openssl
-          pkgs.sqlite
-        ];
+      devShells = pkgs: {
+        default = pkgs.mkDevShell {
+          nativeBuildInputs = with pkgs; [
+            cargo
+            clippy
+            rust-analyzer
+            rustc
+            rustfmt
+            pkg-config
+            sqlite
+            nix-eval-jobs
+            # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
+          ];
+          buildInputs = with pkgs; [
+            openssl
+            sqlite
+          ];
+        };
       };
 
       treefmt = {
