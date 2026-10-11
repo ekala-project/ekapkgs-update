@@ -10,6 +10,7 @@ pub mod prune_maintainers;
 pub mod query;
 pub mod report;
 pub mod retry;
+pub mod review;
 pub mod run;
 pub mod status;
 pub mod update;
