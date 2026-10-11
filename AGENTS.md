@@ -71,6 +71,7 @@ ekapkgs-update/                     # Main CLI crate
         types.rs                    #   Severity, CheckCategory, AuditFinding, AuditReport, AuditConfig
         checks.rs                   #   Check implementations (symlinks, layout, RPATH, shebangs, .pc files, etc.)
         report.rs                   #   Terminal (ANSI), markdown (PR body), and JSON formatters
+      review.rs                     # PR review: checkout, build, test, agent review, merge
       migrate/                      # nixpkgs → ekapkgs paradigm migration
       pr_enhancements.rs            # PrEnhancementsConfig (CVE, Repology, rebuilds, Cachix, audit)
       autofix/                        # LLM-assisted automatic fix pipeline
@@ -249,6 +250,31 @@ Failed updates use stepped backoff: **2 days → 4 days → 6 days** (max). Succ
 - **Worktrees** (default): Each update in an isolated git worktree. Full concurrency and PR support.
 - **Branch**: Direct commits to current branch. Git serialized via `Arc<Mutex<()>>`. No PRs.
 
+### PR Review (`commands/review.rs`)
+
+The `review` command automates PR review by checking out the PR branch, building changed packages, and optionally running tests and a best-practices agent review:
+
+```
+ekapkgs-update review <PR_NUMBER> --repo owner/repo [--tests] [--best-practices]
+```
+
+**Workflow:**
+
+1. Fetch PR details and changed files from GitHub API
+2. Create an isolated worktree from the current repo
+3. Checkout the PR branch, merge latest base branch (must succeed — merge conflicts fail the review)
+4. Determine affected attr paths from changed `.nix` files (heuristic: `pkgs/by-name/<shard>/<pname>/` or parent dir name)
+5. Validate each candidate attr path exists in the entry point
+6. Build each package with `nix-build`
+7. *(if `--tests`)* Build `passthru.tests` for each successfully built package
+8. *(if `--best-practices`)* Invoke an agent CLI (default: `claude`) with a structured prompt checking for common Nix packaging issues (build input placement, metadata, deprecated patterns, hash format, etc.)
+9. If all checks pass: post APPROVE review and merge the PR
+10. If any checks fail: post REQUEST_CHANGES review with failure details and exit non-zero
+
+**Agent review:** The `--best-practices` flag spawns a Claude Code (or other agent specified via `--best-practices-agent`) process with `--print --dangerously-skip-permissions`. The agent must end its output with `VERDICT: PASS` or `VERDICT: FAIL` followed by bullet-pointed issues.
+
+**`--repo` format:** Accepts `owner/repo` (assumes GitHub) or full URL `github.com/owner/repo`. Requires `GITHUB_TOKEN` environment variable.
+
 ### Package Audit (`commands/audit/`)
 
 The `audit` command inspects built Nix package outputs for correctness issues. It has two surfaces:
@@ -349,6 +375,8 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `AuditConfig` | `commands/audit/types.rs` | Controls which checks to run and minimum severity |
 | `WatchConfig` | `commands/watch/mod.rs` | Watch (passive/RSS-driven) mode configuration |
 | `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (source → attr_path mapping) |
+| `ReviewConfig` | `commands/review.rs` | PR review configuration (repo, PR#, tests, best-practices flags) |
+| `RepoCoords` | `commands/review.rs` | Parsed repository owner/repo coordinates |
 
 ## External Dependencies
 

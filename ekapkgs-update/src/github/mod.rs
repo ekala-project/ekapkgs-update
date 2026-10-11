@@ -74,6 +74,40 @@ pub struct GithubPullRequest {
     pub number: i64,
 }
 
+/// Detailed PR info returned by the single-PR endpoint.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct GithubPullRequestDetail {
+    pub number: i64,
+    pub html_url: String,
+    pub title: String,
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    pub head: GithubPrRef,
+    pub base: GithubPrRef,
+    pub mergeable: Option<bool>,
+}
+
+/// A git ref (head or base) on a PR.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct GithubPrRef {
+    /// Branch name (e.g. `update/hello/2.0`).
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    /// Full commit SHA.
+    pub sha: String,
+}
+
+/// A file changed in a pull request.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct GithubPrFile {
+    pub filename: String,
+    pub status: String,
+}
+
 /// Parse GitHub URL to extract owner and repo
 ///
 /// Supports various GitHub URL formats:
@@ -261,6 +295,161 @@ pub async fn create_pull_request_with_options(
     debug!("Created PR #{}: {}", pr.number, pr.html_url);
 
     Ok(pr)
+}
+
+/// Fetch details for a single pull request.
+pub async fn get_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    token: Option<&str>,
+) -> anyhow::Result<GithubPullRequestDetail> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}");
+    debug!("Fetching PR details from {}", url);
+
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR fetch failed with status {status}: {body}");
+    }
+
+    response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))
+}
+
+/// List files changed by a pull request.
+pub async fn get_pull_request_files(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    token: Option<&str>,
+) -> anyhow::Result<Vec<GithubPrFile>> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files");
+    debug!("Fetching PR files from {}", url);
+
+    let client = Client::new();
+    let mut all_files = Vec::new();
+    let mut page = 1u32;
+
+    loop {
+        let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
+            .query(&[("per_page", "100"), ("page", &page.to_string())])
+            .send()
+            .await
+            .with_context(|| format!("GET {url}?page={page}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .with_context(|| format!("read error body from {url}"))?;
+            anyhow::bail!("GitHub PR files fetch failed with status {status}: {body}");
+        }
+
+        let files: Vec<GithubPrFile> = response
+            .json()
+            .await
+            .with_context(|| format!("decode JSON from {url}"))?;
+        let count = files.len();
+        all_files.extend(files);
+
+        if count < 100 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(all_files)
+}
+
+/// Create a review on a pull request.
+///
+/// `event` should be one of `"APPROVE"`, `"REQUEST_CHANGES"`, or `"COMMENT"`.
+pub async fn create_pull_request_review(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    body: &str,
+    event: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
+    debug!("Creating PR review at {} (event: {})", url, event);
+
+    let client = Client::new();
+    let request_body = serde_json::json!({
+        "body": body,
+        "event": event,
+    });
+
+    let response = github_request_builder(&client, reqwest::Method::POST, &url, Some(token))
+        .json(&request_body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR review creation failed with status {status}: {error_text}");
+    }
+
+    Ok(())
+}
+
+/// Merge a pull request using the merge API.
+///
+/// `merge_method` should be one of `"merge"`, `"squash"`, or `"rebase"`.
+pub async fn merge_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    merge_method: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge");
+    debug!(
+        "Merging PR #{} at {} (method: {})",
+        pr_number, url, merge_method
+    );
+
+    let client = Client::new();
+    let request_body = serde_json::json!({
+        "merge_method": merge_method,
+    });
+
+    let response = github_request_builder(&client, reqwest::Method::PUT, &url, Some(token))
+        .json(&request_body)
+        .send()
+        .await
+        .with_context(|| format!("PUT {url}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR merge failed with status {status}: {error_text}");
+    }
+
+    debug!("PR #{} merged successfully", pr_number);
+    Ok(())
 }
 
 #[cfg(test)]

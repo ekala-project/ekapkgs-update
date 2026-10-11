@@ -91,6 +91,7 @@ pub struct Args {
 /// | `PruneMaintainers` | (direct args)    | `commands::prune_maintainers::execute` |
 /// | `Log`              | (direct args)    | `commands::log::execute`             |
 /// | `Migrate`          | (direct args)    | `commands::migrate::execute`         |
+/// | `Review`           | `ReviewConfig`   | `commands::review::execute`          |
 ///
 /// The `execute()` method acts as a thin dispatcher: it extracts flags from the
 /// clap-parsed enum, builds the appropriate config struct (when applicable), and
@@ -424,6 +425,44 @@ pub enum Commands {
         /// Disable security checks (setuid/setgid, credentials, suspicious URLs, etc.)
         #[arg(long)]
         no_security: bool,
+        /// Nix builders to use for builds (passed as --builders to nix-build)
+        #[arg(long)]
+        builders: Option<String>,
+        /// Maximum number of local nix build jobs (passed as --max-jobs to nix-build)
+        #[arg(long)]
+        max_jobs: Option<usize>,
+    },
+    /// Review a pull request: checkout, merge base, build changed packages,
+    /// optionally run tests and a best-practices agent, then merge if all pass.
+    Review {
+        /// PR number to review
+        pr_number: u64,
+        /// Repository in 'owner/repo' or 'github.com/owner/repo' format.
+        /// Assumes github.com when given 'owner/repo'.
+        #[arg(long)]
+        repo: String,
+        /// Nix file to evaluate
+        #[arg(short, long, default_value = "default.nix")]
+        file: String,
+        /// Also build passthru.tests for each package (if they exist)
+        #[arg(long)]
+        tests: bool,
+        /// Run a best-practices agent review on the changed Nix files
+        #[arg(long)]
+        best_practices: bool,
+        /// Agent CLI command to use for best-practices review (must accept --print
+        /// and --dangerously-skip-permissions flags, like Claude Code)
+        #[arg(long, default_value = "claude")]
+        best_practices_agent: String,
+        /// Maximum agent turns for best-practices review
+        #[arg(long, default_value = "10")]
+        best_practices_max_turns: u32,
+        /// Timeout in seconds for the best-practices agent
+        #[arg(long, default_value = "300")]
+        best_practices_timeout: u64,
+        /// Merge method: merge, squash, or rebase
+        #[arg(long, default_value = "merge")]
+        merge_method: String,
         /// Nix builders to use for builds (passed as --builders to nix-build)
         #[arg(long)]
         builders: Option<String>,
@@ -928,6 +967,46 @@ impl Commands {
                     skip_binary_checks,
                     no_security,
                 )
+                .await
+            },
+            Commands::Review {
+                pr_number,
+                repo,
+                file,
+                tests,
+                best_practices,
+                best_practices_agent,
+                best_practices_max_turns,
+                best_practices_timeout,
+                merge_method,
+                builders,
+                max_jobs,
+            } => {
+                let mut extra_args = Vec::new();
+                if let Some(ref builders_val) = builders {
+                    extra_args.push("--builders".to_owned());
+                    extra_args.push(builders_val.clone());
+                }
+                if let Some(max_jobs_val) = max_jobs {
+                    extra_args.push("--max-jobs".to_owned());
+                    extra_args.push(max_jobs_val.to_string());
+                }
+                if !extra_args.is_empty() {
+                    commands::update::set_extra_nix_build_args(extra_args);
+                }
+
+                let repo_coords = commands::review::parse_repo_arg(&repo)?;
+                commands::review::execute(commands::review::ReviewConfig {
+                    repo: repo_coords,
+                    pr_number,
+                    file,
+                    run_tests: tests,
+                    best_practices,
+                    best_practices_agent,
+                    best_practices_max_turns,
+                    best_practices_timeout,
+                    merge_method,
+                })
                 .await
             },
             Commands::Watch {
