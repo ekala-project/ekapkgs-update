@@ -33,6 +33,7 @@ pub struct ReviewConfig {
     pub best_practices_max_turns: u32,
     pub best_practices_timeout: u64,
     pub merge_method: String,
+    pub no_merge: bool,
 }
 
 /// Parse a `--repo` value into owner/repo.
@@ -577,7 +578,9 @@ async fn execute_in_worktree(
     )
     .await?;
 
-    if pr.draft {
+    if config.no_merge {
+        println!("✓ PR #{} review passed (--no-merge)", pr.number);
+    } else if pr.draft {
         println!(
             "✓ PR #{} review passed (draft PR — skipping merge)",
             pr.number

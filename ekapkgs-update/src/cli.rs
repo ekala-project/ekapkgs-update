@@ -463,6 +463,9 @@ pub enum Commands {
         /// Merge method: merge, squash, or rebase
         #[arg(long, default_value = "merge")]
         merge_method: String,
+        /// Skip merging the PR even if all checks pass
+        #[arg(long)]
+        no_merge: bool,
         /// Nix builders to use for builds (passed as --builders to nix-build)
         #[arg(long)]
         builders: Option<String>,
@@ -979,6 +982,7 @@ impl Commands {
                 best_practices_max_turns,
                 best_practices_timeout,
                 merge_method,
+                no_merge,
                 builders,
                 max_jobs,
             } => {
@@ -1006,6 +1010,7 @@ impl Commands {
                     best_practices_max_turns,
                     best_practices_timeout,
                     merge_method,
+                    no_merge,
                 })
                 .await
             },
