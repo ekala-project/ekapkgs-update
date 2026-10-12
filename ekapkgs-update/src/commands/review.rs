@@ -756,6 +756,18 @@ async fn build_best_practices_prompt(
          Check each file for common issues and output a verdict.\n\n",
     );
 
+    // Include project-specific best-practices skill if it exists
+    let skill_path = worktree_path.join(".agents/skills/best-practices/SKILL.md");
+    if let Ok(skill_content) = tokio::fs::read_to_string(&skill_path).await {
+        prompt.push_str("## Project best-practices guidelines\n\n");
+        prompt.push_str(
+            "The following project-specific guidelines take precedence over \
+             the general checks below.\n\n",
+        );
+        prompt.push_str(&skill_content);
+        prompt.push_str("\n\n");
+    }
+
     prompt.push_str("## Packages under review\n\n");
     for attr in attr_paths {
         prompt.push_str(&format!("- `{attr}`\n"));
