@@ -466,6 +466,9 @@ pub enum Commands {
         /// Skip merging the PR even if all checks pass
         #[arg(long)]
         no_merge: bool,
+        /// Drop into an interactive shell with built packages available on PATH
+        #[arg(short, long)]
+        interactive: bool,
         /// Nix builders to use for builds (passed as --builders to nix-build)
         #[arg(long)]
         builders: Option<String>,
@@ -983,6 +986,7 @@ impl Commands {
                 best_practices_timeout,
                 merge_method,
                 no_merge,
+                interactive,
                 builders,
                 max_jobs,
             } => {
@@ -1011,6 +1015,7 @@ impl Commands {
                     best_practices_timeout,
                     merge_method,
                     no_merge,
+                    interactive,
                 })
                 .await
             },
