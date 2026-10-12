@@ -377,7 +377,7 @@ async fn execute_in_worktree(
     }
 
     // 7. Run best-practices agent review (if --best-practices)
-    let mut agent_failures: Vec<String> = Vec::new();
+    let mut agent_findings: Vec<BestPracticesFinding> = Vec::new();
     if config.best_practices {
         info!(
             "Running best-practices review (agent: {})",
@@ -403,9 +403,9 @@ async fn execute_in_worktree(
             Ok(BestPracticesResult::Pass) => {
                 info!("  ✓ Best-practices review passed");
             },
-            Ok(BestPracticesResult::Fail { suggestions }) => {
+            Ok(BestPracticesResult::Fail { findings }) => {
                 warn!("  ✗ Best-practices review found issues");
-                agent_failures = suggestions;
+                agent_findings = findings;
             },
             Ok(BestPracticesResult::AgentNotAvailable) => {
                 anyhow::bail!(
@@ -415,7 +415,11 @@ async fn execute_in_worktree(
             },
             Err(e) => {
                 warn!("  ✗ Best-practices review error: {}", e);
-                agent_failures.push(format!("Agent error: {e:#}"));
+                agent_findings.push(BestPracticesFinding {
+                    message: format!("Agent error: {e:#}"),
+                    file: None,
+                    line: None,
+                });
             },
         }
     }
@@ -455,12 +459,16 @@ async fn execute_in_worktree(
 
     // Agent review results
     if config.best_practices {
-        if agent_failures.is_empty() {
+        if agent_findings.is_empty() {
             println!("  ✓ Best-practices review passed");
         } else {
             println!("  ✗ Best-practices review found issues:");
-            for suggestion in &agent_failures {
-                println!("    - {suggestion}");
+            for finding in &agent_findings {
+                match (&finding.file, finding.line) {
+                    (Some(f), Some(l)) => println!("    - {f}:{l}: {}", finding.message),
+                    (Some(f), None) => println!("    - {f}: {}", finding.message),
+                    _ => println!("    - {}", finding.message),
+                }
             }
         }
     }
@@ -486,8 +494,35 @@ async fn execute_in_worktree(
         anyhow::bail!("Review failed: {} build failure(s)", build_failures.len(),);
     }
 
-    if !test_failures.is_empty() || !agent_failures.is_empty() {
-        let review_body = format_failure_review(&test_failures, &agent_failures);
+    if !agent_findings.is_empty() {
+        // Best-practices failures are posted immediately with inline comments
+        let review_body = format_best_practices_review(&agent_findings);
+        let inline_comments = findings_to_review_comments(&agent_findings);
+
+        info!(
+            "Posting REQUEST_CHANGES review on PR #{} ({} inline comment(s))",
+            pr.number,
+            inline_comments.len()
+        );
+        github::create_pull_request_review_with_comments(
+            owner,
+            repo,
+            config.pr_number,
+            &review_body,
+            "REQUEST_CHANGES",
+            &inline_comments,
+            token,
+        )
+        .await?;
+
+        anyhow::bail!(
+            "Review failed: {} best-practices issue(s)",
+            agent_findings.len(),
+        );
+    }
+
+    if !test_failures.is_empty() {
+        let review_body = format_failure_review(&test_failures);
 
         // Prompt user: post as-is, edit, or skip
         let final_body = prompt_failure_review(&review_body)?;
@@ -507,11 +542,7 @@ async fn execute_in_worktree(
             info!("Skipping review post");
         }
 
-        anyhow::bail!(
-            "Review failed: {} test failure(s), {} best-practices issue(s)",
-            test_failures.len(),
-            agent_failures.len(),
-        );
+        anyhow::bail!("Review failed: {} test failure(s)", test_failures.len(),);
     }
 
     // All checks passed — approve and merge
@@ -579,29 +610,51 @@ fn format_build_failure_review(build_failures: &[(String, String)]) -> String {
     body
 }
 
-/// Build a review body for test and best-practices failures.
-fn format_failure_review(test_failures: &[(String, String)], agent_failures: &[String]) -> String {
-    let mut body = String::from("## ekapkgs-update review: issues found\n\n");
+/// Build a review body for test failures.
+fn format_failure_review(test_failures: &[(String, String)]) -> String {
+    let mut body = String::from("## ekapkgs-update review: test failures\n\n");
 
-    if !test_failures.is_empty() {
-        body.push_str("### Test failures (passthru.tests)\n\n");
-        for (attr, stderr) in test_failures {
-            body.push_str(&format!("**{attr}**:\n```\n"));
-            body.push_str(&last_n_lines(stderr, 20));
-            body.push_str("\n```\n\n");
-        }
-    }
-
-    if !agent_failures.is_empty() {
-        body.push_str("### Best-practices review\n\n");
-        for suggestion in agent_failures {
-            body.push_str(&format!("- {suggestion}\n"));
-        }
-        body.push('\n');
+    for (attr, stderr) in test_failures {
+        body.push_str(&format!("**{attr}**:\n```\n"));
+        body.push_str(&last_n_lines(stderr, 20));
+        body.push_str("\n```\n\n");
     }
 
     body.push_str("---\n🤖 Reviewed by ekapkgs-update\n");
     body
+}
+
+/// Build a review body summarizing best-practices findings.
+fn format_best_practices_review(findings: &[BestPracticesFinding]) -> String {
+    let mut body = String::from("## ekapkgs-update review: best-practices issues\n\n");
+
+    for finding in findings {
+        match (&finding.file, finding.line) {
+            (Some(f), Some(l)) => body.push_str(&format!("- `{f}:{l}`: {}\n", finding.message)),
+            (Some(f), None) => body.push_str(&format!("- `{f}`: {}\n", finding.message)),
+            _ => body.push_str(&format!("- {}\n", finding.message)),
+        }
+    }
+
+    body.push_str("\n---\n🤖 Reviewed by ekapkgs-update\n");
+    body
+}
+
+/// Convert best-practices findings into GitHub inline review comments.
+///
+/// Only findings that have both a file path and line number become inline
+/// comments. The rest are captured in the review body only.
+fn findings_to_review_comments(findings: &[BestPracticesFinding]) -> Vec<github::ReviewComment> {
+    findings
+        .iter()
+        .filter_map(|f| {
+            Some(github::ReviewComment {
+                path: f.file.clone()?,
+                line: f.line?,
+                body: f.message.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Prompt the user to post, edit, or skip the failure review.
@@ -676,9 +729,20 @@ fn open_in_editor(content: &str) -> anyhow::Result<String> {
 
 // ── Best-practices agent ────────────────────────────────────────────────
 
+/// A single best-practices finding, optionally tied to a file and line.
+#[derive(Debug, Clone)]
+struct BestPracticesFinding {
+    /// The issue description.
+    message: String,
+    /// File path relative to the repo root (if the agent provided one).
+    file: Option<String>,
+    /// Line number in the file (if the agent provided one).
+    line: Option<u64>,
+}
+
 enum BestPracticesResult {
     Pass,
-    Fail { suggestions: Vec<String> },
+    Fail { findings: Vec<BestPracticesFinding> },
     AgentNotAvailable,
 }
 
@@ -823,10 +887,13 @@ async fn build_best_practices_prompt(
          or:\n\n\
          ```\n\
          VERDICT: FAIL\n\
-         - Issue 1 description\n\
-         - Issue 2 description\n\
+         - file.nix:42: Issue description for a specific line\n\
+         - file.nix: Issue description for the whole file\n\
+         - Issue description without a file reference\n\
          ```\n\n\
          Each issue on its own line, prefixed with `- `.\n\
+         When possible, include `filename:line:` at the start of each issue \
+         so the feedback can be attached as an inline comment on the PR.\n\
          Only fail for genuine problems, not stylistic preferences.\n",
     );
 
@@ -848,12 +915,15 @@ fn parse_best_practices_output(output: &str) -> BestPracticesResult {
     }
 
     let Some(idx) = verdict_idx else {
-        // No verdict found — treat as a failure with the full output as context
         return BestPracticesResult::Fail {
-            suggestions: vec![format!(
-                "Agent did not produce a VERDICT line. Raw output (last 500 chars): {}",
-                &output[output.len().saturating_sub(500)..]
-            )],
+            findings: vec![BestPracticesFinding {
+                message: format!(
+                    "Agent did not produce a VERDICT line. Raw output (last 500 chars): {}",
+                    &output[output.len().saturating_sub(500)..]
+                ),
+                file: None,
+                line: None,
+            }],
         };
     };
 
@@ -862,33 +932,77 @@ fn parse_best_practices_output(output: &str) -> BestPracticesResult {
         return BestPracticesResult::Pass;
     }
 
-    // Collect suggestions from lines after the VERDICT
-    let mut suggestions: Vec<String> = Vec::new();
+    let mut findings: Vec<BestPracticesFinding> = Vec::new();
+
     // First check if there are items on the same line as VERDICT
     if let Some(after_fail) = verdict_line.strip_prefix("VERDICT: FAIL") {
         let trimmed = after_fail.trim();
         if !trimmed.is_empty() {
-            suggestions.push(trimmed.trim_start_matches("- ").to_owned());
+            findings.push(parse_finding_line(trimmed.trim_start_matches("- ")));
         }
     }
     // Then collect subsequent lines that start with "- "
     for line in &lines[idx + 1..] {
         let trimmed = line.trim();
         if let Some(item) = trimmed.strip_prefix("- ") {
-            suggestions.push(item.to_owned());
+            findings.push(parse_finding_line(item));
         } else if trimmed.starts_with("```") {
-            // Stop at code fence
             break;
         } else if !trimmed.is_empty() {
-            suggestions.push(trimmed.to_owned());
+            findings.push(parse_finding_line(trimmed));
         }
     }
 
-    if suggestions.is_empty() {
-        suggestions.push("Best-practices review failed (no specific issues listed)".to_owned());
+    if findings.is_empty() {
+        findings.push(BestPracticesFinding {
+            message: "Best-practices review failed (no specific issues listed)".to_owned(),
+            file: None,
+            line: None,
+        });
     }
 
-    BestPracticesResult::Fail { suggestions }
+    BestPracticesResult::Fail { findings }
+}
+
+/// Parse a finding line that may start with `file.nix:line:` or `file.nix:`.
+///
+/// Accepted formats:
+///   - `pkgs/foo/default.nix:42: description` → file + line + message
+///   - `pkgs/foo/default.nix: description`     → file + message (no line)
+///   - `description`                           → message only
+fn parse_finding_line(line: &str) -> BestPracticesFinding {
+    // Try "file.nix:line: message"
+    if let Some(colon1) = line.find(':') {
+        let candidate_file = &line[..colon1];
+        if candidate_file.ends_with(".nix") {
+            let rest = &line[colon1 + 1..];
+            // Try to parse a line number after the first colon
+            if let Some(colon2) = rest.find(':') {
+                let maybe_line = rest[..colon2].trim();
+                if let Ok(line_num) = maybe_line.parse::<u64>() {
+                    let message = rest[colon2 + 1..].trim().to_owned();
+                    return BestPracticesFinding {
+                        message,
+                        file: Some(candidate_file.to_owned()),
+                        line: Some(line_num),
+                    };
+                }
+            }
+            // No line number — just "file.nix: message"
+            let message = rest.trim().to_owned();
+            return BestPracticesFinding {
+                message,
+                file: Some(candidate_file.to_owned()),
+                line: None,
+            };
+        }
+    }
+
+    BestPracticesFinding {
+        message: line.to_owned(),
+        file: None,
+        line: None,
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1006,10 +1120,30 @@ mod tests {
         let output = "Issues found.\n\nVERDICT: FAIL\n- Missing meta.license\n- Deprecated stdenv.lib usage\n";
         let result = parse_best_practices_output(output);
         match result {
-            BestPracticesResult::Fail { suggestions } => {
-                assert_eq!(suggestions.len(), 2);
-                assert!(suggestions[0].contains("meta.license"));
-                assert!(suggestions[1].contains("stdenv.lib"));
+            BestPracticesResult::Fail { findings } => {
+                assert_eq!(findings.len(), 2);
+                assert!(findings[0].message.contains("meta.license"));
+                assert!(findings[1].message.contains("stdenv.lib"));
+            },
+            _ => panic!("Expected Fail"),
+        }
+    }
+
+    #[test]
+    fn test_parse_best_practices_fail_with_file_line() {
+        let output = "VERDICT: FAIL\n- pkgs/foo/default.nix:42: Missing license\n- pkgs/bar/default.nix: No description\n- General issue\n";
+        let result = parse_best_practices_output(output);
+        match result {
+            BestPracticesResult::Fail { findings } => {
+                assert_eq!(findings.len(), 3);
+                assert_eq!(findings[0].file.as_deref(), Some("pkgs/foo/default.nix"));
+                assert_eq!(findings[0].line, Some(42));
+                assert_eq!(findings[0].message, "Missing license");
+                assert_eq!(findings[1].file.as_deref(), Some("pkgs/bar/default.nix"));
+                assert_eq!(findings[1].line, None);
+                assert_eq!(findings[1].message, "No description");
+                assert!(findings[2].file.is_none());
+                assert!(findings[2].line.is_none());
             },
             _ => panic!("Expected Fail"),
         }
