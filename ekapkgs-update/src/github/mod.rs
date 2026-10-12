@@ -385,14 +385,59 @@ pub async fn create_pull_request_review(
     event: &str,
     token: &str,
 ) -> anyhow::Result<()> {
+    create_pull_request_review_with_comments(owner, repo, pr_number, body, event, &[], token).await
+}
+
+/// An inline comment to attach to a PR review.
+#[derive(Debug, Clone)]
+pub struct ReviewComment {
+    /// File path relative to the repo root.
+    pub path: String,
+    /// Line number in the *new* version of the file to comment on.
+    pub line: u64,
+    /// Comment body (Markdown).
+    pub body: String,
+}
+
+/// Create a review on a pull request, optionally with inline comments.
+///
+/// `event` should be one of `"APPROVE"`, `"REQUEST_CHANGES"`, or `"COMMENT"`.
+pub async fn create_pull_request_review_with_comments(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    body: &str,
+    event: &str,
+    comments: &[ReviewComment],
+    token: &str,
+) -> anyhow::Result<()> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
-    debug!("Creating PR review at {} (event: {})", url, event);
+    debug!(
+        "Creating PR review at {} (event: {}, {} inline comment(s))",
+        url,
+        event,
+        comments.len()
+    );
 
     let client = Client::new();
-    let request_body = serde_json::json!({
+    let comments_json: Vec<serde_json::Value> = comments
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "path": c.path,
+                "line": c.line,
+                "body": c.body,
+            })
+        })
+        .collect();
+
+    let mut request_body = serde_json::json!({
         "body": body,
         "event": event,
     });
+    if !comments_json.is_empty() {
+        request_body["comments"] = serde_json::Value::Array(comments_json);
+    }
 
     let response = github_request_builder(&client, reqwest::Method::POST, &url, Some(token))
         .json(&request_body)
