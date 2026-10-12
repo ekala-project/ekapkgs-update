@@ -34,6 +34,7 @@ pub struct ReviewConfig {
     pub best_practices_timeout: u64,
     pub merge_method: String,
     pub no_merge: bool,
+    pub interactive: bool,
 }
 
 /// Parse a `--repo` value into owner/repo.
@@ -329,13 +330,21 @@ async fn execute_in_worktree(
     let mut build_failures: Vec<(String, String)> = Vec::new();
     let mut test_failures: Vec<(String, String)> = Vec::new();
     let mut successful_builds: Vec<String> = Vec::new();
+    let mut built_store_paths: Vec<String> = Vec::new();
 
     for attr in &attr_paths {
         info!("Building {}", attr);
         match build_nix_expr(&worktree_entry_str, attr, None).await {
-            Ok((true, _stdout, _stderr)) => {
+            Ok((true, stdout, _stderr)) => {
                 info!("  ✓ {} built successfully", attr);
                 successful_builds.push(attr.clone());
+                // Collect store paths (nix-build prints one per line)
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("/nix/store/") {
+                        built_store_paths.push(trimmed.to_owned());
+                    }
+                }
             },
             Ok((false, _stdout, stderr)) => {
                 warn!("  ✗ {} build failed", attr);
@@ -475,6 +484,17 @@ async fn execute_in_worktree(
     }
 
     println!();
+
+    // 8b. Interactive shell (if --interactive)
+    if config.interactive && !built_store_paths.is_empty() {
+        launch_review_shell(
+            worktree_path,
+            &built_store_paths,
+            &successful_builds,
+            pr.number,
+        )
+        .await?;
+    }
 
     // 9. Post review and merge (or request changes)
     if !build_failures.is_empty() {
@@ -1006,6 +1026,67 @@ fn parse_finding_line(line: &str) -> BestPracticesFinding {
         file: None,
         line: None,
     }
+}
+
+// ── Interactive shell ───────────────────────────────────────────────────
+
+/// Launch an interactive shell with built packages on PATH.
+///
+/// The shell's `PATH` is prepended with `<store-path>/bin` for each
+/// successfully built output, and the working directory is set to the
+/// worktree so the user can inspect the source.
+async fn launch_review_shell(
+    worktree_path: &Path,
+    store_paths: &[String],
+    built_attrs: &[String],
+    pr_number: i64,
+) -> anyhow::Result<()> {
+    // Build a PATH prefix from store paths that have a bin/ directory
+    let mut extra_path_entries: Vec<String> = Vec::new();
+    for sp in store_paths {
+        let bin_dir = Path::new(sp).join("bin");
+        if bin_dir.is_dir() {
+            extra_path_entries.push(bin_dir.to_string_lossy().to_string());
+        }
+    }
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = if extra_path_entries.is_empty() {
+        current_path
+    } else {
+        format!("{}:{current_path}", extra_path_entries.join(":"))
+    };
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_owned());
+
+    println!("Entering review shell for PR #{pr_number}");
+    println!("  Packages: {}", built_attrs.join(", "));
+    println!("  Worktree: {}", worktree_path.display());
+    if !extra_path_entries.is_empty() {
+        println!(
+            "  PATH prepended with {} store bin dir(s)",
+            extra_path_entries.len()
+        );
+    }
+    println!("  Exit the shell to continue the review.");
+    println!();
+
+    let status = Command::new(&shell)
+        .current_dir(worktree_path)
+        .env("PATH", &new_path)
+        .env("IN_EKAPKGS_REVIEW", format!("PR-{pr_number}"))
+        .env("PS1", format!("(review PR#{pr_number}) \\u@\\h:\\w\\$ "))
+        .status()
+        .await
+        .with_context(|| format!("launch shell '{shell}'"))?;
+
+    if !status.success() {
+        warn!("Shell exited with status {}", status);
+    }
+
+    println!();
+    println!("Review shell exited, continuing...");
+    Ok(())
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
