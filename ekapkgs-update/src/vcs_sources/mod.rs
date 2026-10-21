@@ -348,13 +348,24 @@ impl UpstreamSource {
                 }
 
                 match all_releases {
-                    Ok(gh_releases) => Ok(gh_releases
+                    Ok(gh_releases) if !gh_releases.is_empty() => Ok(gh_releases
                         .into_iter()
                         .map(|r| Release {
                             tag_name: r.tag_name,
                             is_prerelease: r.prerelease,
                         })
                         .collect()),
+                    Ok(_) => {
+                        debug!("GitHub releases endpoint returned empty, falling back to tags");
+                        Ok(fetch_github_tags(owner, repo, token.as_deref())
+                            .await?
+                            .into_iter()
+                            .map(|t| Release {
+                                tag_name: t.name,
+                                is_prerelease: false,
+                            })
+                            .collect())
+                    }
                     Err(_) => Ok(fetch_github_tags(owner, repo, token.as_deref())
                         .await?
                         .into_iter()

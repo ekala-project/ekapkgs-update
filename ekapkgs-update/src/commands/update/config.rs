@@ -290,8 +290,9 @@ impl UpdateParams {
                 .await;
         }
 
-        // Check passthru.ekapkgs-update.skip attribute
+        // Check passthru.ekapkgs-update.skip and keep attributes
         use crate::package::PackageMetadata;
+        let mut keep_mode: Option<String> = None;
         match PackageMetadata::from_attr_path(&file, &attr_path).await {
             Ok(metadata) => {
                 if metadata.skip == Some(true) {
@@ -309,10 +310,11 @@ impl UpdateParams {
                         );
                     }
                 }
+                keep_mode = metadata.keep.clone();
             },
             Err(e) => {
                 debug!(
-                    "Could not extract metadata to check skip flag (continuing anyway): {}",
+                    "Could not extract metadata to check skip/keep flags (continuing anyway): {}",
                     e
                 );
             },
@@ -323,6 +325,27 @@ impl UpdateParams {
 
         if is_many_variants {
             info!("{} is a mkManyVariants package", attr_path);
+
+            // When keep mode is set, use the series-based gap-filling logic
+            // instead of the normal variant update loop.
+            if let Some(ref keep) = keep_mode {
+                info!(
+                    "{}: keep='{}' mode active, filling missing variant entries",
+                    attr_path, keep
+                );
+                match super::fill_keep_variants(&file, &attr_path, keep, update_config).await {
+                    Ok(added) => {
+                        info!(
+                            "{}: keep='{}' fill complete, {} variant(s) added",
+                            attr_path, keep, added
+                        );
+                    },
+                    Err(e) => {
+                        warn!("{}: keep='{}' fill failed: {}", attr_path, keep, e);
+                    },
+                }
+                return Ok(());
+            }
 
             // Determine which variants to update
             let variants_to_update = if let Some(ref specific_variant) = variant_config.variant {

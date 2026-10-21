@@ -160,28 +160,48 @@ pub async fn fetch_github_tags(
     repo: &str,
     token: Option<&str>,
 ) -> anyhow::Result<Vec<GithubTag>> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/tags");
-
-    debug!("Fetching tags from {}", url);
-
     let client = Client::new();
-    let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+    let mut all_tags = Vec::new();
+    let mut page = 1u32;
+    let per_page = 100;
+    // Cap at 10 pages (1000 tags) to avoid runaway pagination
+    let max_pages = 10;
 
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "GitHub tags API request failed with status: {}",
-            response.status()
+    loop {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/tags?per_page={per_page}&page={page}"
         );
+
+        debug!("Fetching tags from {} (page {})", url, page);
+
+        let response = github_request_builder(&client, reqwest::Method::GET, &url, token)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "GitHub tags API request failed with status: {}",
+                response.status()
+            );
+        }
+
+        let tags: Vec<GithubTag> = response
+            .json()
+            .await
+            .with_context(|| format!("decode JSON from {url}"))?;
+
+        let count = tags.len();
+        all_tags.extend(tags);
+
+        if count < per_page || page >= max_pages {
+            break;
+        }
+        page += 1;
     }
 
-    let tags: Vec<GithubTag> = response
-        .json()
-        .await
-        .with_context(|| format!("decode JSON from {url}"))?;
-    Ok(tags)
+    debug!("Fetched {} total tags for {}/{}", all_tags.len(), owner, repo);
+    Ok(all_tags)
 }
 
 /// Fetch all releases from GitHub API

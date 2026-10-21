@@ -31,6 +31,9 @@ pub struct PackageMetadata {
     pub platform_hashes: Option<Vec<String>>,
     /// Explicit GitHub repo override (from passthru.ekapkgs-update.github-repo, e.g. "owner/repo")
     pub github_repo: Option<String>,
+    /// Keep mode: retain every patch/minor/major version as its own variant entry
+    /// (from passthru.ekapkgs-update.keep, e.g. "patch", "minor", "major")
+    pub keep: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -185,6 +188,18 @@ impl PackageMetadata {
                 }
             });
 
+        // Query passthru.ekapkgs-update.keep attribute (e.g. "patch", "minor", "major")
+        let keep = package
+            .get_attr("passthru.ekapkgs-update.keep or null")
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim().trim_matches('"');
+                match trimmed {
+                    "patch" | "minor" | "major" => Some(trimmed.to_owned()),
+                    _ => None,
+                }
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -204,6 +219,7 @@ impl PackageMetadata {
             version_regex,
             platform_hashes,
             github_repo,
+            keep,
         })
     }
 }
@@ -236,6 +252,7 @@ mod tests {
             version_regex: None,
             platform_hashes: None,
             github_repo: None,
+            keep: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -259,6 +276,7 @@ mod tests {
             version_regex: None,
             platform_hashes: None,
             github_repo: None,
+            keep: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -282,6 +300,7 @@ mod tests {
             version_regex: None,
             platform_hashes: None,
             github_repo: None,
+            keep: None,
         };
 
         assert_eq!(metadata_none.skip, None);
@@ -310,6 +329,7 @@ mod tests {
             version_regex: Some("v(.*)".to_string()),
             platform_hashes: None,
             github_repo: None,
+            keep: None,
         };
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));

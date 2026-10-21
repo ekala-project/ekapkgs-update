@@ -197,6 +197,7 @@ mod tests {
             version_regex: None,
             platform_hashes: None,
             github_repo: None,
+            keep: None,
         };
 
         match ecosystem_type {
