@@ -192,6 +192,23 @@ pub fn infer_variant_component_count(variants: &[String]) -> Option<usize> {
     }
 }
 
+/// Convert a keep-mode string to the number of version components each
+/// variant entry should have.
+///
+/// - `"patch"` → 3 (e.g., `v1_26_8`)
+/// - `"minor"` → 2 (e.g., `v1_26`)
+/// - `"major"` → 1 (e.g., `v1`)
+///
+/// Returns `None` for unrecognised values.
+pub fn keep_component_count(keep: &str) -> Option<usize> {
+    match keep {
+        "patch" => Some(3),
+        "minor" => Some(2),
+        "major" => Some(1),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +407,14 @@ mod tests {
             infer_strategy_from_attr_path("llvmPackages_19.libllvm"),
             None
         );
+    }
+
+    #[test]
+    fn test_keep_component_count() {
+        assert_eq!(keep_component_count("patch"), Some(3));
+        assert_eq!(keep_component_count("minor"), Some(2));
+        assert_eq!(keep_component_count("major"), Some(1));
+        assert_eq!(keep_component_count("invalid"), None);
+        assert_eq!(keep_component_count(""), None);
     }
 }

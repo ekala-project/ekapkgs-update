@@ -40,7 +40,8 @@ pub(super) use hash_workflows::{
 pub(super) use script::run_update_script;
 use tracing::info;
 pub(super) use variants::{
-    add_new_variant, discover_new_variants, get_default_variant, update_single_variant,
+    add_new_variant, discover_new_variants, fill_keep_variants, get_default_variant,
+    update_single_variant,
 };
 
 use crate::package::PackageMetadata;

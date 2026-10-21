@@ -259,6 +259,147 @@ pub fn add_variant_entry(
     Ok(result)
 }
 
+/// Clone an existing variant entry with a new name and version
+///
+/// Extracts the full text of `source_variant` from the file, replaces the variant
+/// name and version string, and sets the hash to a placeholder. All other fields
+/// (like `cargoHash`, `bootstrapGo`, etc.) are preserved from the source.
+///
+/// This is used by the `keep` mode to add new patch versions that inherit the
+/// template of the previous entry in their series.
+pub fn clone_variant_entry(
+    content: &str,
+    source_variant: &str,
+    new_variant: &str,
+    new_version: &str,
+    hash_attr: &str,
+) -> Result<String> {
+    // Validate input
+    let parse = rnix::Root::parse(content);
+    if !parse.errors().is_empty() {
+        let errors: Vec<String> = parse
+            .errors()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        return Err(RewriteError::Parse(errors.join(", ")));
+    }
+
+    // Check that the new variant doesn't already exist
+    let check_pattern = format!(r"(?m)^\s*{}\s*=", regex::escape(new_variant));
+    let check_re = Regex::new(&check_pattern)?;
+    if check_re.is_match(content) {
+        return Err(RewriteError::Structural(format!(
+            "Variant '{new_variant}' already exists"
+        )));
+    }
+
+    // Find the full text of the source variant (including "name = { ... };")
+    let source_pattern = format!(
+        r"(?m)^(\s*){}\s*=\s*(?:rec\s+)?\{{",
+        regex::escape(source_variant)
+    );
+    let source_re = Regex::new(&source_pattern)?;
+    let source_match = source_re
+        .find(content)
+        .ok_or_else(|| RewriteError::variant_not_found(source_variant))?;
+
+    // Find the range of the attrset body (braces)
+    let brace_start = content[..source_match.end()]
+        .rfind('{')
+        .ok_or_else(|| {
+            RewriteError::Structural(format!(
+                "Failed to find opening brace for variant '{source_variant}'"
+            ))
+        })?;
+    let brace_end = find_matching_brace(content, brace_start)?;
+
+    // Find the semicolon after the closing brace
+    let semi_end = content[brace_end + 1..]
+        .find(';')
+        .map(|i| brace_end + 1 + i + 1)
+        .unwrap_or(brace_end + 1);
+
+    // Extract the full source entry text from line start to semicolon
+    let line_start = content[..source_match.start()]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let source_text = &content[line_start..semi_end];
+
+    // Clone the text, replacing the variant name
+    let mut cloned = source_text.replacen(source_variant, new_variant, 1);
+
+    // Replace the version value — find `version = "..." ;` or `version = <expr> ;`
+    // First try quoted string version
+    let version_str_re = Regex::new(r#"version\s*=\s*"[^"]*""#)?;
+    if let Some(m) = version_str_re.find(&cloned) {
+        let replacement = format!("version = \"{new_version}\"");
+        cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+    } else {
+        // Try expression-style version (e.g., `version = rubyVersion "4" "0" "6" "";`)
+        let version_expr_re = Regex::new(r"version\s*=\s*[^;]+")?;
+        if let Some(m) = version_expr_re.find(&cloned) {
+            // Parse the new version into components and try to rebuild the expression
+            let parts: Vec<&str> = new_version.split('.').collect();
+            let source_body = &source_text[source_text.find("version").unwrap_or(0)..];
+            if source_body.contains("rubyVersion") && parts.len() >= 3 {
+                let suffix = if parts.len() > 3 { parts[3] } else { "" };
+                let replacement = format!(
+                    "version = rubyVersion \"{}\" \"{}\" \"{}\" \"{}\"",
+                    parts[0], parts[1], parts[2], suffix
+                );
+                cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+            } else {
+                let replacement = format!("version = \"{new_version}\"");
+                cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+            }
+        }
+    }
+
+    // Replace the hash value with a placeholder
+    let placeholder = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let hash_re = Regex::new(&format!(
+        r#"{}(\s*=\s*)"[^"]*""#,
+        regex::escape(hash_attr)
+    ))?;
+    if let Some(m) = hash_re.find(&cloned) {
+        let eq_part = hash_re.captures(&cloned).and_then(|c| c.get(1)).map(|m| m.as_str()).unwrap_or(" = ");
+        let replacement = format!("{hash_attr}{eq_part}\"{placeholder}\"");
+        cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+    }
+
+    // Find the insertion point (before the final closing brace)
+    let insert_pos = content
+        .rfind('}')
+        .ok_or_else(|| RewriteError::Structural("No closing brace found in content".to_owned()))?;
+
+    // Ensure there's a newline before the new entry
+    let prefix = if !content[..insert_pos].ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+
+    // Build the result
+    let mut result = String::with_capacity(content.len() + cloned.len() + 2);
+    result.push_str(&content[..insert_pos]);
+    result.push_str(prefix);
+    result.push_str(&cloned);
+    result.push('\n');
+    result.push_str(&content[insert_pos..]);
+
+    // Validate the result
+    let result_parse = rnix::Root::parse(&result);
+    if !result_parse.errors().is_empty() {
+        return Err(RewriteError::InvalidResult {
+            operation: "CloneVariant",
+        });
+    }
+
+    Ok(result)
+}
+
 /// Detect the indentation used for variant blocks in a variants.nix file
 ///
 /// Looks for lines matching `<whitespace><identifier> = {` and returns the

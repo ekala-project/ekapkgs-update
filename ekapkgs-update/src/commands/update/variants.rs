@@ -11,8 +11,8 @@ use crate::nix::{
 use crate::package::PackageMetadata;
 use crate::rewrite::{add_variant_entry, update_variant_attr};
 use crate::variant_strategy::{
-    extract_version_prefix, infer_variant_component_count, variant_name_from_series_key,
-    version_series_key,
+    extract_version_prefix, infer_variant_component_count, keep_component_count,
+    parse_variant_components, variant_name_from_series_key, version_series_key,
 };
 use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
 
@@ -668,6 +668,407 @@ pub async fn add_new_variant(
     }
 
     Ok(())
+}
+
+/// Add a new variant by cloning an existing variant entry from the same series.
+///
+/// This preserves all fields from the source entry (like `cargoHash`, `bootstrapGo`,
+/// helper function calls, etc.) and only replaces the version and source hash.
+async fn add_cloned_variant(
+    file: &str,
+    attr_path: &str,
+    source_variant: &str,
+    new_variant: &str,
+    new_version: &str,
+    update_config: super::UpdateConfig,
+) -> anyhow::Result<()> {
+    let variants_file_path = find_variants_file(file, attr_path).await?;
+    let content = tokio::fs::read_to_string(&variants_file_path)
+        .await
+        .with_context(|| format!("read variants file {variants_file_path}"))?;
+
+    let hash_attr = detect_hash_attr_name(&content);
+    let placeholder_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    // Clone the source variant entry with the new name and version
+    let content_with_variant = crate::rewrite::clone_variant_entry(
+        &content,
+        source_variant,
+        new_variant,
+        new_version,
+        hash_attr,
+    )?;
+
+    // Discover the correct hash
+    let variant_attr_path = format!("{attr_path}.variants.{new_variant}");
+    let new_hash =
+        discover_hash_for_variant(file, attr_path, new_variant, &content_with_variant).await?;
+
+    // Update the placeholder hash with the correct one
+    let final_content = if let Some(ref hash) = new_hash {
+        info!("Discovered hash for variant '{}': {}", new_variant, hash);
+        crate::rewrite::update_variant_attr(
+            &content_with_variant,
+            new_variant,
+            hash_attr,
+            hash,
+            Some(placeholder_hash),
+        )?
+    } else {
+        content_with_variant
+    };
+
+    tokio::fs::write(&variants_file_path, &final_content)
+        .await
+        .with_context(|| format!("write variants file {variants_file_path}"))?;
+
+    // Build to verify
+    info!("Building new variant '{}' to verify...", new_variant);
+    let (success, _stdout, stderr) = super::build_nix_expr(file, &variant_attr_path, None).await?;
+
+    if !success {
+        // Restore original content on failure
+        tokio::fs::write(&variants_file_path, &content).await?;
+        anyhow::bail!("Build failed for cloned variant '{new_variant}': {stderr}");
+    }
+
+    info!("Build successful for new variant '{}'", new_variant);
+
+    if update_config.commit {
+        commit_new_variant(&variants_file_path, attr_path, new_variant, new_version).await?;
+    }
+
+    Ok(())
+}
+
+/// Fill in missing variant entries for a package with `keep` mode.
+///
+/// When `keep = "patch"` (or `"minor"` / `"major"`), each individual version
+/// at that granularity gets its own entry in `variants.nix`. This function:
+///
+/// 1. Groups existing keep-level variants by their series prefix.
+/// 2. For each series, finds upstream versions newer than the latest existing
+///    entry and adds them via [`add_new_variant`].
+/// 3. Discovers entirely new series that don't have any variant yet.
+///
+/// Returns the number of new variant entries that were successfully added.
+pub async fn fill_keep_variants(
+    file: &str,
+    attr_path: &str,
+    keep: &str,
+    update_config: super::UpdateConfig,
+) -> anyhow::Result<usize> {
+    let keep_components = keep_component_count(keep).ok_or_else(|| {
+        anyhow::anyhow!("Invalid keep value '{keep}': expected \"patch\", \"minor\", or \"major\"")
+    })?;
+
+    // Get all variants exposed by the Nix expression (includes aliases)
+    let all_variants = get_variants_list(file, attr_path).await?;
+    debug!(
+        "{}: All variants ({}): {:?}",
+        attr_path,
+        all_variants.len(),
+        all_variants
+    );
+
+    // Keep only variants whose component count exactly matches the keep level.
+    // This filters out mkManyVariants aliases (e.g. `v1_26` when keep=patch
+    // expects `v1_26_8`-style names).
+    let keep_variants: Vec<&String> = all_variants
+        .iter()
+        .filter(|v| {
+            parse_variant_components(v)
+                .is_some_and(|c| c.len() == keep_components)
+        })
+        .collect();
+
+    debug!(
+        "{}: Keep-level variants ({} components, {} found): {:?}",
+        attr_path,
+        keep_components,
+        keep_variants.len(),
+        keep_variants
+    );
+
+    // The series prefix uses one fewer component (e.g. for keep=patch/3
+    // components, the series key has 2 components: "1.26").
+    let series_components = keep_components.saturating_sub(1);
+
+    // Group existing keep-level variants by series prefix, collecting all
+    // known versions per series and tracking the variant name of the latest
+    // version (used as reference for `add_new_variant`).
+    let mut series_versions: HashMap<String, Vec<String>> = HashMap::new();
+    for variant_name in &keep_variants {
+        let Some(version_prefix) = extract_version_prefix(variant_name) else {
+            continue;
+        };
+        // version_prefix is e.g. "1.26.8" for variant "v1_26_8"
+        let series_key = if series_components == 0 {
+            // keep=major → every version is its own series
+            String::new()
+        } else {
+            match version_series_key(&version_prefix, series_components) {
+                Some(k) => k,
+                None => continue,
+            }
+        };
+        series_versions
+            .entry(series_key)
+            .or_default()
+            .push(version_prefix);
+    }
+
+    // Sort versions within each series so we can find the latest
+    for versions in series_versions.values_mut() {
+        versions.sort_by(|a, b| crate::vcs_sources::compare_version_components(a, b));
+    }
+
+    debug!(
+        "{}: Series groups: {:?}",
+        attr_path,
+        series_versions
+            .iter()
+            .map(|(k, v)| format!("{k}: [{}]", v.join(", ")))
+            .collect::<Vec<_>>()
+    );
+
+    // Find upstream source from a reference variant
+    let reference_variant: &str = if let Some(v) = keep_variants.first() {
+        v
+    } else {
+        // Fall back to any parseable variant from the full list
+        all_variants
+            .iter()
+            .find(|v| extract_version_prefix(v).is_some())
+            .ok_or_else(|| anyhow::anyhow!("No parseable variant found for {attr_path}"))?
+    };
+
+    let ref_attr_path = format!("{attr_path}.variants.{reference_variant}");
+    let ref_metadata = PackageMetadata::from_attr_path(file, &ref_attr_path).await?;
+
+    let upstream_source = if let Some(ref gh_repo) = ref_metadata.github_repo {
+        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            UpstreamSource::GitHub {
+                owner: parts[0].to_owned(),
+                repo: parts[1].to_owned(),
+            }
+        } else {
+            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
+        }
+    } else {
+        let src_url = ref_metadata.src_url.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No src_url or github-repo found for variant '{reference_variant}'"
+            )
+        })?;
+        UpstreamSource::from_url(src_url)
+            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
+    };
+
+    let include_prereleases = ref_metadata.include_prereleases.unwrap_or(false);
+
+    // Fetch all upstream releases
+    let all_releases = upstream_source.fetch_all_releases().await?;
+    info!(
+        "{}: Fetched {} upstream releases for keep='{}' fill",
+        attr_path,
+        all_releases.len(),
+        keep
+    );
+
+    // Build a map: series_key -> sorted list of upstream versions
+    let mut upstream_by_series: HashMap<String, Vec<String>> = HashMap::new();
+    for release in &all_releases {
+        if release.is_prerelease && !include_prereleases {
+            continue;
+        }
+        let version = extract_version_from_tag(&release.tag_name);
+        if !include_prereleases && crate::vcs_sources::version_looks_prerelease(version) {
+            continue;
+        }
+        if !version.contains('.') {
+            continue;
+        }
+        // Verify the version has enough components for our keep level
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() < keep_components {
+            continue;
+        }
+
+        let series_key = if series_components == 0 {
+            String::new()
+        } else {
+            match version_series_key(version, series_components) {
+                Some(k) => k,
+                None => continue,
+            }
+        };
+
+        upstream_by_series
+            .entry(series_key)
+            .or_default()
+            .push(version.to_owned());
+    }
+
+    // Sort upstream versions within each series
+    for versions in upstream_by_series.values_mut() {
+        versions.sort_by(|a, b| crate::vcs_sources::compare_version_components(a, b));
+        versions.dedup();
+    }
+
+    // Collect all existing version strings (across all series) for quick lookup
+    let existing_versions: HashSet<String> = series_versions
+        .values()
+        .flat_map(|vs| vs.iter().cloned())
+        .collect();
+
+    // For each series, find versions newer than the latest existing, and also
+    // handle entirely new series.
+    let mut added_count = 0usize;
+
+    // Determine the highest existing series key so we can cap new-series
+    // discovery (only add series newer than the highest existing).
+    let highest_existing_series = series_versions
+        .keys()
+        .filter(|k| !k.is_empty())
+        .max_by(|a, b| crate::vcs_sources::compare_version_components(a, b))
+        .cloned();
+
+    // Collect and sort all series keys (existing + upstream) for deterministic order
+    let mut all_series_keys: Vec<String> = upstream_by_series.keys().cloned().collect();
+    all_series_keys.sort_by(|a, b| crate::vcs_sources::compare_version_components(a, b));
+
+    for series_key in &all_series_keys {
+        let Some(upstream_versions) = upstream_by_series.get(series_key) else {
+            continue;
+        };
+
+        let is_new_series = !series_versions.contains_key(series_key);
+
+        if is_new_series {
+            // Only add series newer than the highest existing
+            if let Some(ref highest) = highest_existing_series {
+                if !series_key.is_empty()
+                    && crate::vcs_sources::compare_version_components(series_key, highest)
+                        != std::cmp::Ordering::Greater
+                {
+                    continue;
+                }
+            }
+        }
+
+        // Find the latest existing version in this series (if any)
+        let latest_existing = series_versions
+            .get(series_key)
+            .and_then(|vs| vs.last().cloned());
+
+        // Find upstream versions that are newer than the latest existing
+        let missing: Vec<&String> = upstream_versions
+            .iter()
+            .filter(|v| {
+                if existing_versions.contains(v.as_str()) {
+                    return false;
+                }
+                if let Some(ref latest) = latest_existing {
+                    crate::vcs_sources::compare_version_components(v, latest)
+                        == std::cmp::Ordering::Greater
+                } else {
+                    // New series: take only the latest version
+                    false
+                }
+            })
+            .collect();
+
+        // For entirely new series, add only the latest upstream version
+        let versions_to_add: Vec<String> = if is_new_series {
+            upstream_versions
+                .last()
+                .map(|v| vec![v.clone()])
+                .unwrap_or_default()
+        } else {
+            missing.into_iter().cloned().collect()
+        };
+
+        // Determine the source variant to clone from (latest existing in this series)
+        let source_variant_name = latest_existing.as_ref().map(|v| {
+            let name = format!("v{}", v.replace('.', "_"));
+            let parts: Vec<&str> = name
+                .strip_prefix('v')
+                .unwrap_or(&name)
+                .split('_')
+                .collect();
+            if parts.len() > keep_components {
+                format!("v{}", parts[..keep_components].join("_"))
+            } else {
+                name
+            }
+        });
+
+        for version in &versions_to_add {
+            // Build the variant name from the version: "1.26.9" → "v1_26_9"
+            let variant_name = format!("v{}", version.replace('.', "_"));
+
+            // Truncate to keep_components if the version has more components
+            let name_parts: Vec<&str> = variant_name
+                .strip_prefix('v')
+                .unwrap_or(&variant_name)
+                .split('_')
+                .collect();
+            let variant_name = if name_parts.len() > keep_components {
+                format!("v{}", name_parts[..keep_components].join("_"))
+            } else {
+                variant_name
+            };
+
+            info!(
+                "{}: Adding keep variant '{}' (version {})",
+                attr_path, variant_name, version
+            );
+
+            let result = if let Some(ref source) = source_variant_name {
+                // Clone from the last entry in the series (preserves all fields)
+                add_cloned_variant(
+                    file,
+                    attr_path,
+                    source,
+                    &variant_name,
+                    version,
+                    update_config.clone(),
+                )
+                .await
+            } else {
+                // New series with no existing entry to clone from — use generic template
+                add_new_variant(
+                    file,
+                    attr_path,
+                    &variant_name,
+                    version,
+                    update_config.clone(),
+                )
+                .await
+            };
+
+            match result {
+                Ok(()) => {
+                    info!("Successfully added keep variant '{}'", variant_name);
+                    added_count += 1;
+                    // Update source for next iteration so we clone from the just-added entry
+                    // (not strictly necessary since all entries in a series share the same template)
+                },
+                Err(e) => {
+                    warn!("Failed to add keep variant '{}': {}", variant_name, e);
+                },
+            }
+        }
+    }
+
+    info!(
+        "{}: keep='{}' fill complete, added {} new variant(s)",
+        attr_path, keep, added_count
+    );
+
+    Ok(added_count)
 }
 
 /// Create a git commit for a newly added variant
