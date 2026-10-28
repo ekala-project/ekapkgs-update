@@ -655,3 +655,61 @@ fn test_compare_version_components() {
         Ordering::Greater
     );
 }
+
+#[test]
+fn test_script_source_properties() {
+    let source = UpstreamSource::Script {
+        script_path: "/nix/store/abc-list-versions".to_owned(),
+    };
+    assert_eq!(source.source_type(), "script");
+    assert_eq!(source.source_key(), "/nix/store/abc-list-versions");
+    assert_eq!(
+        source.description(),
+        "Custom script: /nix/store/abc-list-versions"
+    );
+    assert!(source.instance().is_none());
+    assert!(source.feed_url().is_none());
+}
+
+#[tokio::test]
+async fn test_fetch_script_releases() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Create a temporary script that outputs versions
+    let mut script = NamedTempFile::new().unwrap();
+    writeln!(
+        script,
+        "#!/bin/sh\nprintf '3.28.1\\n3.29.0\\n3.29.1\\n3.30.0-rc1\\n'"
+    )
+    .unwrap();
+
+    // Make it executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(script.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Close the file handle (avoids ETXTBSY) while keeping the path alive
+    let script_path = script.into_temp_path();
+    let path_str = script_path.to_str().unwrap().to_owned();
+
+    let source = UpstreamSource::Script {
+        script_path: path_str,
+    };
+
+    let releases = source.fetch_all_releases().await.unwrap();
+    assert_eq!(releases.len(), 4);
+    assert_eq!(releases[0].tag_name, "3.28.1");
+    assert_eq!(releases[1].tag_name, "3.29.0");
+    assert_eq!(releases[2].tag_name, "3.29.1");
+    assert_eq!(releases[3].tag_name, "3.30.0-rc1");
+
+    // Non-prerelease versions
+    assert!(!releases[0].is_prerelease);
+    assert!(!releases[1].is_prerelease);
+    assert!(!releases[2].is_prerelease);
+    // rc1 should be detected as prerelease
+    assert!(releases[3].is_prerelease);
+}

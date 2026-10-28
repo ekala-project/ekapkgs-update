@@ -14,6 +14,8 @@
   - [Semver Strategy](./passthru-attributes/semver-strategy.md)
   - [Include Prereleases](./passthru-attributes/include-prereleases.md)
   - [Version Regex](./passthru-attributes/version-regex.md)
+  - [Keep](./passthru-attributes/keep.md)
+  - [Update Script](./passthru-attributes/update-script.md)
 
 # Reference
 

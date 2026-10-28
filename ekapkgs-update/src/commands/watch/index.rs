@@ -1,5 +1,5 @@
 //! Upstream index builder: scans all packages via `nix-eval-jobs`, determines
-//! each package's [`UpstreamSource`], and stores the mapping in the
+//! each package's upstream source, and stores the mapping in the
 //! `upstream_index` database table.
 
 use std::sync::Arc;
@@ -12,7 +12,6 @@ use crate::database::Database;
 use crate::nix;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
-use crate::vcs_sources::UpstreamSource;
 
 /// Result statistics from an index build run.
 #[derive(Debug)]
@@ -110,36 +109,13 @@ async fn index_single_package(
         return Ok(());
     }
 
-    // Determine upstream source (same priority as checker.rs)
-    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            debug!(
-                "{}: invalid github-repo '{}': expected 'owner/repo'",
-                attr_path, gh_repo
-            );
+    // Determine upstream source
+    let upstream_source = match metadata.resolve_upstream_source() {
+        Ok(source) => source,
+        Err(e) => {
+            debug!("{}: {}", attr_path, e);
             return Ok(());
-        }
-    } else if let Some(ref src_url) = metadata.src_url {
-        match UpstreamSource::from_url(src_url) {
-            Some(source) => source,
-            None => {
-                debug!("{}: could not parse upstream source from URL", attr_path);
-                return Ok(());
-            },
-        }
-    } else if let Some(ref pname) = metadata.pname {
-        UpstreamSource::PyPI {
-            pname: pname.clone(),
-        }
-    } else {
-        debug!("{}: no source URL or pname found", attr_path);
-        return Ok(());
+        },
     };
 
     db.upsert_upstream_index(

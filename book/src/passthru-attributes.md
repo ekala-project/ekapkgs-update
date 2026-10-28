@@ -18,6 +18,9 @@ All update preferences are specified under the `passthru.ekapkgs-update` attribu
     semver-strategy = "minor";       # Only accept minor version updates
     include-prereleases = false;     # Exclude beta/RC versions (default)
     version-regex = "v(.*)";         # Custom tag version extraction
+    github-repo = "owner/repo";     # Explicit upstream repo (when URL isn't auto-detected)
+    keep = "patch";                  # Retain each patch version as its own entry (mkManyVariants)
+    update-script = ./list-versions.sh;  # Custom script that lists upstream versions
   };
 }
 ```
@@ -43,6 +46,9 @@ passthru.ekapkgs-update = {
 | `semver-strategy` | string | `"latest"` | Version constraint strategy |
 | `include-prereleases` | boolean | `false` | Accept prerelease versions |
 | `version-regex` | string | `null` | Custom regex for tag extraction |
+| `github-repo` | string | `null` | Explicit GitHub repo (`"owner/repo"`) |
+| `keep` | string | `null` | Version retention level for mkManyVariants (`"patch"`, `"minor"`, `"major"`) |
+| `update-script` | derivation | `null` | Script that lists available versions (one per line to stdout) |
 
 ## Quick Examples
 
@@ -70,6 +76,15 @@ passthru.ekapkgs-update.version-regex = "jq-(.*)";
 # Extracts "1.6" from tag "jq-1.6"
 ```
 
+### Custom Version Source
+
+```nix
+passthru.ekapkgs-update.update-script = writeScript "list-releases" ''
+  curl -s https://cmake.org/files/ | pcregrep -o1 'v([0-9.]+)/' | sort -uV
+'';
+# Lists available versions; ekapkgs-update handles the rest
+```
+
 ### Pinned Package
 
 ```nix
@@ -85,6 +100,8 @@ Each attribute has its own detailed documentation:
 - [Semver Strategy](./passthru-attributes/semver-strategy.md) - Control version constraints
 - [Include Prereleases](./passthru-attributes/include-prereleases.md) - Track beta/RC versions
 - [Version Regex](./passthru-attributes/version-regex.md) - Handle custom tag formats
+- [Keep](./passthru-attributes/keep.md) - Retain each version as its own variant entry
+- [Update Script](./passthru-attributes/update-script.md) - Custom version-listing for non-standard hosts
 
 ## Precedence and Overrides
 
@@ -133,6 +150,9 @@ This feature is defined in [EEP-0039](https://github.com/ekala-project/eeps/blob
 - ✅ `semver-strategy` - Fully implemented
 - ✅ `include-prereleases` - Fully implemented
 - ✅ `version-regex` - Fully implemented
+- ✅ `github-repo` - Fully implemented
+- ✅ `keep` - Fully implemented
+- ✅ `update-script` - Fully implemented
 
 **Future Work:**
 - 📋 `follow-branch` - Track specific Git branches (deferred)

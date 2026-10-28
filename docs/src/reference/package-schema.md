@@ -57,14 +57,8 @@ A fully-featured package with all optional attributes:
       # Update control
       ekapkgs-update = {
         skip = false;
-        semver = "latest";  # or "major", "minor", "patch"
+        semver-strategy = "latest";  # or "major", "minor", "patch"
       };
-
-      # Custom update script
-      updateScript = writeShellScript "update.sh" ''
-        #!/usr/bin/env bash
-        # Custom update logic
-      '';
     };
   };
 }
@@ -156,15 +150,41 @@ passthru.ekapkgs-update = {
   skip = false;  # or true to skip
 
   # Version selection strategy
-  semver = "latest";  # "major", "minor", "patch", or "latest"
+  semver-strategy = "latest";  # "major", "minor", "patch", or "latest"
+
+  # Include prerelease versions
+  include-prereleases = false;
+
+  # Custom regex for extracting version from tags
+  version-regex = "^go(.+)$";  # e.g., extract "1.27.3" from "go1.27.3"
+
+  # Explicit GitHub repo (when source URL isn't auto-detected)
+  github-repo = "owner/repo";
+
+  # Custom script that lists available upstream versions (one per line)
+  # Takes priority over github-repo and src.url auto-detection.
+  # The script must only print versions to stdout — it must NOT modify files.
+  update-script = writeScript "list-releases" ''
+    ${curl}/bin/curl -s https://cmake.org/files/ \
+      | ${pcregrep}/bin/pcregrep -o1 'v([0-9]+\.[0-9]+\.[0-9]+)/' \
+      | sort -u
+  '';
+
+  # Version retention for mkManyVariants packages
+  # "patch" = one entry per patch version (v1_26_8, v1_26_9, ...)
+  # "minor" = one entry per minor version (v1_26, v1_27, ...)
+  # "major" = one entry per major version (v1, v2, ...)
+  keep = "patch";
 };
 ```
 
-### `passthru.updateScript`
+### `passthru.updateScript` (legacy)
 - **Type**: Derivation (script)
-- **Description**: Custom update script
+- **Description**: Full-control custom update script (nixpkgs-compatible)
 
-If present and `--ignore-update-script` is not used, this script will be executed instead of the generic update method.
+If present and `--ignore-update-script` is not used, this script will be executed **instead of** the generic update method. The script is responsible for everything: fetching versions, rewriting files, and updating hashes. ekapkgs-update has no visibility into what it does.
+
+**Prefer `passthru.ekapkgs-update.update-script` instead** — it only lists versions (one per line to stdout) and lets ekapkgs-update handle file rewriting, hash updates, patch recovery, commit creation, and PR enhancements.
 
 ```nix
 passthru.updateScript = writeShellScript "update-${pname}.sh" ''
@@ -325,6 +345,20 @@ Update all variants:
 ```bash
 ekapkgs-update update python3 --all-variants
 ```
+
+### Version Retention (`keep`)
+
+For packages that retain every patch version (e.g., Go, Ruby), use `keep = "patch"` in the passthru:
+
+```nix
+passthru.ekapkgs-update = {
+  github-repo = "golang/go";
+  version-regex = "^go(.+)$";
+  keep = "patch";
+};
+```
+
+This tells ekapkgs-update to **add** new entries (`v1_26_9`, `v1_26_10`) rather than updating existing ones in-place. New entries are created by cloning the template from the last entry in the series, preserving all fields.
 
 ## Metadata
 

@@ -14,7 +14,7 @@ use crate::variant_strategy::{
     extract_version_prefix, infer_variant_component_count, keep_component_count,
     parse_variant_components, variant_name_from_series_key, version_series_key,
 };
-use crate::vcs_sources::{SemverStrategy, UpstreamSource, extract_version_from_tag};
+use crate::vcs_sources::{SemverStrategy, extract_version_from_tag};
 
 /// Hash attribute names to try, in order of preference.
 const HASH_ATTR_CANDIDATES: &[&str] = &["src-hash", "hash", "sha256"];
@@ -97,23 +97,7 @@ pub async fn update_single_variant(
         variant_name, metadata.version
     );
 
-    // Find the upstream source (explicit github-repo > src.url > error)
-    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
-        }
-    } else if let Some(ref src_url) = metadata.src_url {
-        UpstreamSource::from_url(src_url)
-            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
-    } else {
-        anyhow::bail!("No src_url or github-repo found for variant '{variant_name}'");
-    };
+    let upstream_source = metadata.resolve_upstream_source()?;
 
     info!("Upstream source: {:?}", upstream_source);
 
@@ -383,23 +367,7 @@ pub async fn discover_new_variants(
     let variant_attr_path = format!("{attr_path}.variants.{reference_variant}");
     let metadata = PackageMetadata::from_attr_path(file, &variant_attr_path).await?;
 
-    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
-        }
-    } else {
-        let src_url = metadata.src_url.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("No src_url or github-repo found for variant '{reference_variant}'")
-        })?;
-        UpstreamSource::from_url(src_url)
-            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
-    };
+    let upstream_source = metadata.resolve_upstream_source()?;
 
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
 
@@ -846,25 +814,7 @@ pub async fn fill_keep_variants(
     let ref_attr_path = format!("{attr_path}.variants.{reference_variant}");
     let ref_metadata = PackageMetadata::from_attr_path(file, &ref_attr_path).await?;
 
-    let upstream_source = if let Some(ref gh_repo) = ref_metadata.github_repo {
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            anyhow::bail!("Invalid github-repo format '{gh_repo}': expected 'owner/repo'");
-        }
-    } else {
-        let src_url = ref_metadata.src_url.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "No src_url or github-repo found for variant '{reference_variant}'"
-            )
-        })?;
-        UpstreamSource::from_url(src_url)
-            .ok_or_else(|| anyhow::anyhow!("Could not parse upstream source from URL: {src_url}"))?
-    };
+    let upstream_source = ref_metadata.resolve_upstream_source()?;
 
     let include_prereleases = ref_metadata.include_prereleases.unwrap_or(false);
 

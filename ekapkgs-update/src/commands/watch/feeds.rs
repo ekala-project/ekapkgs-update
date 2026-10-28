@@ -157,6 +157,9 @@ pub fn upstream_source_from_index(
                 pname: pname.to_owned(),
             })
         },
+        "script" => Some(UpstreamSource::Script {
+            script_path: upstream_key.to_owned(),
+        }),
         other => {
             warn!("Unknown upstream type in index: {}", other);
             None
