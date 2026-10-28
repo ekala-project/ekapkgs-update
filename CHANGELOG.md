@@ -38,6 +38,10 @@
 - `--all-variants` updates every variant and discovers new upstream version series
 - New variants automatically added to `variants.nix` when upstream releases a new series
 - Platform-hash aware — handles both single-hash and multi-platform-hash variants
+- `passthru.ekapkgs-update.keep` — version retention mode for packages that preserve every patch/minor/major version as its own entry (e.g., Go, Ruby). New entries are cloned from the last entry in the series, preserving all fields
+- `passthru.ekapkgs-update.github-repo` — explicit upstream repo override for packages whose source URLs aren't auto-detected (e.g., `go.dev`, `cache.ruby-lang.org`)
+- `passthru.ekapkgs-update.update-script` — custom version-listing script for packages hosted outside supported platforms. The script prints available versions (one per line) and ekapkgs-update handles semver filtering, hash updates, and commit creation
+- GitHub tags fallback — when the releases API returns empty, automatically falls back to paginated tags API
 - 3+ component variants treated as pinned (no auto-update)
 - Default Minor strategy in batch mode keeps variants within their major series
 - Tries `src-hash`, `hash`, and `sha256` attribute names for hash discovery/update

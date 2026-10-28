@@ -7,7 +7,8 @@ use std::{env, fmt};
 use anyhow::Context;
 use regex::Regex;
 use semver::Version;
-use tracing::{debug, trace, warn};
+use tokio::process::Command;
+use tracing::{debug, info, trace, warn};
 
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
@@ -171,6 +172,12 @@ pub enum UpstreamSource {
     DirectoryListing {
         base_url: String,
         pname: String,
+    },
+    /// Custom script that outputs available versions, one per line to stdout.
+    /// The `script_path` is a Nix store path obtained from
+    /// `passthru.ekapkgs-update.update-script`.
+    Script {
+        script_path: String,
     },
 }
 
@@ -449,6 +456,9 @@ impl UpstreamSource {
             UpstreamSource::DirectoryListing { base_url, pname } => {
                 fetch_directory_listing_releases(base_url, pname).await
             },
+            UpstreamSource::Script { script_path } => {
+                fetch_script_releases(script_path).await
+            },
         }
     }
 
@@ -507,6 +517,9 @@ impl UpstreamSource {
             UpstreamSource::DirectoryListing { base_url, pname } => {
                 format!("Directory listing: {pname} ({base_url})")
             },
+            UpstreamSource::Script { script_path } => {
+                format!("Custom script: {script_path}")
+            },
         }
     }
 
@@ -518,6 +531,7 @@ impl UpstreamSource {
             Self::SourceHut { .. } => "sourcehut",
             Self::PyPI { .. } => "pypi",
             Self::DirectoryListing { .. } => "directory",
+            Self::Script { .. } => "script",
         }
     }
 
@@ -535,6 +549,7 @@ impl UpstreamSource {
             Self::SourceHut { owner, repo } => format!("~{owner}/{repo}"),
             Self::PyPI { pname } => pname.clone(),
             Self::DirectoryListing { base_url, .. } => base_url.clone(),
+            Self::Script { script_path } => script_path.clone(),
         }
     }
 
@@ -545,7 +560,11 @@ impl UpstreamSource {
     pub fn instance(&self) -> Option<&str> {
         match self {
             Self::GitLab { instance, .. } => Some(instance),
-            _ => None,
+            Self::GitHub { .. }
+            | Self::SourceHut { .. }
+            | Self::PyPI { .. }
+            | Self::DirectoryListing { .. }
+            | Self::Script { .. } => None,
         }
     }
 
@@ -562,7 +581,10 @@ impl UpstreamSource {
             Self::PyPI { pname } => {
                 Some(format!("https://pypi.org/rss/project/{pname}/releases.xml"))
             },
-            _ => None,
+            Self::GitLab { .. }
+            | Self::SourceHut { .. }
+            | Self::DirectoryListing { .. }
+            | Self::Script { .. } => None,
         }
     }
 }
@@ -1034,6 +1056,53 @@ pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy)
             },
         }
     }
+}
+
+/// Fetch release versions by running a custom script.
+///
+/// Executes the script at `script_path` and parses stdout as one version per
+/// line. Empty lines are skipped. The script is expected to exit 0 on success.
+///
+/// # Errors
+/// Returns an error if the script fails to execute or exits with a non-zero
+/// status code.
+async fn fetch_script_releases(script_path: &str) -> anyhow::Result<Vec<Release>> {
+    info!("Running update-script: {}", script_path);
+
+    let output = Command::new(script_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("Failed to execute update-script: {script_path}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "update-script exited with status {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let releases: Vec<Release> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|version| Release {
+            tag_name: version.to_owned(),
+            is_prerelease: version_looks_prerelease(version),
+        })
+        .collect();
+
+    debug!(
+        "update-script produced {} releases from {}",
+        releases.len(),
+        script_path
+    );
+
+    Ok(releases)
 }
 
 /// Fetch release versions from an HTTP directory listing.

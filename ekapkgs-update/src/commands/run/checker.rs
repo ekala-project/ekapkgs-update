@@ -10,7 +10,7 @@ use crate::database::Database;
 use crate::nix;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
-use crate::vcs_sources::{SemverStrategy, UpstreamSource};
+use crate::vcs_sources::SemverStrategy;
 
 /// Service that monitors packages for new upstream releases, with optional
 /// concurrency and eval-worker limits.
@@ -173,36 +173,13 @@ async fn check_for_update(
         return Ok(());
     }
 
-    // Determine upstream source (explicit github-repo > src.url > pname)
-    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            debug!(
-                "{}: Invalid github-repo format '{}': expected 'owner/repo'",
-                attr_path, gh_repo
-            );
+    // Determine upstream source
+    let upstream_source = match metadata.resolve_upstream_source() {
+        Ok(source) => source,
+        Err(e) => {
+            debug!("{}: {}", attr_path, e);
             return Ok(());
-        }
-    } else if let Some(ref src_url) = metadata.src_url {
-        match UpstreamSource::from_url(src_url) {
-            Some(source) => source,
-            None => {
-                debug!("{}: Could not parse upstream source from URL", attr_path);
-                return Ok(());
-            },
-        }
-    } else if let Some(ref pname) = metadata.pname {
-        UpstreamSource::PyPI {
-            pname: pname.clone(),
-        }
-    } else {
-        debug!("{}: No source URL or pname found", attr_path);
-        return Ok(());
+        },
     };
 
     // Use semver strategy from passthru, or infer from attr_path suffix, or default to Latest.

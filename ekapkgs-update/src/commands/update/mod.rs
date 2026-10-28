@@ -14,7 +14,6 @@ mod variants;
 
 use std::path::Path;
 
-use anyhow::Context;
 // Externally-consumed re-exports (cli.rs, commands::pr_enhancements, integration tests).
 pub use build::{
     build_and_get_outputs, cleanup_result_symlinks, get_extra_nix_build_args,
@@ -45,7 +44,6 @@ pub(super) use variants::{
 };
 
 use crate::package::PackageMetadata;
-use crate::vcs_sources::UpstreamSource;
 
 /// Update a package from a specific file path.
 /// Returns removed patches and the test result.
@@ -66,33 +64,7 @@ pub async fn update_from_file_path(
     info!("Current version: {}", metadata.version);
 
     // Step 2: Determine upstream source
-    // Priority: explicit github-repo passthru > src.url parsing > pname (PyPI)
-    let upstream_source = if let Some(ref gh_repo) = metadata.github_repo {
-        // Explicit GitHub repo from passthru.ekapkgs-update.github-repo = "owner/repo"
-        let parts: Vec<&str> = gh_repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            UpstreamSource::GitHub {
-                owner: parts[0].to_owned(),
-                repo: parts[1].to_owned(),
-            }
-        } else {
-            anyhow::bail!(
-                "Invalid github-repo format '{}': expected 'owner/repo'",
-                gh_repo
-            );
-        }
-    } else if let Some(ref src_url) = metadata.src_url {
-        UpstreamSource::from_url(src_url)
-            .context("Source is not from a supported VCS platform (GitHub, GitLab, PyPI)")?
-    } else if let Some(ref pname) = metadata.pname {
-        UpstreamSource::PyPI {
-            pname: pname.clone(),
-        }
-    } else {
-        anyhow::bail!(
-            "No source URL or pname found for package - cannot determine upstream source"
-        );
-    };
+    let upstream_source = metadata.resolve_upstream_source()?;
 
     info!("{}", upstream_source.description());
 

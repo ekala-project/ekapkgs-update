@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::debug;
 
 use crate::nix::eval_nix_expr;
-use crate::vcs_sources::SemverStrategy;
+use crate::vcs_sources::{SemverStrategy, UpstreamSource};
 
 // Data structure for package metadata
 #[derive(Debug)]
@@ -34,6 +34,9 @@ pub struct PackageMetadata {
     /// Keep mode: retain every patch/minor/major version as its own variant entry
     /// (from passthru.ekapkgs-update.keep, e.g. "patch", "minor", "major")
     pub keep: Option<String>,
+    /// Custom script that lists available upstream versions, one per line
+    /// (from passthru.ekapkgs-update.update-script, evaluated to a store path)
+    pub update_script: Option<String>,
 }
 
 pub struct PackageQuery {
@@ -200,6 +203,20 @@ impl PackageMetadata {
                 }
             });
 
+        // Query passthru.ekapkgs-update.update-script attribute (store path of a
+        // script that lists available upstream versions, one per line)
+        let update_script = package
+            .get_attr("passthru.ekapkgs-update.update-script or null")
+            .await
+            .and_then(|s| {
+                let trimmed = s.trim().trim_matches('"');
+                if trimmed.is_empty() || trimmed == "null" {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
+
         Ok(PackageMetadata {
             version,
             src_url,
@@ -220,7 +237,60 @@ impl PackageMetadata {
             platform_hashes,
             github_repo,
             keep,
+            update_script,
         })
+    }
+
+    /// Resolve the upstream source for this package.
+    ///
+    /// Priority chain (highest to lowest):
+    /// 1. `passthru.ekapkgs-update.update-script` — custom version-listing script
+    /// 2. `passthru.ekapkgs-update.github-repo` — explicit `"owner/repo"` override
+    /// 3. `src.url` parsing — auto-detect GitHub, GitLab, SourceHut, PyPI, etc.
+    /// 4. `pname` — assume PyPI package as last resort
+    pub fn resolve_upstream_source(&self) -> anyhow::Result<UpstreamSource> {
+        // 1. Explicit update-script
+        if let Some(ref script_path) = self.update_script {
+            return Ok(UpstreamSource::Script {
+                script_path: script_path.clone(),
+            });
+        }
+
+        // 2. Explicit github-repo
+        if let Some(ref gh_repo) = self.github_repo {
+            let (owner, repo) = gh_repo
+                .split_once('/')
+                .context(format!(
+                    "Invalid github-repo format '{}': expected 'owner/repo'",
+                    gh_repo
+                ))?;
+            return Ok(UpstreamSource::GitHub {
+                owner: owner.to_owned(),
+                repo: repo.to_owned(),
+            });
+        }
+
+        // 3. Auto-detect from src.url
+        if let Some(ref src_url) = self.src_url {
+            if let Some(source) = UpstreamSource::from_url(src_url) {
+                return Ok(source);
+            }
+            anyhow::bail!(
+                "Could not parse upstream source from URL: {src_url}"
+            );
+        }
+
+        // 4. Fall back to PyPI via pname
+        if let Some(ref pname) = self.pname {
+            return Ok(UpstreamSource::PyPI {
+                pname: pname.clone(),
+            });
+        }
+
+        anyhow::bail!(
+            "No source URL, pname, github-repo, or update-script found — \
+             cannot determine upstream source"
+        )
     }
 }
 
@@ -253,6 +323,7 @@ mod tests {
             platform_hashes: None,
             github_repo: None,
             keep: None,
+            update_script: None,
         };
 
         assert_eq!(metadata.skip, Some(true));
@@ -277,6 +348,7 @@ mod tests {
             platform_hashes: None,
             github_repo: None,
             keep: None,
+            update_script: None,
         };
 
         assert_eq!(metadata_false.skip, Some(false));
@@ -301,6 +373,7 @@ mod tests {
             platform_hashes: None,
             github_repo: None,
             keep: None,
+            update_script: None,
         };
 
         assert_eq!(metadata_none.skip, None);
@@ -330,10 +403,160 @@ mod tests {
             platform_hashes: None,
             github_repo: None,
             keep: None,
+            update_script: None,
         };
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));
         assert_eq!(metadata.include_prereleases, Some(true));
         assert_eq!(metadata.version_regex, Some("v(.*)".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_update_script_highest_priority() {
+        // update-script takes priority over github-repo and src_url
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: Some("https://github.com/owner/repo/archive/v1.0.0.tar.gz".to_string()),
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: Some("test-pkg".to_string()),
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: Some("owner/repo".to_string()),
+            keep: None,
+            update_script: Some("/nix/store/abc-update-script".to_string()),
+        };
+
+        let source = metadata.resolve_upstream_source().unwrap();
+        assert_eq!(source.source_type(), "script");
+        assert_eq!(source.source_key(), "/nix/store/abc-update-script");
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_github_repo() {
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: Some("https://go.dev/dl/go1.25.1.src.tar.gz".to_string()),
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: Some("go".to_string()),
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: Some("golang/go".to_string()),
+            keep: None,
+            update_script: None,
+        };
+
+        let source = metadata.resolve_upstream_source().unwrap();
+        assert_eq!(source.source_type(), "github");
+        assert_eq!(source.source_key(), "golang/go");
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_src_url() {
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: Some("https://github.com/example/repo/archive/v1.0.0.tar.gz".to_string()),
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: Some("example".to_string()),
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: None,
+            keep: None,
+            update_script: None,
+        };
+
+        let source = metadata.resolve_upstream_source().unwrap();
+        assert_eq!(source.source_type(), "github");
+        assert_eq!(source.source_key(), "example/repo");
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_pname_fallback() {
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: Some("requests".to_string()),
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: None,
+            keep: None,
+            update_script: None,
+        };
+
+        let source = metadata.resolve_upstream_source().unwrap();
+        assert_eq!(source.source_type(), "pypi");
+        assert_eq!(source.source_key(), "requests");
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_nothing_available() {
+        let metadata = PackageMetadata {
+            version: "1.0.0".to_string(),
+            src_url: None,
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: None,
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: None,
+            keep: None,
+            update_script: None,
+        };
+
+        assert!(metadata.resolve_upstream_source().is_err());
     }
 }

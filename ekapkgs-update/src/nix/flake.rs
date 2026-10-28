@@ -205,6 +205,7 @@ pub async fn get_flake_package_metadata(
         platform_hashes: None,
         github_repo: None,
         keep: None,
+        update_script: None,
     })
 }
 

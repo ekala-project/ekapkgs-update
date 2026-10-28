@@ -12,7 +12,6 @@ use crate::nix::flake::{
     get_flake_package_position,
 };
 use crate::rewrite::find_and_update_attr;
-use crate::vcs_sources::UpstreamSource;
 
 /// Update a flake package
 ///
@@ -73,12 +72,7 @@ pub async fn update_flake_package(
     }
 
     // Step 2: Determine upstream source
-    let upstream_source = match &metadata.src_url {
-        Some(url) => UpstreamSource::from_url(url).context("Failed to parse source URL")?,
-        None => {
-            anyhow::bail!("Package has no src.url attribute - cannot determine upstream source");
-        },
-    };
+    let upstream_source = metadata.resolve_upstream_source()?;
 
     info!("Upstream source: {:?}", upstream_source);
 
