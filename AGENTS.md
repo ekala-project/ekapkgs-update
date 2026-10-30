@@ -263,7 +263,7 @@ ekapkgs-update review <PR_NUMBER> --repo owner/repo [--tests] [--best-practices]
 1. Fetch PR details and changed files from GitHub API
 2. Create an isolated worktree from the current repo
 3. Checkout the PR branch, merge latest base branch (must succeed — merge conflicts fail the review)
-4. Determine affected attr paths from changed `.nix` files (heuristic: `pkgs/by-name/<shard>/<pname>/` or parent dir name)
+4. Determine affected attr paths from changed `.nix` files (heuristic: `pkgs/by-name/<shard>/<pname>/` or parent dir name, with dynamic scope discovery for scoped packages — e.g. `postgresql/pkgs/<name>/` auto-resolves to `postgresqlPackages.<name>` via `nix-instantiate` eval)
 5. Validate each candidate attr path exists in the entry point
 6. Build each package with `nix-build`
 7. *(if `--tests`)* Build `passthru.tests` for each successfully built package
