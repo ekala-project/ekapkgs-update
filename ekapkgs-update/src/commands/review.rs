@@ -147,6 +147,71 @@ async fn validate_attr_path(worktree_entry_point: &str, attr_path: &str) -> bool
     }
 }
 
+/// Generate candidate scoped attr paths for a package name based on a scope
+/// directory hint.
+///
+/// For example, scope dir `postgresql` and name `citus` generates:
+/// `["postgresqlPackages.citus", "postgresql.citus"]`.
+///
+/// For `python` and name `numpy`:
+/// `["python3Packages.citus", "pythonPackages.numpy", "python.numpy"]`.
+fn scope_candidates(scope_dir: &str, name: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    // Common convention: <dir>Packages (e.g. postgresqlPackages, perlPackages)
+    candidates.push(format!("{scope_dir}Packages.{name}"));
+
+    // Python is special: python/pkgs → python3Packages (the default)
+    if scope_dir == "python" {
+        candidates.push(format!("python3Packages.{name}"));
+    }
+
+    // Also try <dir>.<name> (e.g. haskell.pkgs or writers scope)
+    candidates.push(format!("{scope_dir}.{name}"));
+
+    candidates
+}
+
+/// Try to find a scoped attr path for `name` by checking candidate scope
+/// attrs derived from the file path's directory structure.
+///
+/// For example, if `citus` is under `postgresql/pkgs/citus/`, we try
+/// `postgresqlPackages.citus`, `postgresql.citus`, etc. via `nix-instantiate`.
+async fn find_scoped_attr_path(
+    worktree_entry_point: &str,
+    name: &str,
+    changed_files: &[github::GithubPrFile],
+) -> Option<String> {
+    // Extract scope directory hints from changed file paths.
+    // Files matching <dir>/pkgs/<name>/... give us <dir> as the scope hint.
+    let mut scope_dirs: Vec<String> = Vec::new();
+    for file in changed_files {
+        let path = Path::new(&file.filename);
+        let components: Vec<&str> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+
+        if components.len() >= 3 && components[1] == "pkgs" && components[2] == name {
+            let dir = components[0].to_owned();
+            if !scope_dirs.contains(&dir) {
+                scope_dirs.push(dir);
+            }
+        }
+    }
+
+    // Generate and validate candidate scoped attr paths
+    for dir in &scope_dirs {
+        for candidate in scope_candidates(dir, name) {
+            if validate_attr_path(worktree_entry_point, &candidate).await {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 /// Execute the review command.
 pub async fn execute(config: ReviewConfig) -> anyhow::Result<()> {
     let token = std::env::var("GITHUB_TOKEN")
@@ -299,6 +364,16 @@ async fn execute_in_worktree(
     for attr in &candidate_attrs {
         if validate_attr_path(&worktree_entry_str, attr).await {
             attr_paths.push(attr.clone());
+        } else if let Some(scoped) =
+            find_scoped_attr_path(&worktree_entry_str, attr, changed_files).await
+        {
+            info!(
+                "Attr '{}' resolved to scoped path '{}'",
+                attr, scoped
+            );
+            if !attr_paths.contains(&scoped) {
+                attr_paths.push(scoped);
+            }
         } else {
             debug!(
                 "Attr path '{}' does not exist in entry point, skipping",
@@ -1190,6 +1265,29 @@ mod tests {
         ];
         let result = attr_paths_from_changed_files(&files, "default.nix");
         assert_eq!(result, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_attr_paths_scoped_dir_produces_bare_name() {
+        // Files under <scope>/pkgs/<name>/ produce the bare <name> as a
+        // candidate. The scoped resolution (e.g. postgresqlPackages.citus)
+        // happens at validation time via find_scoped_attr_path.
+        let files = vec![github::GithubPrFile {
+            filename: "postgresql/pkgs/citus/default.nix".to_owned(),
+            status: "added".to_owned(),
+        }];
+        let result = attr_paths_from_changed_files(&files, "default.nix");
+        assert_eq!(result, vec!["citus"]);
+    }
+
+    #[test]
+    fn test_attr_paths_python_dir_produces_bare_name() {
+        let files = vec![github::GithubPrFile {
+            filename: "python/pkgs/some-lib/default.nix".to_owned(),
+            status: "added".to_owned(),
+        }];
+        let result = attr_paths_from_changed_files(&files, "default.nix");
+        assert_eq!(result, vec!["some-lib"]);
     }
 
     #[test]
