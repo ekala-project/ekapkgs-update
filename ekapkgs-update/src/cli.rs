@@ -476,6 +476,21 @@ pub enum Commands {
         #[arg(long)]
         max_jobs: Option<usize>,
     },
+    /// Lint a Nix package expression for whitespace formatting compliance.
+    ///
+    /// Checks that header attributes (pname, version, extensions, pyproject,
+    /// disabled) are grouped at the top without blank lines, that all other
+    /// attributes are separated by blank lines, and that meta is last.
+    Lint {
+        /// Nix file or directory to lint (directories are searched recursively for .nix files)
+        path: String,
+        /// Fix formatting issues in-place (default: check only)
+        #[arg(long)]
+        fix: bool,
+        /// Descend into hidden directories (names starting with '.')
+        #[arg(long)]
+        no_ignore: bool,
+    },
     /// Watch upstream sources for new releases and update packages reactively.
     ///
     /// Builds a reverse index mapping upstream sources to attr_paths, then
@@ -1019,6 +1034,11 @@ impl Commands {
                 })
                 .await
             },
+            Commands::Lint {
+                path,
+                fix,
+                no_ignore,
+            } => commands::lint::lint(path, fix, no_ignore).await,
             Commands::Watch {
                 file,
                 database,

@@ -3,6 +3,7 @@ pub mod audit;
 pub mod autofix;
 pub mod export;
 pub mod inspect;
+pub mod lint;
 pub mod log;
 pub mod migrate;
 pub mod pr_enhancements;
@@ -13,6 +14,8 @@ pub mod retry;
 pub mod review;
 pub mod run;
 pub mod status;
+#[cfg(test)]
+mod tests_lint;
 pub mod update;
 pub mod watch;
 pub mod worktrees;
