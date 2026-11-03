@@ -131,6 +131,12 @@ pub fn apply_run_unit_tests_migration(content: &str) -> anyhow::Result<String> {
     result = update_test_comments(&result);
     debug!("Updated test comments");
 
+    // Step 7: Fix whitespace formatting (blank lines between attrs, meta at end)
+    if let Some(fixed) = crate::commands::lint::fix_content(&result)? {
+        result = fixed;
+        debug!("Applied whitespace lint fixes");
+    }
+
     Ok(result)
 }
 
