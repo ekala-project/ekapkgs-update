@@ -305,13 +305,11 @@ pub fn clone_variant_entry(
         .ok_or_else(|| RewriteError::variant_not_found(source_variant))?;
 
     // Find the range of the attrset body (braces)
-    let brace_start = content[..source_match.end()]
-        .rfind('{')
-        .ok_or_else(|| {
-            RewriteError::Structural(format!(
-                "Failed to find opening brace for variant '{source_variant}'"
-            ))
-        })?;
+    let brace_start = content[..source_match.end()].rfind('{').ok_or_else(|| {
+        RewriteError::Structural(format!(
+            "Failed to find opening brace for variant '{source_variant}'"
+        ))
+    })?;
     let brace_end = find_matching_brace(content, brace_start)?;
 
     // Find the semicolon after the closing brace
@@ -335,7 +333,12 @@ pub fn clone_variant_entry(
     let version_str_re = Regex::new(r#"version\s*=\s*"[^"]*""#)?;
     if let Some(m) = version_str_re.find(&cloned) {
         let replacement = format!("version = \"{new_version}\"");
-        cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+        cloned = format!(
+            "{}{}{}",
+            &cloned[..m.start()],
+            replacement,
+            &cloned[m.end()..]
+        );
     } else {
         // Try expression-style version (e.g., `version = rubyVersion "4" "0" "6" "";`)
         let version_expr_re = Regex::new(r"version\s*=\s*[^;]+")?;
@@ -349,24 +352,40 @@ pub fn clone_variant_entry(
                     "version = rubyVersion \"{}\" \"{}\" \"{}\" \"{}\"",
                     parts[0], parts[1], parts[2], suffix
                 );
-                cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+                cloned = format!(
+                    "{}{}{}",
+                    &cloned[..m.start()],
+                    replacement,
+                    &cloned[m.end()..]
+                );
             } else {
                 let replacement = format!("version = \"{new_version}\"");
-                cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+                cloned = format!(
+                    "{}{}{}",
+                    &cloned[..m.start()],
+                    replacement,
+                    &cloned[m.end()..]
+                );
             }
         }
     }
 
     // Replace the hash value with a placeholder
     let placeholder = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    let hash_re = Regex::new(&format!(
-        r#"{}(\s*=\s*)"[^"]*""#,
-        regex::escape(hash_attr)
-    ))?;
+    let hash_re = Regex::new(&format!(r#"{}(\s*=\s*)"[^"]*""#, regex::escape(hash_attr)))?;
     if let Some(m) = hash_re.find(&cloned) {
-        let eq_part = hash_re.captures(&cloned).and_then(|c| c.get(1)).map(|m| m.as_str()).unwrap_or(" = ");
+        let eq_part = hash_re
+            .captures(&cloned)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+            .unwrap_or(" = ");
         let replacement = format!("{hash_attr}{eq_part}\"{placeholder}\"");
-        cloned = format!("{}{}{}", &cloned[..m.start()], replacement, &cloned[m.end()..]);
+        cloned = format!(
+            "{}{}{}",
+            &cloned[..m.start()],
+            replacement,
+            &cloned[m.end()..]
+        );
     }
 
     // Find the insertion point (before the final closing brace)

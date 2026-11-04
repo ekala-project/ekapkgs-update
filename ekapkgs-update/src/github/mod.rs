@@ -200,7 +200,12 @@ pub async fn fetch_github_tags(
         page += 1;
     }
 
-    debug!("Fetched {} total tags for {}/{}", all_tags.len(), owner, repo);
+    debug!(
+        "Fetched {} total tags for {}/{}",
+        all_tags.len(),
+        owner,
+        repo
+    );
     Ok(all_tags)
 }
 
