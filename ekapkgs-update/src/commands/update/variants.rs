@@ -744,10 +744,7 @@ pub async fn fill_keep_variants(
     // expects `v1_26_8`-style names).
     let keep_variants: Vec<&String> = all_variants
         .iter()
-        .filter(|v| {
-            parse_variant_components(v)
-                .is_some_and(|c| c.len() == keep_components)
-        })
+        .filter(|v| parse_variant_components(v).is_some_and(|c| c.len() == keep_components))
         .collect();
 
     debug!(
@@ -943,11 +940,7 @@ pub async fn fill_keep_variants(
         // Determine the source variant to clone from (latest existing in this series)
         let source_variant_name = latest_existing.as_ref().map(|v| {
             let name = format!("v{}", v.replace('.', "_"));
-            let parts: Vec<&str> = name
-                .strip_prefix('v')
-                .unwrap_or(&name)
-                .split('_')
-                .collect();
+            let parts: Vec<&str> = name.strip_prefix('v').unwrap_or(&name).split('_').collect();
             if parts.len() > keep_components {
                 format!("v{}", parts[..keep_components].join("_"))
             } else {

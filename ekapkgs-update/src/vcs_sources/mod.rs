@@ -372,7 +372,7 @@ impl UpstreamSource {
                                 is_prerelease: false,
                             })
                             .collect())
-                    }
+                    },
                     Err(_) => Ok(fetch_github_tags(owner, repo, token.as_deref())
                         .await?
                         .into_iter()
@@ -456,9 +456,7 @@ impl UpstreamSource {
             UpstreamSource::DirectoryListing { base_url, pname } => {
                 fetch_directory_listing_releases(base_url, pname).await
             },
-            UpstreamSource::Script { script_path } => {
-                fetch_script_releases(script_path).await
-            },
+            UpstreamSource::Script { script_path } => fetch_script_releases(script_path).await,
         }
     }
 

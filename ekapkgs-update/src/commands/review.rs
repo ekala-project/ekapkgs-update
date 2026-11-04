@@ -367,10 +367,7 @@ async fn execute_in_worktree(
         } else if let Some(scoped) =
             find_scoped_attr_path(&worktree_entry_str, attr, changed_files).await
         {
-            info!(
-                "Attr '{}' resolved to scoped path '{}'",
-                attr, scoped
-            );
+            info!("Attr '{}' resolved to scoped path '{}'", attr, scoped);
             if !attr_paths.contains(&scoped) {
                 attr_paths.push(scoped);
             }

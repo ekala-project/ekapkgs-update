@@ -258,12 +258,10 @@ impl PackageMetadata {
 
         // 2. Explicit github-repo
         if let Some(ref gh_repo) = self.github_repo {
-            let (owner, repo) = gh_repo
-                .split_once('/')
-                .context(format!(
-                    "Invalid github-repo format '{}': expected 'owner/repo'",
-                    gh_repo
-                ))?;
+            let (owner, repo) = gh_repo.split_once('/').context(format!(
+                "Invalid github-repo format '{}': expected 'owner/repo'",
+                gh_repo
+            ))?;
             return Ok(UpstreamSource::GitHub {
                 owner: owner.to_owned(),
                 repo: repo.to_owned(),
@@ -275,9 +273,7 @@ impl PackageMetadata {
             if let Some(source) = UpstreamSource::from_url(src_url) {
                 return Ok(source);
             }
-            anyhow::bail!(
-                "Could not parse upstream source from URL: {src_url}"
-            );
+            anyhow::bail!("Could not parse upstream source from URL: {src_url}");
         }
 
         // 4. Fall back to PyPI via pname
