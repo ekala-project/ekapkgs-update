@@ -1069,7 +1069,7 @@ impl Commands {
                 if !extra_args.is_empty() {
                     commands::update::set_extra_nix_build_args(extra_args);
                 }
-                commands::watch::WatchConfig::from_args(
+                let mut watch_config = commands::watch::WatchConfig::from_args(
                     file,
                     database,
                     poll_interval,
@@ -1084,9 +1084,9 @@ impl Commands {
                     claude_fix,
                     claude_fix_max_turns,
                     claude_fix_timeout,
-                )
-                .execute()
-                .await
+                );
+                watch_config.repos = config_file.repos;
+                watch_config.execute().await
             },
         }
     }
