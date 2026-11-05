@@ -33,6 +33,9 @@ let
   watchEffectiveSettings = lib.recursiveUpdate {
     database = "/var/lib/${cfg.stateDirectory}/updates.db";
     file = cfg.packagesFile;
+    repos = map (r: {
+      inherit (r) name upstream entrypoint fork path;
+    }) cfg.watch.repos;
   } cfg.settings;
 
   watchConfigFile = settingsFormat.generate "ekapkgs-update-watch.toml" watchEffectiveSettings;
@@ -439,6 +442,66 @@ in
         '';
       };
 
+      repos = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.submodule {
+            options = {
+              name = lib.mkOption {
+                type = lib.types.str;
+                description = "Unique name for this repository.";
+                example = "core-pkgs";
+              };
+              upstream = lib.mkOption {
+                type = lib.types.str;
+                description = ''
+                  Upstream repo URL or `owner/repo` shorthand (assumes GitHub).
+                  Used to derive PR target and for auto-cloning.
+                '';
+                example = "github.com/ekala-project/core-pkgs";
+              };
+              entrypoint = lib.mkOption {
+                type = lib.types.str;
+                default = "default.nix";
+                description = "Nix file to evaluate within the repo.";
+              };
+              fork = lib.mkOption {
+                type = lib.types.str;
+                default = "origin";
+                description = "Git remote name to push update branches to.";
+              };
+              path = lib.mkOption {
+                type = lib.types.str;
+                description = "Local path to the repo checkout. Auto-cloned if missing.";
+                example = "/var/lib/ekapkgs-update/repos/core-pkgs";
+              };
+            };
+          }
+        );
+        default = [ ];
+        description = ''
+          List of repositories to watch for updates. When non-empty, the
+          watch daemon builds a per-repo upstream index and routes update PRs
+          to the correct upstream repository. Each repo is auto-cloned if the
+          checkout does not exist.
+        '';
+        example = lib.literalExpression ''
+          [
+            {
+              name = "core-pkgs";
+              upstream = "github.com/ekala-project/core-pkgs";
+              entrypoint = "default.nix";
+              path = "/var/lib/ekapkgs-update/repos/core-pkgs";
+            }
+            {
+              name = "ekapkgs";
+              upstream = "github.com/ekala-project/ekapkgs";
+              entrypoint = "default.nix";
+              path = "/var/lib/ekapkgs-update/repos/ekapkgs";
+            }
+          ]
+        '';
+      };
+
       extraArgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
@@ -464,6 +527,14 @@ in
           source is configured. Set either
           services.ekapkgs-update.environmentFile (containing
           CACHIX_AUTH_TOKEN=...) or services.ekapkgs-update.cachix.authTokenFile.
+        '';
+      }
+      {
+        assertion =
+          let names = map (r: r.name) cfg.watch.repos;
+          in names == lib.unique names;
+        message = ''
+          services.ekapkgs-update.watch.repos: repo names must be unique.
         '';
       }
     ];
@@ -627,7 +698,7 @@ in
           "/nix/var/nix/daemon-socket"
           "/nix/var/nix/profiles/per-user"
           "/nix/var/nix/gcroots/per-user"
-        ];
+        ] ++ (map (r: r.path) cfg.watch.repos);
       };
     };
 
