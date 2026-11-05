@@ -12,8 +12,14 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 
 /// Attributes that form the "header group" — allowed together without blank lines.
-const HEADER_ATTRS: &[&str] = &["pname", "version", "format", "extensions", "pyproject", "disabled"];
-
+const HEADER_ATTRS: &[&str] = &[
+    "pname",
+    "version",
+    "format",
+    "extensions",
+    "pyproject",
+    "disabled",
+];
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -549,14 +555,9 @@ pub(crate) fn parse_attributes(body: &str, body_start_line: usize) -> Vec<AttrSp
 #[derive(Debug, Clone)]
 enum BodyStatement {
     /// A named attribute (e.g. `pname = "x";`).
-    Attr {
-        name: String,
-        text: String,
-    },
+    Attr { name: String, text: String },
     /// Anything else: `inherit`, standalone comments, etc.
-    Other {
-        text: String,
-    },
+    Other { text: String },
 }
 
 /// Parse all top-level statements in the body, preserving non-attribute content.
@@ -567,8 +568,7 @@ fn parse_all_statements(body: &str) -> Vec<BodyStatement> {
 
     for stmt in &statements {
         let trimmed = stmt.text.trim_start();
-        let is_inherit =
-            trimmed.starts_with("inherit ") || trimmed.starts_with("inherit\n");
+        let is_inherit = trimmed.starts_with("inherit ") || trimmed.starts_with("inherit\n");
 
         if !is_inherit {
             if let Some(caps) = attr_re.captures(trimmed) {
@@ -1045,13 +1045,11 @@ pub(crate) fn apply_fix(content: &str, range: &AttrsetRange, _attrs: &[AttrSpan]
     let suffix = &content[range.body_end..];
 
     // Preserve the indentation of the closing `}` from the original body.
-    let closing_indent = body
-        .rfind('\n')
-        .map_or("", |pos| {
-            let after_nl = &body[pos + 1..];
-            let ws_len = after_nl.len() - after_nl.trim_start().len();
-            &after_nl[..ws_len]
-        });
+    let closing_indent = body.rfind('\n').map_or("", |pos| {
+        let after_nl = &body[pos + 1..];
+        let ws_len = after_nl.len() - after_nl.trim_start().len();
+        &after_nl[..ws_len]
+    });
 
     format!("{prefix}\n{new_body}{closing_indent}{suffix}")
 }
@@ -1075,30 +1073,15 @@ fn emit_statement(buf: &mut String, stmt: &BodyStatement, indent: &str, needs_bl
     } else if !buf.is_empty() && !buf.ends_with('\n') {
         buf.push('\n');
     }
-    buf.push_str(&normalize_attr_text(text, indent));
+
+    // Preserve the original indentation of the first line. Only add
+    // `indent` when the text has no leading whitespace (moved statement).
+    let first_line_ws = text.len() - text.trim_start().len();
+    if first_line_ws == 0 {
+        buf.push_str(indent);
+    }
+    buf.push_str(text);
     buf.push('\n');
-}
-
-/// Normalize the indentation of an attribute text block.
-/// Ensures the first line has the correct indent, and subsequent lines preserve
-/// their relative indentation.
-fn normalize_attr_text(text: &str, indent: &str) -> String {
-    let lines: Vec<&str> = text.split('\n').collect();
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    let mut result = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i == 0 {
-            result.push_str(indent);
-            result.push_str(line.trim_start());
-        } else {
-            result.push('\n');
-            result.push_str(line);
-        }
-    }
-    result
 }
 
 /// Detect the indentation string from a body region.
