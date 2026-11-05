@@ -10,7 +10,6 @@ pub struct UpdateRequest {
     pub new_version: String,
 
     // ── Multi-repo routing (all optional for backwards compatibility) ──
-
     /// Name of the source repo (from config). Empty/None for single-repo mode.
     pub repo_name: Option<String>,
     /// Eval entry point for this repo (absolute path). When set, overrides the

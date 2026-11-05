@@ -556,10 +556,7 @@ pub async fn ensure_fork_exists(owner: &str, repo: &str, token: &str) -> anyhow:
         full_name: String,
     }
 
-    let fork: ForkResponse = response
-        .json()
-        .await
-        .context("parse fork response JSON")?;
+    let fork: ForkResponse = response.json().await.context("parse fork response JSON")?;
 
     debug!("Fork available: {} ({})", fork.full_name, fork.clone_url);
     Ok(fork.clone_url)
