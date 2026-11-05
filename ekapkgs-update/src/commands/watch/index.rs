@@ -23,17 +23,18 @@ pub struct IndexStats {
 
 /// Build (or rebuild) the upstream index by evaluating all packages.
 ///
-/// Clears the existing index, then streams packages from `nix-eval-jobs`,
-/// extracts metadata, determines the upstream source, and stores the mapping
-/// in the database.
+/// Clears the existing index for the given `repo_name`, then streams packages
+/// from `nix-eval-jobs`, extracts metadata, determines the upstream source,
+/// and stores the mapping in the database.
 pub async fn build_upstream_index(
+    repo_name: &str,
     file: &str,
     db: &Database,
     max_eval_workers: Option<usize>,
 ) -> anyhow::Result<IndexStats> {
-    info!("Building upstream index from {}", file);
+    info!("[{}] Building upstream index from {}", repo_name, file);
 
-    db.clear_upstream_index().await?;
+    db.clear_upstream_index(Some(repo_name)).await?;
 
     let stream = nix::run_eval::run_nix_eval_jobs_with_workers(file.to_owned(), max_eval_workers);
     pin_mut!(stream);
@@ -53,11 +54,15 @@ pub async fn build_upstream_index(
                 let db_clone = db.clone();
                 let file_clone = file.to_owned();
                 let sem_clone = Arc::clone(&semaphore);
+                let repo_name_clone = repo_name.to_owned();
 
                 tokio::spawn(async move {
                     let _permit = sem_clone.acquire().await.expect("indexer semaphore closed");
 
-                    if let Err(e) = index_single_package(&db_clone, &file_clone, &attr_path).await {
+                    if let Err(e) =
+                        index_single_package(&db_clone, &repo_name_clone, &file_clone, &attr_path)
+                            .await
+                    {
                         debug!("{}: indexing failed: {}", attr_path, e);
                     }
                 });
@@ -81,7 +86,8 @@ pub async fn build_upstream_index(
 
     let count = db.upstream_index_count().await.unwrap_or(0);
     info!(
-        "Upstream index built: {} packages evaluated, {} indexed, {} skipped, {} errors",
+        "[{}] Upstream index built: {} packages evaluated, {} indexed, {} skipped, {} errors",
+        repo_name,
         indexed + skipped + errors,
         count,
         skipped,
@@ -98,6 +104,7 @@ pub async fn build_upstream_index(
 /// Extract metadata for a single package and insert it into the upstream index.
 async fn index_single_package(
     db: &Database,
+    repo_name: &str,
     eval_entry_point: &str,
     attr_path: &str,
 ) -> anyhow::Result<()> {
@@ -119,6 +126,7 @@ async fn index_single_package(
     };
 
     db.upsert_upstream_index(
+        repo_name,
         attr_path,
         upstream_source.source_type(),
         &upstream_source.source_key(),

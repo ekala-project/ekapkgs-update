@@ -29,6 +29,7 @@ async fn upstream_index_upsert_and_query() {
 
     // Insert a GitHub source
     db.upsert_upstream_index(
+        "",
         "ripgrep",
         "github",
         "BurntSushi/ripgrep",
@@ -60,6 +61,7 @@ async fn upstream_index_multiple_attr_paths_same_source() {
     // Two packages from the same upstream (e.g., python312Packages.foo and
     // python313Packages.foo sharing the same source)
     db.upsert_upstream_index(
+        "",
         "python312Packages.requests",
         "pypi",
         "requests",
@@ -70,6 +72,7 @@ async fn upstream_index_multiple_attr_paths_same_source() {
     .await
     .unwrap();
     db.upsert_upstream_index(
+        "",
         "python313Packages.requests",
         "pypi",
         "requests",
@@ -96,6 +99,7 @@ async fn upstream_index_gitlab_with_instance() {
     let db = setup_db().await;
 
     db.upsert_upstream_index(
+        "",
         "mesa",
         "gitlab",
         "mesa/mesa",
@@ -126,12 +130,12 @@ async fn upstream_index_gitlab_with_instance() {
 async fn upstream_index_upsert_updates_version() {
     let db = setup_db().await;
 
-    db.upsert_upstream_index("jq", "github", "jqlang/jq", None, "1.6", None)
+    db.upsert_upstream_index("", "jq", "github", "jqlang/jq", None, "1.6", None)
         .await
         .unwrap();
 
     // Upsert with new version
-    db.upsert_upstream_index("jq", "github", "jqlang/jq", None, "1.7.1", None)
+    db.upsert_upstream_index("", "jq", "github", "jqlang/jq", None, "1.7.1", None)
         .await
         .unwrap();
 
@@ -149,6 +153,7 @@ async fn upstream_index_get_all_unique_sources() {
 
     // Multiple packages, some sharing upstream
     db.upsert_upstream_index(
+        "",
         "ripgrep",
         "github",
         "BurntSushi/ripgrep",
@@ -159,6 +164,7 @@ async fn upstream_index_get_all_unique_sources() {
     .await
     .unwrap();
     db.upsert_upstream_index(
+        "",
         "python3Packages.requests",
         "pypi",
         "requests",
@@ -169,6 +175,7 @@ async fn upstream_index_get_all_unique_sources() {
     .await
     .unwrap();
     db.upsert_upstream_index(
+        "",
         "python3Packages.flask",
         "pypi",
         "flask",
@@ -179,7 +186,7 @@ async fn upstream_index_get_all_unique_sources() {
     .await
     .unwrap();
     // Alias for the same upstream
-    db.upsert_upstream_index("rg", "github", "BurntSushi/ripgrep", None, "14.1.0", None)
+    db.upsert_upstream_index("", "rg", "github", "BurntSushi/ripgrep", None, "14.1.0", None)
         .await
         .unwrap();
 
@@ -192,12 +199,12 @@ async fn upstream_index_get_all_unique_sources() {
 async fn upstream_index_clear() {
     let db = setup_db().await;
 
-    db.upsert_upstream_index("jq", "github", "jqlang/jq", None, "1.7", None)
+    db.upsert_upstream_index("", "jq", "github", "jqlang/jq", None, "1.7", None)
         .await
         .unwrap();
     assert_eq!(db.upstream_index_count().await.unwrap(), 1);
 
-    db.clear_upstream_index().await.unwrap();
+    db.clear_upstream_index(None).await.unwrap();
     assert_eq!(db.upstream_index_count().await.unwrap(), 0);
 }
 
@@ -298,7 +305,7 @@ async fn dispatch_sends_update_for_newer_version() {
     let db = setup_db().await;
 
     // Index a package at version 1.0.0
-    db.upsert_upstream_index("my-pkg", "github", "owner/repo", None, "1.0.0", None)
+    db.upsert_upstream_index("", "my-pkg", "github", "owner/repo", None, "1.0.0", None)
         .await
         .unwrap();
 
@@ -351,7 +358,7 @@ async fn dispatch_sends_update_for_newer_version() {
 async fn dispatch_skips_same_version() {
     let db = setup_db().await;
 
-    db.upsert_upstream_index("my-pkg", "github", "owner/repo", None, "2.0.0", None)
+    db.upsert_upstream_index("", "my-pkg", "github", "owner/repo", None, "2.0.0", None)
         .await
         .unwrap();
 
@@ -371,7 +378,7 @@ async fn dispatch_skips_same_version() {
 async fn dispatch_skips_older_version() {
     let db = setup_db().await;
 
-    db.upsert_upstream_index("my-pkg", "github", "owner/repo", None, "3.0.0", None)
+    db.upsert_upstream_index("", "my-pkg", "github", "owner/repo", None, "3.0.0", None)
         .await
         .unwrap();
 
@@ -393,7 +400,7 @@ async fn dispatch_skips_older_version() {
 async fn dispatch_respects_backoff() {
     let db = setup_db().await;
 
-    db.upsert_upstream_index("my-pkg", "github", "owner/repo", None, "1.0.0", None)
+    db.upsert_upstream_index("", "my-pkg", "github", "owner/repo", None, "1.0.0", None)
         .await
         .unwrap();
 
@@ -413,10 +420,10 @@ async fn dispatch_deduplicates_aliases() {
     let db = setup_db().await;
 
     // Two attr_paths for the same upstream (e.g., python aliases)
-    db.upsert_upstream_index("python312Packages.foo", "pypi", "foo", None, "1.0.0", None)
+    db.upsert_upstream_index("", "python312Packages.foo", "pypi", "foo", None, "1.0.0", None)
         .await
         .unwrap();
-    db.upsert_upstream_index("python313Packages.foo", "pypi", "foo", None, "1.0.0", None)
+    db.upsert_upstream_index("", "python313Packages.foo", "pypi", "foo", None, "1.0.0", None)
         .await
         .unwrap();
 
@@ -476,6 +483,7 @@ async fn index_roundtrip_github() {
     };
 
     db.upsert_upstream_index(
+        "",
         "nixpkgs-unstable",
         source.source_type(),
         &source.source_key(),
@@ -511,6 +519,7 @@ async fn index_roundtrip_gitlab_with_instance() {
     };
 
     db.upsert_upstream_index(
+        "",
         "glib",
         source.source_type(),
         &source.source_key(),
