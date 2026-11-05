@@ -319,6 +319,10 @@ async fn poll_single_source(
             drv_path: None,
             current_version: current.to_owned(),
             new_version: latest_version.clone(),
+            repo_name: None,
+            eval_entry_point: None,
+            pr_config: None,
+            fork: None,
         };
 
         if let Err(e) = tx.send(req) {

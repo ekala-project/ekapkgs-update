@@ -467,12 +467,23 @@ impl UpdaterServiceConfig {
                             // Clone data needed for the async task
                             let db_clone = db.clone();
                             let session_id_clone = session_id.clone();
-                            let eval_entry_point_clone = Arc::clone(&eval_entry_point); // O(1) clone
-                            let pr_config_clone = pr_config.clone();
-                            let fork_clone = Arc::clone(&fork); // O(1) clone
                             let pr_enhancements_clone = pr_enhancements.clone();
                             let attr_path_clone = req.attr_path.clone();
                             let claude_fix_clone = claude_fix_config.clone();
+
+                            // Use per-request overrides when present (multi-repo routing),
+                            // falling back to the global config.
+                            let effective_entry_point: Arc<str> =
+                                match req.eval_entry_point.as_deref() {
+                                    Some(ep) => Arc::from(ep),
+                                    None => Arc::clone(&eval_entry_point),
+                                };
+                            let effective_pr_config =
+                                req.pr_config.clone().or_else(|| pr_config.clone());
+                            let effective_fork: Arc<str> = match req.fork.as_deref() {
+                                Some(f) => Arc::from(f),
+                                None => Arc::clone(&fork),
+                            };
 
                             // Spawn the update task
                             let is_branch_mode = commit_strategy == CommitStrategy::Branch;
@@ -482,7 +493,7 @@ impl UpdaterServiceConfig {
                                     super::updater::perform_direct_update(
                                         &db_clone,
                                         &session_id_clone,
-                                        &eval_entry_point_clone,
+                                        &effective_entry_point,
                                         &req,
                                         run_passthru_tests,
                                         git_mutex_clone,
@@ -493,10 +504,10 @@ impl UpdaterServiceConfig {
                                     super::updater::perform_update(
                                         &db_clone,
                                         &session_id_clone,
-                                        &eval_entry_point_clone, // Arc<str> derefs to &str
+                                        &effective_entry_point,
                                         &req,
-                                        pr_config_clone.as_ref(),
-                                        &fork_clone, // Arc<str> derefs to &str
+                                        effective_pr_config.as_ref(),
+                                        &effective_fork,
                                         run_passthru_tests,
                                         dry_run,
                                         &pr_enhancements_clone,
