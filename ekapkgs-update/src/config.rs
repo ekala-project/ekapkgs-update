@@ -46,6 +46,40 @@ const CONFIG_FILENAME: &str = "config.toml";
 /// Application name for XDG directory lookup.
 const APP_NAME: &str = "ekapkgs-update";
 
+/// Configuration for a single watched repository.
+///
+/// Used by the `watch` command to track multiple upstream repositories,
+/// each with its own Nix entry point and PR target.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RepoConfig {
+    /// Human-readable name for this repo (used in logs and database tagging).
+    pub name: String,
+
+    /// Upstream repository identifier. Accepts `owner/repo` shorthand (assumes
+    /// GitHub) or a full URL like `github.com/owner/repo`.
+    pub upstream: String,
+
+    /// Nix file to evaluate within the repo's working directory.
+    #[serde(default = "default_entrypoint")]
+    pub entrypoint: String,
+
+    /// Git remote name to push update branches to for PR creation.
+    #[serde(default = "default_fork")]
+    pub fork: String,
+
+    /// Local path to the repo checkout. The daemon will clone the repo here
+    /// if it does not already exist.
+    pub path: Option<String>,
+}
+
+fn default_entrypoint() -> String {
+    "default.nix".to_owned()
+}
+
+fn default_fork() -> String {
+    "origin".to_owned()
+}
+
 /// Top-level configuration file structure.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -67,6 +101,11 @@ pub struct ConfigFile {
 
     /// Watch (passive/event-driven) mode settings.
     pub watch: WatchFileConfig,
+
+    /// Repositories to watch for updates. When non-empty, each repo carries
+    /// its own entry point and PR target. Used by the `watch` command.
+    #[serde(default)]
+    pub repos: Vec<RepoConfig>,
 }
 
 /// LLM server configuration.
@@ -193,6 +232,20 @@ impl ConfigFile {
         if let Some(attempts) = self.autofix.max_attempts {
             if attempts < 1 {
                 bail!("autofix.max_attempts must be at least 1, got {attempts}");
+            }
+        }
+
+        // Validate repo configs
+        let mut seen_names = std::collections::HashSet::new();
+        for repo in &self.repos {
+            if repo.name.is_empty() {
+                bail!("repos: each repo must have a non-empty name");
+            }
+            if !seen_names.insert(&repo.name) {
+                bail!("repos: duplicate repo name '{}'", repo.name);
+            }
+            if repo.upstream.is_empty() {
+                bail!("repos.{}: upstream cannot be empty", repo.name);
             }
         }
 
@@ -373,5 +426,57 @@ unknown_llm_key = "value"
         // serde default ignores unknown keys
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_repos_config() {
+        let toml_str = r#"
+database = "/var/lib/ekapkgs-update/updates.db"
+
+[[repos]]
+name = "core-pkgs"
+upstream = "github.com/ekala-project/core-pkgs"
+entrypoint = "default.nix"
+path = "/var/lib/ekapkgs-update/repos/core-pkgs"
+
+[[repos]]
+name = "ekapkgs"
+upstream = "github.com/ekala-project/ekapkgs"
+path = "/var/lib/ekapkgs-update/repos/ekapkgs"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.repos.len(), 2);
+        assert_eq!(config.repos[0].name, "core-pkgs");
+        assert_eq!(config.repos[0].upstream, "github.com/ekala-project/core-pkgs");
+        assert_eq!(config.repos[0].entrypoint, "default.nix");
+        assert_eq!(config.repos[1].name, "ekapkgs");
+        assert_eq!(config.repos[1].fork, "origin"); // default
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_repos_duplicate_name_rejected() {
+        let toml_str = r#"
+[[repos]]
+name = "core-pkgs"
+upstream = "github.com/ekala-project/core-pkgs"
+
+[[repos]]
+name = "core-pkgs"
+upstream = "github.com/ekala-project/ekapkgs"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_repos_empty_name_rejected() {
+        let toml_str = r#"
+[[repos]]
+name = ""
+upstream = "github.com/ekala-project/core-pkgs"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
     }
 }

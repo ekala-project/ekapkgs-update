@@ -697,6 +697,7 @@ impl Database {
     /// upstream source.
     pub async fn upsert_upstream_index(
         &self,
+        repo_name: &str,
         attr_path: &str,
         upstream_type: &str,
         upstream_key: &str,
@@ -708,9 +709,9 @@ impl Database {
         sqlx::query(
             r#"
             INSERT INTO upstream_index
-                (attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(attr_path, upstream_type, upstream_key)
+                (repo_name, attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(repo_name, attr_path, upstream_type, upstream_key)
             DO UPDATE SET
                 instance = excluded.instance,
                 current_version = excluded.current_version,
@@ -718,6 +719,7 @@ impl Database {
                 indexed_at = excluded.indexed_at
             "#,
         )
+        .bind(repo_name)
         .bind(attr_path)
         .bind(upstream_type)
         .bind(upstream_key)
@@ -741,7 +743,7 @@ impl Database {
     ) -> Result<Vec<UpstreamIndexEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at
+            SELECT repo_name, attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at
             FROM upstream_index
             WHERE upstream_type = ? AND upstream_key = ?
               AND (instance IS ? OR (instance IS NOT NULL AND instance = ?))
@@ -758,6 +760,7 @@ impl Database {
         Ok(rows
             .into_iter()
             .map(|row| UpstreamIndexEntry {
+                repo_name: row.get("repo_name"),
                 attr_path: row.get("attr_path"),
                 upstream_type: row.get("upstream_type"),
                 upstream_key: row.get("upstream_key"),
@@ -773,7 +776,8 @@ impl Database {
         let rows = sqlx::query(
             r#"
             SELECT DISTINCT upstream_type, upstream_key, instance,
-                   MIN(attr_path) AS attr_path, MIN(current_version) AS current_version,
+                   MIN(repo_name) AS repo_name, MIN(attr_path) AS attr_path,
+                   MIN(current_version) AS current_version,
                    MIN(src_url) AS src_url
             FROM upstream_index
             GROUP BY upstream_type, upstream_key, instance
@@ -786,6 +790,7 @@ impl Database {
         Ok(rows
             .into_iter()
             .map(|row| UpstreamIndexEntry {
+                repo_name: row.get("repo_name"),
                 attr_path: row.get("attr_path"),
                 upstream_type: row.get("upstream_type"),
                 upstream_key: row.get("upstream_key"),
@@ -796,12 +801,26 @@ impl Database {
             .collect())
     }
 
-    /// Remove all entries from the upstream index before a full re-index.
-    pub async fn clear_upstream_index(&self) -> Result<()> {
-        sqlx::query("DELETE FROM upstream_index")
-            .execute(&self.pool)
-            .await
-            .context("clear upstream_index")?;
+    /// Remove entries from the upstream index before a re-index.
+    ///
+    /// When `repo_name` is `Some`, only entries for that repo are cleared.
+    /// When `None`, all entries are cleared (full re-index).
+    pub async fn clear_upstream_index(&self, repo_name: Option<&str>) -> Result<()> {
+        match repo_name {
+            Some(name) => {
+                sqlx::query("DELETE FROM upstream_index WHERE repo_name = ?")
+                    .bind(name)
+                    .execute(&self.pool)
+                    .await
+                    .context("clear upstream_index for repo")?;
+            },
+            None => {
+                sqlx::query("DELETE FROM upstream_index")
+                    .execute(&self.pool)
+                    .await
+                    .context("clear upstream_index")?;
+            },
+        }
         Ok(())
     }
 
@@ -818,6 +837,8 @@ impl Database {
 /// A row from the `upstream_index` table.
 #[derive(Debug, Clone)]
 pub struct UpstreamIndexEntry {
+    /// Name of the source repository (empty string for single-repo legacy mode).
+    pub repo_name: String,
     pub attr_path: String,
     pub upstream_type: String,
     pub upstream_key: String,

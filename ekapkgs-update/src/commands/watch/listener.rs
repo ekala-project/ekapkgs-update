@@ -30,8 +30,8 @@ pub async fn run_watch_loop(
     index_refresh_interval: Duration,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    // Build initial upstream index
-    let stats = index::build_upstream_index(file, &db, None).await?;
+    // Build initial upstream index (single-repo legacy mode: empty repo name)
+    let stats = index::build_upstream_index("", file, &db, None).await?;
     info!(
         "Initial index: {} packages indexed, {} skipped, {} errors",
         stats.indexed, stats.skipped, stats.errors
@@ -121,7 +121,7 @@ pub async fn run_watch_loop(
             },
             _ = index_ticker.tick() => {
                 info!("Refreshing upstream index...");
-                match index::build_upstream_index(file, &db, None).await {
+                match index::build_upstream_index("", file, &db, None).await {
                     Ok(stats) => {
                         info!(
                             "Index refreshed: {} indexed, {} skipped, {} errors",
