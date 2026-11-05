@@ -447,7 +447,10 @@ path = "/var/lib/ekapkgs-update/repos/ekapkgs"
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(config.repos.len(), 2);
         assert_eq!(config.repos[0].name, "core-pkgs");
-        assert_eq!(config.repos[0].upstream, "github.com/ekala-project/core-pkgs");
+        assert_eq!(
+            config.repos[0].upstream,
+            "github.com/ekala-project/core-pkgs"
+        );
         assert_eq!(config.repos[0].entrypoint, "default.nix");
         assert_eq!(config.repos[1].name, "ekapkgs");
         assert_eq!(config.repos[1].fork, "origin"); // default

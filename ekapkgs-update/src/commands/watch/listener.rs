@@ -10,9 +10,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
+use super::ResolvedRepo;
 use super::feeds::{poll_source, upstream_source_from_index};
 use super::index;
-use super::ResolvedRepo;
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
 use crate::database::{Database, UpstreamIndexEntry};
 use crate::vcs_sources::{compare_version_components, extract_version_from_tag};
@@ -144,24 +144,14 @@ pub async fn run_watch_loop(
 }
 
 /// Build upstream indexes for all configured repos.
-async fn build_all_indexes(
-    repos: &[ResolvedRepo],
-    db: &Database,
-) -> anyhow::Result<()> {
+async fn build_all_indexes(repos: &[ResolvedRepo], db: &Database) -> anyhow::Result<()> {
     for repo in repos {
         let label = if repo.name.is_empty() {
             "default".to_owned()
         } else {
             repo.name.clone()
         };
-        match index::build_upstream_index(
-            &repo.name,
-            &repo.eval_entry_point,
-            db,
-            None,
-        )
-        .await
-        {
+        match index::build_upstream_index(&repo.name, &repo.eval_entry_point, db, None).await {
             Ok(stats) => {
                 info!(
                     "[{}] Index: {} indexed, {} skipped, {} errors",
@@ -197,13 +187,12 @@ async fn poll_and_dispatch(
     let mut handles = Vec::new();
 
     for entry in sources {
-        let source = match upstream_source_from_index(
+        let Some(source) = upstream_source_from_index(
             &entry.upstream_type,
             &entry.upstream_key,
             entry.instance.as_deref(),
-        ) {
-            Some(s) => s,
-            None => continue,
+        ) else {
+            continue;
         };
 
         let db_clone = db.clone();
@@ -276,9 +265,8 @@ async fn poll_single_source(
         compare_version_components(va, vb)
     });
 
-    let best = match best {
-        Some(r) => r,
-        None => return Ok(()),
+    let Some(best) = best else {
+        return Ok(());
     };
 
     let latest_version = extract_version_from_tag(&best.tag_name).to_owned();

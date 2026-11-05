@@ -157,7 +157,9 @@ impl WatchConfig {
                     Ok(r) => {
                         info!(
                             "[{}] Provisioned: {} (entry: {})",
-                            r.name, r.repo_dir.display(), r.eval_entry_point
+                            r.name,
+                            r.repo_dir.display(),
+                            r.eval_entry_point
                         );
                         resolved.push(r);
                     },
@@ -237,13 +239,22 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
 
     // Clone or fetch
     if repo_path.join(".git").exists() {
-        info!("[{}] Repository exists at {}, fetching...", config.name, repo_path.display());
+        info!(
+            "[{}] Repository exists at {}, fetching...",
+            config.name,
+            repo_path.display()
+        );
         run_git_in(&repo_path, &["fetch", "--all", "--prune"]).await?;
     } else {
-        let clone_url = format!("https://github.com/{}/{}.git", github_repo.owner, github_repo.repo);
+        let clone_url = format!(
+            "https://github.com/{}/{}.git",
+            github_repo.owner, github_repo.repo
+        );
         info!(
             "[{}] Cloning {} to {}",
-            config.name, clone_url, repo_path.display()
+            config.name,
+            clone_url,
+            repo_path.display()
         );
 
         // Create parent directory
@@ -314,7 +325,9 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
     }
 
     // Determine default branch for PR target
-    let base_branch = get_default_branch_local(&repo_path).await.unwrap_or_else(|_| "master".to_owned());
+    let base_branch = get_default_branch_local(&repo_path)
+        .await
+        .unwrap_or_else(|_| "master".to_owned());
 
     let pr_config = Some(PrConfig {
         owner: github_repo.owner,

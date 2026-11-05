@@ -186,9 +186,17 @@ async fn upstream_index_get_all_unique_sources() {
     .await
     .unwrap();
     // Alias for the same upstream
-    db.upsert_upstream_index("", "rg", "github", "BurntSushi/ripgrep", None, "14.1.0", None)
-        .await
-        .unwrap();
+    db.upsert_upstream_index(
+        "",
+        "rg",
+        "github",
+        "BurntSushi/ripgrep",
+        None,
+        "14.1.0",
+        None,
+    )
+    .await
+    .unwrap();
 
     let sources = db.get_all_upstream_sources().await.unwrap();
     // 3 unique sources: BurntSushi/ripgrep, requests, flask
@@ -424,12 +432,28 @@ async fn dispatch_deduplicates_aliases() {
     let db = setup_db().await;
 
     // Two attr_paths for the same upstream (e.g., python aliases)
-    db.upsert_upstream_index("", "python312Packages.foo", "pypi", "foo", None, "1.0.0", None)
-        .await
-        .unwrap();
-    db.upsert_upstream_index("", "python313Packages.foo", "pypi", "foo", None, "1.0.0", None)
-        .await
-        .unwrap();
+    db.upsert_upstream_index(
+        "",
+        "python312Packages.foo",
+        "pypi",
+        "foo",
+        None,
+        "1.0.0",
+        None,
+    )
+    .await
+    .unwrap();
+    db.upsert_upstream_index(
+        "",
+        "python313Packages.foo",
+        "pypi",
+        "foo",
+        None,
+        "1.0.0",
+        None,
+    )
+    .await
+    .unwrap();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut seen = HashSet::new();
