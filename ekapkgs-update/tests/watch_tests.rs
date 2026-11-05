@@ -340,6 +340,10 @@ async fn dispatch_sends_update_for_newer_version() {
         drv_path: None,
         current_version: current.to_owned(),
         new_version: latest_version.to_owned(),
+        repo_name: None,
+        eval_entry_point: None,
+        pr_config: None,
+        fork: None,
     };
     tx.send(req).unwrap();
 
@@ -456,6 +460,10 @@ async fn dispatch_deduplicates_aliases() {
             drv_path: None,
             current_version: current.to_owned(),
             new_version: latest_version.to_owned(),
+            repo_name: None,
+            eval_entry_point: None,
+            pr_config: None,
+            fork: None,
         };
         tx.send(req).unwrap();
         sent += 1;
