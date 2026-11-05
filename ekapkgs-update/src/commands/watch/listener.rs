@@ -12,30 +12,27 @@ use tracing::{debug, info, warn};
 
 use super::feeds::{poll_source, upstream_source_from_index};
 use super::index;
+use super::ResolvedRepo;
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
 use crate::database::{Database, UpstreamIndexEntry};
-use crate::vcs_sources::{UpstreamSource, compare_version_components, extract_version_from_tag};
+use crate::vcs_sources::{compare_version_components, extract_version_from_tag};
 
 /// Run the watch event loop.
 ///
-/// 1. Builds the upstream index on startup.
+/// 1. Builds the upstream index for each repo on startup.
 /// 2. Polls all indexed sources at `poll_interval`.
-/// 3. Rebuilds the index at `index_refresh_interval`.
-/// 4. Sends `UpdateRequest`s to the updater service when new versions are found.
+/// 3. Rebuilds the indexes at `index_refresh_interval`.
+/// 4. Sends `UpdateRequest`s (with per-repo routing) to the updater service.
 pub async fn run_watch_loop(
-    file: &str,
+    repos: Arc<Vec<ResolvedRepo>>,
     db: Database,
     updater_config: UpdaterServiceConfig,
     poll_interval: Duration,
     index_refresh_interval: Duration,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    // Build initial upstream index (single-repo legacy mode: empty repo name)
-    let stats = index::build_upstream_index("", file, &db, None).await?;
-    info!(
-        "Initial index: {} packages indexed, {} skipped, {} errors",
-        stats.indexed, stats.skipped, stats.errors
-    );
+    // Build initial upstream indexes for all repos
+    build_all_indexes(&repos, &db).await?;
 
     // Main loop: poll → dispatch → sleep → repeat
     let mut poll_ticker = tokio::time::interval(poll_interval);
@@ -76,9 +73,9 @@ pub async fn run_watch_loop(
                 // Poll all sources and send updates
                 let dispatched = poll_and_dispatch(
                     &sources,
+                    &repos,
                     &db,
                     &tx,
-                    file,
                     dry_run,
                 ).await;
 
@@ -120,27 +117,20 @@ pub async fn run_watch_loop(
                 }
             },
             _ = index_ticker.tick() => {
-                info!("Refreshing upstream index...");
-                match index::build_upstream_index("", file, &db, None).await {
-                    Ok(stats) => {
-                        info!(
-                            "Index refreshed: {} indexed, {} skipped, {} errors",
-                            stats.indexed, stats.skipped, stats.errors
-                        );
-                        // Reload source list so new packages are polled
-                        match db.get_all_upstream_sources().await {
-                            Ok(new_sources) => {
-                                info!("Now watching {} upstream sources", new_sources.len());
-                                sources = new_sources;
-                            },
-                            Err(e) => {
-                                warn!("Failed to reload sources after re-index: {}", e);
-                            },
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Index refresh failed: {}", e);
-                    },
+                info!("Refreshing upstream indexes...");
+                if let Err(e) = build_all_indexes(&repos, &db).await {
+                    warn!("Index refresh failed: {:#}", e);
+                } else {
+                    // Reload source list so new packages are polled
+                    match db.get_all_upstream_sources().await {
+                        Ok(new_sources) => {
+                            info!("Now watching {} upstream sources", new_sources.len());
+                            sources = new_sources;
+                        },
+                        Err(e) => {
+                            warn!("Failed to reload sources after re-index: {}", e);
+                        },
+                    }
                 }
             },
             _ = tokio::signal::ctrl_c() => {
@@ -153,22 +143,56 @@ pub async fn run_watch_loop(
     Ok(())
 }
 
+/// Build upstream indexes for all configured repos.
+async fn build_all_indexes(
+    repos: &[ResolvedRepo],
+    db: &Database,
+) -> anyhow::Result<()> {
+    for repo in repos {
+        let label = if repo.name.is_empty() {
+            "default".to_owned()
+        } else {
+            repo.name.clone()
+        };
+        match index::build_upstream_index(
+            &repo.name,
+            &repo.eval_entry_point,
+            db,
+            None,
+        )
+        .await
+        {
+            Ok(stats) => {
+                info!(
+                    "[{}] Index: {} indexed, {} skipped, {} errors",
+                    label, stats.indexed, stats.skipped, stats.errors
+                );
+            },
+            Err(e) => {
+                warn!("[{}] Index build failed: {:#}", label, e);
+            },
+        }
+    }
+    Ok(())
+}
+
 /// Poll all indexed upstream sources and dispatch [`UpdateRequest`]s for new versions.
 ///
 /// Returns the number of updates dispatched.
 async fn poll_and_dispatch(
     sources: &[UpstreamIndexEntry],
+    repos: &[ResolvedRepo],
     db: &Database,
     tx: &mpsc::UnboundedSender<UpdateRequest>,
-    eval_entry_point: &str,
     dry_run: bool,
 ) -> usize {
     // Rate-limit concurrent feed fetches to avoid hammering APIs
     let semaphore = Arc::new(Semaphore::new(8));
     let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // Deduplicate by (pname-approximation, version) to avoid queueing the same
+    // Deduplicate by (repo_name, upstream_key, version) to avoid queueing the same
     // update from multiple attr_paths that alias the same package.
-    let queued: Arc<Mutex<HashSet<(String, String)>>> = Arc::new(Mutex::new(HashSet::new()));
+    let queued: Arc<Mutex<HashSet<(String, String, String)>>> =
+        Arc::new(Mutex::new(HashSet::new()));
 
     let mut handles = Vec::new();
 
@@ -190,7 +214,7 @@ async fn poll_and_dispatch(
         let upstream_type = entry.upstream_type.clone();
         let upstream_key = entry.upstream_key.clone();
         let instance = entry.instance.clone();
-        let eval_entry = eval_entry_point.to_owned();
+        let repos_slice: Vec<ResolvedRepo> = repos.to_vec();
 
         let handle = tokio::spawn(async move {
             let _permit = sem_clone.acquire().await.expect("semaphore closed");
@@ -202,7 +226,7 @@ async fn poll_and_dispatch(
                 instance.as_deref(),
                 &db_clone,
                 &tx_clone,
-                &eval_entry,
+                &repos_slice,
                 dry_run,
                 &dispatched_clone,
                 &queued_clone,
@@ -227,16 +251,16 @@ async fn poll_and_dispatch(
 /// updates for any attr_paths that have a newer version available.
 #[allow(clippy::too_many_arguments)]
 async fn poll_single_source(
-    source: &UpstreamSource,
+    source: &crate::vcs_sources::UpstreamSource,
     upstream_type: &str,
     upstream_key: &str,
     instance: Option<&str>,
     db: &Database,
     tx: &mpsc::UnboundedSender<UpdateRequest>,
-    _eval_entry_point: &str,
+    repos: &[ResolvedRepo],
     dry_run: bool,
     dispatched: &std::sync::atomic::AtomicUsize,
-    queued: &Mutex<HashSet<(String, String)>>,
+    queued: &Mutex<HashSet<(String, String, String)>>,
 ) -> anyhow::Result<()> {
     // Fetch releases from this source
     let releases = poll_source(source).await?;
@@ -259,7 +283,7 @@ async fn poll_single_source(
 
     let latest_version = extract_version_from_tag(&best.tag_name).to_owned();
 
-    // Look up all attr_paths that track this source
+    // Look up all attr_paths that track this source (from all repos)
     let entries = db
         .get_attr_paths_for_source(upstream_type, upstream_key, instance)
         .await?;
@@ -289,8 +313,12 @@ async fn poll_single_source(
             Ok(true) => {},
         }
 
-        // Deduplicate
-        let dedup_key = (entry.upstream_key.clone(), latest_version.clone());
+        // Deduplicate by (repo_name, upstream_key, version)
+        let dedup_key = (
+            entry.repo_name.clone(),
+            entry.upstream_key.clone(),
+            latest_version.clone(),
+        );
         {
             let mut q = queued.lock().await;
             if !q.insert(dedup_key) {
@@ -314,15 +342,18 @@ async fn poll_single_source(
             );
         }
 
+        // Look up the resolved repo for this entry to get routing info
+        let repo = repos.iter().find(|r| r.name == entry.repo_name);
+
         let req = UpdateRequest {
             attr_path: entry.attr_path.clone(),
             drv_path: None,
             current_version: current.to_owned(),
             new_version: latest_version.clone(),
-            repo_name: None,
-            eval_entry_point: None,
-            pr_config: None,
-            fork: None,
+            repo_name: Some(entry.repo_name.clone()),
+            eval_entry_point: repo.map(|r| r.eval_entry_point.clone()),
+            pr_config: repo.and_then(|r| r.pr_config.clone()),
+            fork: repo.map(|r| r.fork.clone()),
         };
 
         if let Err(e) = tx.send(req) {

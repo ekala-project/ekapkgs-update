@@ -522,6 +522,49 @@ pub async fn merge_pull_request(
     Ok(())
 }
 
+/// Ensure a fork of the given repository exists for the authenticated user.
+///
+/// If the fork already exists, this is a no-op. Otherwise, creates a new fork
+/// via the GitHub API. Returns the clone URL of the fork.
+///
+/// GitHub's fork API is idempotent — calling it when a fork already exists
+/// returns the existing fork rather than creating a duplicate.
+pub async fn ensure_fork_exists(owner: &str, repo: &str, token: &str) -> anyhow::Result<String> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/forks");
+    debug!("Ensuring fork exists for {}/{}", owner, repo);
+
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::POST, &url, Some(token))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+
+    // 202 = fork created, 200 = fork already existed
+    let status = response.status();
+    if !status.is_success() && status.as_u16() != 202 {
+        let error_text = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub fork creation failed with status {status}: {error_text}");
+    }
+
+    #[derive(Deserialize)]
+    struct ForkResponse {
+        clone_url: String,
+        full_name: String,
+    }
+
+    let fork: ForkResponse = response
+        .json()
+        .await
+        .context("parse fork response JSON")?;
+
+    debug!("Fork available: {} ({})", fork.full_name, fork.clone_url);
+    Ok(fork.clone_url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
