@@ -82,11 +82,11 @@ ekapkgs-update/                     # Main CLI crate
         validator.rs                #   Apply changes + nix-build validation
         processor.rs                #   Serial queue processing loop
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
-      watch/                          # RSS/event-driven passive update mode
-        mod.rs                      #   WatchConfig
-        index.rs                    #   Upstream index builder (nix-eval-jobs → upstream_index table)
+      watch/                          # RSS/event-driven passive update mode (multi-repo)
+        mod.rs                      #   WatchConfig, ResolvedRepo, repo provisioning (clone/fork)
+        index.rs                    #   Per-repo upstream index builder (nix-eval-jobs → upstream_index)
         feeds.rs                    #   Feed polling (RSS/Atom/API), UpstreamSource reconstruction
-        listener.rs                 #   Main event loop: poll feeds, dispatch UpdateRequests
+        listener.rs                 #   Multi-repo event loop: poll feeds, route UpdateRequests per repo
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
@@ -166,33 +166,42 @@ The 9-phase workflow for each package:
 
 ## Architecture: The `watch` Command (Passive Mode)
 
-The `watch` command is an event-driven alternative to `run`. Instead of evaluating all packages on every cycle, it builds a reverse index and polls upstream feeds:
+The `watch` command is an event-driven alternative to `run`. Instead of evaluating all packages on every cycle, it builds a reverse index and polls upstream feeds. Supports **multi-repo mode** for poly-repo package sets:
 
 ```
-nix-eval-jobs (one-time index build)
+Config: [[repos]] (name, upstream, entrypoint, path)
         │
         ▼
-  upstream_index table ←──── periodic re-index (default: 24h)
-  (upstream_type, upstream_key → attr_path)
+  Repo provisioning ──── auto-clone if missing, auto-fork via GitHub API
+        │
+        ▼
+  Per-repo nix-eval-jobs ──── periodic re-index (default: 24h)
+        │
+        ▼
+  upstream_index table
+  (repo_name, upstream_type, upstream_key → attr_path)
         │
         ▼
   Feed Poller ────────────── RSS/Atom (GitHub, PyPI) + API (GitLab, SourceHut)
-  (Semaphore-limited)
+  (Semaphore-limited, deduplicated across repos)
         │ new version detected
         ▼
-  mpsc::unbounded_channel
+  mpsc::unbounded_channel ──── UpdateRequest carries per-repo routing
         │
         ▼
-  UpdaterServiceConfig::run_service  (reused unchanged from `run`)
+  UpdaterServiceConfig::run_service ──── uses per-request overrides for
+                                         eval_entry_point, pr_config, fork
 ```
 
-**Index builder** (`commands/watch/index.rs`): Scans all packages via `nix-eval-jobs`, extracts `PackageMetadata`, determines `UpstreamSource`, stores mapping in the `upstream_index` database table.
+**Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist, fetches if present. Creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig`.
+
+**Index builder** (`commands/watch/index.rs`): Scans packages via `nix-eval-jobs` per-repo, extracts `PackageMetadata`, determines `UpstreamSource`, stores mapping in the `upstream_index` table keyed by `(repo_name, attr_path, upstream_type, upstream_key)`.
 
 **Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub and PyPI (cheaper than API), falls back to existing `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing.
 
-**Event loop** (`commands/watch/listener.rs`): Polls all indexed sources at configurable intervals, compares against known versions, dispatches `UpdateRequest`s to the updater. Respects database backoff, deduplicates by (upstream_key, version).
+**Event loop** (`commands/watch/listener.rs`): Polls all indexed sources at configurable intervals, compares against known versions, dispatches `UpdateRequest`s with per-repo routing info. Deduplicates by (repo_name, upstream_key, version).
 
-**NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database, `Restart=always`.
+**NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database, `Restart=always`. `watch.repos` option configures multi-repo mode.
 
 ## Key Patterns
 
@@ -359,7 +368,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `RewriteError` | `rewrite/error.rs` | Parse, NotFound, InvalidResult, Regex, Structural |
 | `RunConfig` | `commands/run/config.rs` | Batch mode configuration |
 | `UpdateConfig` | `commands/update/config.rs` | Single-update configuration |
-| `UpdateRequest` | `commands/run/types.rs` | Message from checker → updater (attr_path, versions) |
+| `UpdateRequest` | `commands/run/types.rs` | Message from checker → updater (attr_path, versions, per-repo routing) |
 | `UpdateResult` | `commands/run/types.rs` | Outcome: Updated, Skipped, DryRun |
 | `PrEnhancementsConfig` | `commands/pr_enhancements.rs` | CVE, Repology, rebuild, Cachix, dir diff flags |
 | `CommitStrategy` | `cli.rs` | Worktrees vs Branch |
@@ -374,7 +383,9 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `AuditFinding` | `commands/audit/types.rs` | Single finding (severity, category, check name, file path) |
 | `AuditConfig` | `commands/audit/types.rs` | Controls which checks to run and minimum severity |
 | `WatchConfig` | `commands/watch/mod.rs` | Watch (passive/RSS-driven) mode configuration |
-| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (source → attr_path mapping) |
+| `ResolvedRepo` | `commands/watch/mod.rs` | Runtime-resolved repo with paths, PrConfig, fork remote |
+| `RepoConfig` | `config.rs` | TOML config for a watched repo (name, upstream, entrypoint, path) |
+| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (repo_name + source → attr_path) |
 | `ReviewConfig` | `commands/review.rs` | PR review configuration (repo, PR#, tests, best-practices flags) |
 | `RepoCoords` | `commands/review.rs` | Parsed repository owner/repo coordinates |
 
