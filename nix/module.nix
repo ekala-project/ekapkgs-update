@@ -34,7 +34,13 @@ let
     database = "/var/lib/${cfg.stateDirectory}/updates.db";
     file = cfg.packagesFile;
     repos = map (r: {
-      inherit (r) name upstream entrypoint fork path;
+      inherit (r)
+        name
+        upstream
+        entrypoint
+        fork
+        path
+        ;
     }) cfg.watch.repos;
   } cfg.settings;
 
@@ -531,8 +537,10 @@ in
       }
       {
         assertion =
-          let names = map (r: r.name) cfg.watch.repos;
-          in names == lib.unique names;
+          let
+            names = map (r: r.name) cfg.watch.repos;
+          in
+          names == lib.unique names;
         message = ''
           services.ekapkgs-update.watch.repos: repo names must be unique.
         '';
@@ -698,7 +706,8 @@ in
           "/nix/var/nix/daemon-socket"
           "/nix/var/nix/profiles/per-user"
           "/nix/var/nix/gcroots/per-user"
-        ] ++ (map (r: r.path) cfg.watch.repos);
+        ]
+        ++ (map (r: r.path) cfg.watch.repos);
       };
     };
 
