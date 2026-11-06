@@ -547,6 +547,10 @@ in
       }
     ];
 
+    nixpkgs.overlays = [
+      (import ./overlay.nix)
+    ];
+
     users.users = lib.mkIf (cfg.user == "ekapkgs-update") {
       ekapkgs-update = {
         isSystemUser = true;
