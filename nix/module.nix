@@ -224,7 +224,7 @@ in
 
     user = lib.mkOption {
       type = lib.types.str;
-      default = "eka-ci";
+      default = "ekapkgs-update";
       description = ''
         System user the daemon runs as. The user is created automatically
         when this module is enabled.
@@ -233,7 +233,7 @@ in
 
     group = lib.mkOption {
       type = lib.types.str;
-      default = "eka-ci";
+      default = "ekapkgs-update";
       description = ''
         Group the daemon runs as. The group is created automatically when
         this module is enabled.
@@ -547,18 +547,18 @@ in
       }
     ];
 
-    users.users = lib.mkIf (cfg.user == "eka-ci") {
-      eka-ci = {
+    users.users = lib.mkIf (cfg.user == "ekapkgs-update") {
+      ekapkgs-update = {
         isSystemUser = true;
         group = cfg.group;
         home = "/var/lib/${cfg.stateDirectory}";
         createHome = false; # systemd StateDirectory= handles this
-        description = "ekapkgs-update CI daemon user";
+        description = "ekapkgs-update daemon user";
       };
     };
 
-    users.groups = lib.mkIf (cfg.group == "eka-ci") {
-      eka-ci = { };
+    users.groups = lib.mkIf (cfg.group == "ekapkgs-update") {
+      ekapkgs-update = { };
     };
 
     systemd.services.ekapkgs-update = {
