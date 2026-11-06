@@ -21,28 +21,50 @@ let
   #                          `LoadCredential=` and exported by a helper.
   useCredential = cfg.cachix.authTokenFile != null;
 
+  # Recursively strip null values and empty attrsets so that TOML
+  # serialization doesn't fail with "unsupported unit type".
+  removeNulls =
+    let
+      go =
+        v:
+        if builtins.isAttrs v then
+          let
+            filtered = lib.filterAttrs (_: val: val != null) (builtins.mapAttrs (_: go) v);
+          in
+          lib.filterAttrs (_: val: !(builtins.isAttrs val && val == { })) filtered
+        else if builtins.isList v then
+          map go v
+        else
+          v;
+    in
+    go;
+
   # Merge user settings with computed defaults.
-  effectiveSettings = lib.recursiveUpdate {
-    database = "/var/lib/${cfg.stateDirectory}/updates.db";
-    file = cfg.packagesFile;
-  } cfg.settings;
+  effectiveSettings = removeNulls (
+    lib.recursiveUpdate {
+      database = "/var/lib/${cfg.stateDirectory}/updates.db";
+      file = cfg.packagesFile;
+    } cfg.settings
+  );
 
   configFile = settingsFormat.generate "ekapkgs-update.toml" effectiveSettings;
 
   # Watch mode effective settings: merge defaults with user-supplied watch settings.
-  watchEffectiveSettings = lib.recursiveUpdate {
-    database = "/var/lib/${cfg.stateDirectory}/updates.db";
-    file = cfg.packagesFile;
-    repos = map (r: {
-      inherit (r)
-        name
-        upstream
-        entrypoint
-        fork
-        path
-        ;
-    }) cfg.watch.repos;
-  } cfg.settings;
+  watchEffectiveSettings = removeNulls (
+    lib.recursiveUpdate {
+      database = "/var/lib/${cfg.stateDirectory}/updates.db";
+      file = cfg.packagesFile;
+      repos = map (r: {
+        inherit (r)
+          name
+          upstream
+          entrypoint
+          fork
+          path
+          ;
+      }) cfg.watch.repos;
+    } cfg.settings
+  );
 
   watchConfigFile = settingsFormat.generate "ekapkgs-update-watch.toml" watchEffectiveSettings;
 
