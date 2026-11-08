@@ -296,28 +296,62 @@ pub async fn update_single_variant(
 
 /// Find the variants.nix file for a mkManyVariants package
 pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<String> {
-    // Get the package's meta.position to find the directory
     let normalized_entry = normalize_entry_point(file);
-    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
 
+    // First try: look for variants.nix next to meta.position
+    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
     let position = eval_nix_expr(&position_expr).await?;
     let (file_path, _) = position
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
 
-    // The variants.nix file should be in the same directory
     let path = std::path::Path::new(file_path);
     let dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Cannot get parent directory of {file_path}"))?;
 
     let variants_path = dir.join("variants.nix");
-
     if variants_path.exists() {
-        Ok(variants_path.to_string_lossy().to_string())
-    } else {
-        anyhow::bail!("variants.nix not found in {}", dir.display())
+        return Ok(variants_path.to_string_lossy().to_string());
     }
+
+    // Fallback: use variantArgs position to find the actual variants file.
+    // This handles packages where mkDerivation is called in a different directory
+    // than where variants.nix lives (e.g. linux kernel, ghc, llvm, binutils).
+    debug!(
+        "variants.nix not found next to meta.position ({}), trying variantArgs fallback",
+        dir.display()
+    );
+    let variant_pos_expr = format!(
+        "with import {normalized_entry} {{ }}; let va = {attr_path}.variantArgs; pos = builtins.unsafeGetAttrPos \"version\" va; in pos.file"
+    );
+    if let Ok(variant_file) = eval_nix_expr(&variant_pos_expr).await {
+        let variant_path = std::path::Path::new(&variant_file);
+        if variant_path.exists()
+            && variant_path
+                .file_name()
+                .map_or(false, |f| f == "variants.nix")
+        {
+            info!(
+                "Found variants.nix via variantArgs fallback: {}",
+                variant_file
+            );
+            return Ok(variant_file);
+        }
+        // The variantArgs position points to a file that contains variant data
+        if let Some(parent) = variant_path.parent() {
+            let fallback_variants = parent.join("variants.nix");
+            if fallback_variants.exists() {
+                info!(
+                    "Found variants.nix next to variantArgs source: {}",
+                    fallback_variants.display()
+                );
+                return Ok(fallback_variants.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    anyhow::bail!("variants.nix not found in {}", dir.display())
 }
 
 /// Discover new upstream version series not covered by existing variants
