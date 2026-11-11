@@ -1,3 +1,4 @@
+mod branch_git;
 mod checker;
 mod claude_fix;
 mod config;
