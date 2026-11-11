@@ -739,6 +739,12 @@ in
       };
     };
 
+    # Ensure repo directories exist before the watch service starts.
+    # systemd's ReadWritePaths fails at namespace setup if the paths are missing.
+    systemd.tmpfiles.rules = lib.mkIf cfg.watch.enable (
+      map (r: "d ${r.path} 0750 ${cfg.user} ${cfg.group} -") cfg.watch.repos
+    );
+
     # Firewall configuration
     networking.firewall.allowedTCPPorts = lib.mkIf (cfg.web.enable && cfg.web.openFirewall) [
       cfg.web.port
