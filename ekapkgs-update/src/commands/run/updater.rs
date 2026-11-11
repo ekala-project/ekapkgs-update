@@ -525,7 +525,7 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
 
 /// Perform a package update directly in the working tree (no worktree isolation).
 /// Used in commit mode where changes are committed directly to the repo.
-/// On failure, reverts dirty changes with `git checkout -- .`.
+/// On failure, reverts every path the update dirtied (see `branch_git`).
 pub(super) async fn perform_direct_update(
     db: &Database,
     _session_id: &str,
@@ -549,6 +549,19 @@ pub(super) async fn perform_direct_update(
     };
 
     debug!("{}: File location: {}", attr_path, file_location);
+
+    // Determine the package directory for git operations
+    let pkg_dir = std::path::Path::new(&file_location)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_location.clone());
+
+    // Snapshot dirty paths so that edits outside pkg_dir (e.g. new dependency
+    // packages created by a Claude fix) are committed or reverted with this update.
+    let snapshot = {
+        let _lock = git_mutex.lock().await;
+        super::branch_git::DirtySnapshot::take(Path::new(&pkg_dir)).await?
+    };
 
     // Perform the update directly in the working tree (commit handled separately under mutex).
     // Use the checker's validated new_version as the explicit target so that
@@ -576,12 +589,6 @@ pub(super) async fn perform_direct_update(
         )
         .await;
 
-    // Determine the package directory for git operations
-    let pkg_dir = std::path::Path::new(&file_location)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_location.clone());
-
     match update_result {
         Ok((removed_patches, test_result)) => {
             // In branch mode, test failures should fail the update so the
@@ -593,23 +600,7 @@ pub(super) async fn perform_direct_update(
                 {
                     let _lock = git_mutex.lock().await;
                     info!("{}: Reverting {}...", attr_path, pkg_dir);
-                    let revert_output = tokio::process::Command::new("git")
-                        .args(["checkout", "--", &pkg_dir])
-                        .output()
-                        .await;
-
-                    match revert_output {
-                        Ok(output) if output.status.success() => {
-                            debug!("{}: Successfully reverted changes", attr_path);
-                        },
-                        Ok(output) => {
-                            let stderr_msg = String::from_utf8_lossy(&output.stderr);
-                            warn!("{}: Failed to revert changes: {}", attr_path, stderr_msg);
-                        },
-                        Err(revert_err) => {
-                            warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
-                        },
-                    }
+                    snapshot.revert(attr_path, &pkg_dir).await;
                 }
 
                 // Record as a test failure (distinct from build failure)
@@ -649,19 +640,7 @@ pub(super) async fn perform_direct_update(
             {
                 let _lock = git_mutex.lock().await;
 
-                let add_output = tokio::process::Command::new("git")
-                    .args(["add", &pkg_dir])
-                    .output()
-                    .await;
-
-                match &add_output {
-                    Ok(output) if !output.status.success() => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!("{}: git add failed: {}", attr_path, stderr);
-                    },
-                    Err(e) => warn!("{}: Failed to stage changes: {}", attr_path, e),
-                    _ => {},
-                }
+                snapshot.stage(attr_path, &pkg_dir).await;
 
                 let commit_msg = format!("{attr_path}: {current_version} -> {new_version}");
                 let commit_output = tokio::process::Command::new("git")
@@ -743,21 +722,7 @@ pub(super) async fn perform_direct_update(
                         {
                             let _lock = git_mutex.lock().await;
 
-                            let add_output = tokio::process::Command::new("git")
-                                .args(["add", &pkg_dir])
-                                .output()
-                                .await;
-
-                            match &add_output {
-                                Ok(output) if !output.status.success() => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    warn!("{}: git add failed: {}", attr_path, stderr);
-                                },
-                                Err(e) => {
-                                    warn!("{}: Failed to stage changes: {}", attr_path, e);
-                                },
-                                _ => {},
-                            }
+                            snapshot.stage(attr_path, &pkg_dir).await;
 
                             let commit_msg =
                                 format!("{attr_path}: {current_version} -> {new_version}");
@@ -830,27 +795,11 @@ pub(super) async fn perform_direct_update(
                 } // else (should_attempt_claude_fix)
             }
 
-            // Revert only this package's files under the mutex
+            // Revert everything this update touched under the mutex
             {
                 let _lock = git_mutex.lock().await;
                 info!("{}: Reverting {}...", attr_path, pkg_dir);
-                let revert_output = tokio::process::Command::new("git")
-                    .args(["checkout", "--", &pkg_dir])
-                    .output()
-                    .await;
-
-                match revert_output {
-                    Ok(output) if output.status.success() => {
-                        debug!("{}: Successfully reverted changes", attr_path);
-                    },
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!("{}: Failed to revert changes: {}", attr_path, stderr);
-                    },
-                    Err(revert_err) => {
-                        warn!("{}: Failed to run git checkout: {}", attr_path, revert_err);
-                    },
-                }
+                snapshot.revert(attr_path, &pkg_dir).await;
             }
 
             // Record failure in database
