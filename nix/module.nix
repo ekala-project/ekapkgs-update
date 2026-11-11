@@ -644,7 +644,10 @@ in
     systemd.services.ekapkgs-update-web = lib.mkIf cfg.web.enable {
       description = "ekapkgs-update web monitoring portal";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
+      after = [
+        "network-online.target"
+        "ekapkgs-update.service"
+      ];
       wants = [ "network-online.target" ];
 
       serviceConfig = {
@@ -683,8 +686,7 @@ in
         RestrictNamespaces = true;
         SystemCallArchitectures = "native";
 
-        # Only needs read access to database directory
-        ReadOnlyPaths = [ "/var/lib/${cfg.stateDirectory}" ];
+        ReadWritePaths = [ "/var/lib/${cfg.stateDirectory}" ];
       };
     };
 
