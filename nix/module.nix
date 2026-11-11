@@ -736,14 +736,20 @@ in
           "/nix/var/nix/gcroots/per-user"
         ]
         ++ (map (r: r.path) cfg.watch.repos);
+
+        # "+" prefix runs as root outside the namespace, ensuring directories
+        # exist before systemd sets up mount namespacing for ReadWritePaths.
+        ExecStartPre = map (
+          r:
+          "+${pkgs.writeShellScript "ensure-repo-dir-${r.name}" ''
+            if [ ! -d "${r.path}" ]; then
+              mkdir -p "${r.path}"
+              chown ${cfg.user}:${cfg.group} "${r.path}"
+            fi
+          ''}"
+        ) cfg.watch.repos;
       };
     };
-
-    # Ensure repo directories exist before the watch service starts.
-    # systemd's ReadWritePaths fails at namespace setup if the paths are missing.
-    systemd.tmpfiles.rules = lib.mkIf cfg.watch.enable (
-      map (r: "d ${r.path} 0750 ${cfg.user} ${cfg.group} -") cfg.watch.repos
-    );
 
     # Firewall configuration
     networking.firewall.allowedTCPPorts = lib.mkIf (cfg.web.enable && cfg.web.openFirewall) [
