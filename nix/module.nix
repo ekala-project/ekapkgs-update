@@ -734,20 +734,7 @@ in
           "/nix/var/nix/daemon-socket"
           "/nix/var/nix/profiles/per-user"
           "/nix/var/nix/gcroots/per-user"
-        ]
-        ++ (map (r: r.path) cfg.watch.repos);
-
-        # "+" prefix runs as root outside the namespace, ensuring directories
-        # exist before systemd sets up mount namespacing for ReadWritePaths.
-        ExecStartPre = map (
-          r:
-          "+${pkgs.writeShellScript "ensure-repo-dir-${r.name}" ''
-            if [ ! -d "${r.path}" ]; then
-              mkdir -p "${r.path}"
-              chown ${cfg.user}:${cfg.group} "${r.path}"
-            fi
-          ''}"
-        ) cfg.watch.repos;
+        ];
       };
     };
 
