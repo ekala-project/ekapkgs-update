@@ -74,13 +74,13 @@ fn display_grouped_by_error(results: &[PhaseRecord]) {
         let error_type = record
             .error_type
             .clone()
-            .unwrap_or_else(|| "Unknown".to_string());
+            .unwrap_or_else(|| "Unknown".to_owned());
         by_error.entry(error_type).or_default().push(record);
     }
 
     // Sort by count descending
     let mut sorted: Vec<_> = by_error.iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by_key(|(_, records)| std::cmp::Reverse(records.len()));
 
     for (error_type, records) in sorted {
         println!("● {} ({} occurrence(s))", error_type, records.len());
@@ -126,8 +126,8 @@ fn display_table(results: &[PhaseRecord]) {
 /// Display failed update logs from the update_logs table
 fn display_failed_logs(logs: &[crate::database::UpdateLog]) {
     println!(
-        "{:<40} {:<15} {:<15} {:<15} {}",
-        "Package", "Old", "New", "When", "Error"
+        "{:<40} {:<15} {:<15} {:<15} Error",
+        "Package", "Old", "New", "When"
     );
     println!("{}", "-".repeat(120));
 
@@ -169,7 +169,7 @@ fn format_relative_time(dt: &DateTime<Utc>) -> String {
     let diff = now.signed_duration_since(*dt);
 
     if diff.num_seconds() < 60 {
-        "just now".to_string()
+        "just now".to_owned()
     } else if diff.num_minutes() < 60 {
         format!("{}m ago", diff.num_minutes())
     } else if diff.num_hours() < 24 {
@@ -184,7 +184,7 @@ fn format_relative_time(dt: &DateTime<Utc>) -> String {
 /// Truncate a string to a maximum length, adding "..." if truncated
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
+        s.to_owned()
     } else {
         format!("{}...", &s[..max_len - 3])
     }

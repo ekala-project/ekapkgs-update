@@ -98,7 +98,7 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
                 let mins = dur.num_minutes();
                 format!("{}m", mins)
             } else {
-                "---".to_string()
+                "---".to_owned()
             };
 
             let status_str = format!("{:?}", session.status);
