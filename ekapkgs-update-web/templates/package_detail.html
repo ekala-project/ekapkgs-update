@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block title %}{{ d.attr_path }}{% endblock %}
+{% block nav_packages %}aria-current="page"{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb small" aria-label="Breadcrumb"><a href="/packages">Packages</a> / <span>{{ d.attr_path }}</span></nav>
+<div class="page-head">
+  <h1 class="attr-title">{{ d.attr_path }}</h1>
+  {%- if let Some(p) = d.detail %}
+  <p>{% call m::badge(p.item.badge) %}{% if !p.description.is_empty() %} <span class="muted">{{ p.description }}</span>{% endif %}</p>
+  {%- endif %}
+</div>
+
+{%- if d.repo_chips.len() > 1 %}
+<div class="repo-switch">
+  <p class="small muted">This attribute exists in {{ d.repo_chips.len() }} repositories. Showing <strong>{{ d.repo }}</strong>.</p>
+  {% call m::chips(d.repo_chips, "Repository") %}
+</div>
+{%- endif %}
+
+<div class="grid-2">
+  <section class="panel" aria-labelledby="h-state">
+    <header class="panel-head"><h2 id="h-state">Update state</h2></header>
+    {%- if let Some(p) = d.detail %}
+    <dl class="facts">
+      <div><dt>Status</dt><dd>{% call m::badge(p.item.badge) %}</dd></div>
+      <div><dt>Current version</dt><dd>{% call m::ver(p.item.current) %}</dd></div>
+      <div><dt>Latest compatible upstream</dt><dd>{% call m::ver(p.item.latest) %}</dd></div>
+      {%- if p.item.proposed.is_set() %}
+      <div><dt>Proposed</dt><dd>{% call m::ver(p.item.proposed) %}{% if let Some(pr) = p.item.pr_url %} · <a href="{{ pr }}" rel="noopener noreferrer" target="_blank">{{ p.item.pr_label }}</a>{% endif %}</dd></div>
+      {%- endif %}
+      {%- if p.baseline.is_set() %}
+      <div><dt>Watch baseline</dt><dd>{% call m::ver(p.baseline) %}{% if p.is_backlog %} <span class="small muted">(backlog: seen during bootstrap, left for <code>run</code>)</span>{% endif %}</dd></div>
+      {%- endif %}
+      <div><dt>Last checked</dt><dd>{% call m::ts(p.item.checked) %}</dd></div>
+      <div><dt>Last attempted</dt><dd>{% call m::ts(p.last_attempted) %}</dd></div>
+      <div><dt>Next attempt</dt><dd>{% call m::ts(p.next_attempt) %}{% if p.in_backoff %} <span class="tag">backoff</span>{% endif %}</dd></div>
+      <div><dt>Consecutive failures</dt><dd>{% if p.item.failures > 0 %}<span class="tone-text-critical">{{ p.item.failures_text }}</span>{% if p.failed_version.is_set() %} <span class="muted">targeting {% call m::ver(p.failed_version) %}</span>{% endif %}{% else %}0{% endif %}</dd></div>
+      <div><dt>Rebuilds</dt><dd>{{ p.item.rebuilds }}</dd></div>
+      {%- if p.cve_resolved > 0 || p.cve_introduced > 0 %}
+      <div><dt>CVEs</dt><dd>{{ p.cve_resolved }} resolved · {{ p.cve_introduced }} introduced</dd></div>
+      {%- endif %}
+      {%- if let Some(sh) = p.last_session_href %}
+      <div><dt>Last session</dt><dd><a href="{{ sh }}" class="mono">{{ p.last_session_short }}</a></dd></div>
+      {%- endif %}
+    </dl>
+    {%- if !p.last_error.is_empty() %}
+    <div class="notice tone-critical">
+      <strong>Last error</strong>
+      <pre class="code">{{ p.last_error }}</pre>
+    </div>
+    {%- endif %}
+    {%- else %}
+    <p class="muted">No update state recorded for this repository yet. It is known from the watch index or past sessions only.</p>
+    {%- endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="h-meta">
+    <header class="panel-head"><h2 id="h-meta">Package and upstream</h2></header>
+    <dl class="facts">
+      <div><dt>Repository</dt><dd>{{ d.repo }}</dd></div>
+      {%- if let Some(p) = d.detail %}
+      {%- if !p.item.pname.is_empty() %}<div><dt>pname</dt><dd><code>{{ p.item.pname }}</code></dd></div>{% endif %}
+      {%- if let Some(hp) = p.homepage %}<div><dt>Homepage</dt><dd><a href="{{ hp }}" rel="noopener noreferrer" target="_blank">{{ hp }}</a></dd></div>{% endif %}
+      {%- if !p.upstream_label.is_empty() %}
+      <div><dt>Upstream</dt><dd>{% if let Some(u) = p.upstream_url %}<a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ p.upstream_label }}</a>{% else %}{{ p.upstream_label }}{% endif %}</dd></div>
+      {%- endif %}
+      {%- if !p.semver.is_empty() %}<div><dt>Semver strategy</dt><dd>{{ p.semver }}</dd></div>{% endif %}
+      {%- endif %}
+    </dl>
+
+    {%- if !d.index.is_empty() %}
+    <h3 class="subhead">Watch index</h3>
+    <div class="table-wrap">
+      <table class="table compact">
+        <thead><tr><th scope="col">Source</th><th scope="col">Indexed version</th><th scope="col">Selection</th><th scope="col">Indexed</th></tr></thead>
+        <tbody>
+          {%- for i in d.index %}
+          <tr>
+            <td><span class="tag">{{ i.kind }}</span> {% if let Some(u) = i.url %}<a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ i.key }}</a>{% else %}{{ i.key }}{% endif %}{% if !i.instance.is_empty() %} <span class="muted small">@ {{ i.instance }}</span>{% endif %}{% if !i.src_url.is_empty() %}<div class="small muted clip" title="{{ i.src_url }}">{{ i.src_url }}</div>{% endif %}</td>
+            <td>{% call m::ver(i.current) %}</td>
+            <td class="small">{% if !i.semver.is_empty() %}{{ i.semver }}{% else %}<span class="muted">default</span>{% endif %}{% if !i.version_regex.is_empty() %} · regex <code>{{ i.version_regex }}</code>{% endif %}{% if i.prereleases %} · prereleases{% endif %}</td>
+            <td>{% call m::ts(i.indexed) %}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    {%- endif %}
+
+    {%- if !d.sources.is_empty() %}
+    <h3 class="subhead">Source health</h3>
+    <div class="table-wrap">
+      <table class="table compact">
+        <thead><tr><th scope="col">Source</th><th scope="col">Latest release</th><th scope="col">Poll</th><th scope="col">Last success</th></tr></thead>
+        <tbody>
+          {%- for s in d.sources %}
+          <tr>
+            <td><span class="tag">{{ s.kind }}</span> {% if let Some(u) = s.url %}<a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ s.key }}</a>{% else %}{{ s.key }}{% endif %}</td>
+            <td>{% call m::ver(s.latest) %} <span class="muted small">changed {% call m::ts(s.changed) %}</span></td>
+            <td>{% call m::badge(s.badge) %} <span class="muted small">{% call m::ts(s.polled) %}</span>{% if !s.error.is_empty() %}<div class="small tone-text-critical clip" title="{{ s.error }}">{{ s.error }}</div>{% endif %}</td>
+            <td>{% call m::ts(s.success) %}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    {%- endif %}
+  </section>
+</div>
+
+<section class="panel" aria-labelledby="h-history">
+  <header class="panel-head">
+    <h2 id="h-history">Update history</h2>
+    <span class="small muted">One row per session, phases in execution order</span>
+  </header>
+  {%- if d.history.is_empty() %}
+  <p class="muted">No update attempts recorded for this package.</p>
+  {%- else %}
+  <ol class="history">
+    {%- for g in d.history %}
+    <li class="history-item">
+      <div class="history-head">
+        {% call m::badge(g.outcome) %}
+        <a href="{{ g.session_href }}" class="mono">{{ g.session_short }}</a>
+        {%- if !g.mode.is_empty() %} <span class="tag">{{ g.mode }}</span>{% endif %}
+        <span class="muted small">{% call m::ts(g.started) %}{% if !g.duration.is_empty() %} · {{ g.duration }}{% endif %}</span>
+      </div>
+      {% call m::phase_chips(g.chips) %}
+      {%- for e in g.errors %}
+      {% call m::phase_error(e, false) %}
+      {%- endfor %}
+    </li>
+    {%- endfor %}
+  </ol>
+  {%- endif %}
+</section>
+
+<section class="panel" aria-labelledby="h-logs">
+  <header class="panel-head">
+    <h2 id="h-logs">Failure logs</h2>
+    <a class="small" href="{{ d.failures_href }}">Search failures</a>
+  </header>
+  {%- if d.logs.is_empty() %}
+  <p class="muted">No failure logs recorded.</p>
+  {%- else %}
+  {%- for l in d.logs %}
+  {% call m::log_entry(l, false) %}
+  {%- endfor %}
+  {%- endif %}
+</section>
+
+{%- if !d.autofix.is_empty() %}
+<section class="panel" aria-labelledby="h-autofix">
+  <header class="panel-head">
+    <h2 id="h-autofix">Autofix</h2>
+    <span class="small muted">LLM fix attempts (not scoped by repository)</span>
+  </header>
+  {%- for a in d.autofix %}
+  <div class="autofix-item">
+    <div class="history-head">
+      {% call m::badge(a.badge) %}
+      <span>{{ a.error_type }} in {{ a.failed_phase }}</span>
+      <span class="muted small">attempts {{ a.attempts_text }} · queued {% call m::ts(a.created) %} · updated {% call m::ts(a.updated) %}{% if a.fixed.is_set() %} · fixed {% call m::ts(a.fixed) %}{% endif %} · <a href="{{ a.session_href }}">session {{ a.session_short }}</a></span>
+    </div>
+    {%- if !a.attempts.is_empty() %}
+    <div class="table-wrap">
+      <table class="table compact">
+        <thead><tr><th scope="col" class="num">#</th><th scope="col">Outcome</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Tokens</th><th scope="col">Build</th><th scope="col">Error</th></tr></thead>
+        <tbody>
+          {%- for t in a.attempts %}
+          <tr>
+            <td class="num">{{ t.number }}</td>
+            <td>{% call m::badge(t.badge) %}{% if t.changes_applied %} <span class="tag">applied</span>{% endif %}</td>
+            <td>{% call m::ts(t.started) %}</td>
+            <td>{{ t.duration }}</td>
+            <td class="small">{{ t.tokens }}</td>
+            <td>{{ t.build }}</td>
+            <td class="small clip" title="{{ t.error }}">{{ t.error }}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    {%- endif %}
+    {%- if !a.artifacts_path.is_empty() %}<p class="small">Artifacts: <code>{{ a.artifacts_path }}</code></p>{% endif %}
+  </div>
+  {%- endfor %}
+</section>
+{%- endif %}
+
+<p class="small muted">Raw data: <a href="{{ d.api_href }}">{{ d.api_href }}</a></p>
+{% endblock %}

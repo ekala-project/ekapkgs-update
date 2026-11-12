@@ -5,131 +5,186 @@ ekapkgs-update uses SQLite to persistently track package updates, maintain histo
 ## Overview
 
 The database stores:
-1. **Update records** - Current state, version history, and timing information for each package
-2. **Update logs** - Failure records for post-mortem analysis
-3. **Session tracking** - Metadata about entire update runs
-4. **Phase records** - Granular tracking of update stages within a session
-5. **Cache entries** - Cached CVE and Repology data to minimize API calls
+1. **Update records**: the state of each package per repository (status, versions, failures, backoff, PRs, cached metadata)
+2. **Update logs**: failure records for post-mortem analysis
+3. **Session tracking**: one row per `run`, and one per `watch` poll cycle that dispatched updates
+4. **Phase records**: per-package workflow phases within a session
+5. **Watch state**: watched repositories, the poll/index cycle log, upstream source health and the upstream index
+6. **Cache entries**: cached CVE and Repology data, to minimize API calls
 
-The database uses SQLite's WAL (Write-Ahead Logging) mode for concurrency and is initialized with schema migrations.
+The database uses SQLite's WAL (Write-Ahead Logging) mode for concurrency. It is
+initialized with the schema migrations in `ekapkgs-update/migrations/`. The web
+dashboard (`ekapkgs-update-web`) reads the same file.
+
+### Repository scoping
+
+Package rows are keyed by `(repo_name, attr_path)`:
+
+- `repo_name = ''` is used by the `run` command and by legacy single-repo `watch`.
+- Multi-repo `watch` uses the `name` of each `[[repos]]` entry. The name
+  `default` is reserved, because the dashboard uses it as the label for `''`.
+
+`update_logs`, `update_phases`, `autofix_queue` and `autofix_attempts` carry
+`repo_name` too.
 
 ## Core Tables
 
 ### updates
 
-Tracks the current state of each package and when it should be re-checked.
+The current state of each package and when it may be re-checked.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `attr_path` | TEXT PRIMARY KEY | Nix attribute path (e.g., `python312Packages.django`) |
-| `last_attempted` | TEXT | RFC 3339 timestamp of the last check attempt |
-| `next_attempt` | TEXT | RFC 3339 timestamp when the package should be checked again |
-| `current_version` | TEXT | Current package version |
-| `proposed_version` | TEXT | Next version to attempt (NULL if no update pending) |
-| `latest_upstream_version` | TEXT | Latest version available upstream |
-| `rebuild_count` | INTEGER | Number of packages that would rebuild if this update succeeds |
-| `pr_url` | TEXT | URL of the PR created for this update |
-| `pr_number` | INTEGER | GitHub/GitLab PR number |
+| `repo_name` | TEXT | Repository scope (`''` = default) |
+| `attr_path` | TEXT | Nix attribute path |
+| `status` | TEXT | `pending`, `up_to_date`, `outdated`, `proposed`, `failed`, `upstream_error` |
+| `current_version` | TEXT | Version in the tree |
+| `latest_upstream_version` | TEXT | Best upstream release compatible with the package's strategy |
+| `proposed_version` | TEXT | Version that was built and proposed (PR or commit) |
+| `baseline_version` | TEXT | `watch`: upstream version recorded by the first observation |
+| `failed_version` | TEXT | Target version of the last failed attempt |
+| `failure_count` | INTEGER | Consecutive failed attempts (reset on success) |
+| `last_error` | TEXT | One-line summary of the last failure / upstream error |
+| `last_session_id` | TEXT | Session of the last attempt |
+| `last_checked` | TEXT | Last comparison against upstream |
+| `last_attempted` | TEXT | Last update attempt |
+| `next_attempt` | TEXT | Backoff: not checked / attempted before this |
+| `pr_url`, `pr_number` | TEXT, INTEGER | Pull request created for `proposed_version` |
+| `rebuild_count` | INTEGER | Packages that rebuild if the update lands |
+| `cve_resolved_count`, `cve_introduced_count` | INTEGER | OSV analysis of the proposed update |
+| `pname`, `description`, `homepage` | TEXT | Cached package metadata |
+| `upstream_type`, `upstream_key`, `upstream_instance` | TEXT | Upstream source |
+| `semver_strategy` | TEXT | Effective strategy (`latest`, `major`, `minor`, `patch`) |
 
-**Example:**
-```
-attr_path: "python312Packages.requests"
-last_attempted: "2024-05-15T10:30:00Z"
-next_attempt: "2024-05-17T10:30:00Z"
-current_version: "2.31.0"
-proposed_version: "2.32.0"
-latest_upstream_version: "2.32.0"
-rebuild_count: 15
-pr_url: "https://github.com/example/example/pull/12345"
-pr_number: 12345
-```
+**Primary Key:** `(repo_name, attr_path)`
+
+A `proposed` package becomes `up_to_date` when the tree's `current_version`
+catches up with `proposed_version` (the PR was merged).
 
 ### update_logs
 
-Records failure details for post-mortem analysis and debugging.
+Failure details for post-mortem analysis (`log`, `query`, `report`, `retry`).
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `drv_path` | TEXT PRIMARY KEY | Full derivation path from `/nix/store/` |
-| `attr_path` | TEXT | Nix attribute path (for correlation) |
-| `timestamp` | TEXT | RFC 3339 timestamp when failure occurred |
-| `status` | TEXT | Always 'failed' (for future extensibility) |
+| `drv_path` | TEXT PRIMARY KEY | Derivation path, or `<repo>:<attr_path>@<version>` when there is none (watch) |
+| `repo_name` | TEXT | Repository scope |
+| `attr_path` | TEXT | Nix attribute path |
+| `session_id` | TEXT | Session of the attempt |
+| `timestamp` | TEXT | When the failure occurred |
+| `status` | TEXT | Always `failed` |
+| `phase` | TEXT | Phase that failed (e.g. `build`, `testing`) |
+| `error_type` | TEXT | `UpdateError` variant (e.g. `BuildError`, `HashMismatchError`) |
 | `error_log` | TEXT | Complete error message and context |
-| `old_version` | TEXT | Version before failed attempt |
-| `new_version` | TEXT | Version that was attempted |
-
-**Example:**
-```
-drv_path: "/nix/store/abc123def456-python312Packages-requests-2.32.0.drv"
-attr_path: "python312Packages.requests"
-timestamp: "2024-05-15T10:30:00Z"
-status: "failed"
-error_log: "Hash mismatch: expected sha256:xxx, got sha256:yyy"
-old_version: "2.31.0"
-new_version: "2.32.0"
-```
+| `old_version`, `new_version` | TEXT | Attempted version change |
 
 ### update_sessions
 
-Tracks metadata about entire update runs.
+One row per `run`, and one per `watch` poll cycle that dispatched updates.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | TEXT PRIMARY KEY | UUID of the session |
-| `started_at` | TEXT | RFC 3339 timestamp when the session started |
-| `completed_at` | TEXT | RFC 3339 timestamp when the session completed (NULL if still running) |
-| `status` | TEXT | Session status: 'running', 'completed', 'failed', 'cancelled' |
-| `packages_attempted` | INTEGER | Number of packages attempted in this session |
-| `packages_succeeded` | INTEGER | Number of packages successfully updated |
-| `packages_failed` | INTEGER | Number of packages that failed |
-| `packages_skipped` | INTEGER | Number of packages skipped (e.g., no update available) |
-| `config_json` | TEXT | JSON serialization of the run configuration |
-
-**Example:**
-```
-id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-started_at: "2024-05-15T08:00:00Z"
-completed_at: "2024-05-15T14:30:00Z"
-status: "completed"
-packages_attempted: 150
-packages_succeeded: 120
-packages_failed: 15
-packages_skipped: 15
-config_json: "{...}"
-```
+| `id` | TEXT PRIMARY KEY | UUID |
+| `mode` | TEXT | `run` or `watch` |
+| `started_at`, `completed_at`, `updated_at` | TEXT | Timing; `updated_at` is a heartbeat |
+| `status` | TEXT | `running`, `completed`, `failed`, `cancelled` |
+| `packages_evaluated` | INTEGER | Packages compared against upstream |
+| `packages_backoff` | INTEGER | Packages skipped because of backoff |
+| `packages_attempted` | INTEGER | Updates started (maintained live) |
+| `packages_succeeded` | INTEGER | Updates built and proposed |
+| `packages_failed` | INTEGER | Updates that failed |
+| `packages_skipped` | INTEGER | Not attempted (setup failure, rebuild limit, dry run) |
+| `config_json` | TEXT | Run configuration |
 
 ### update_phases
 
-Records granular execution stages for each package within a session.
+Workflow phases of each package update within a session.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | Auto-incrementing phase record ID |
-| `session_id` | TEXT | Reference to the update_sessions UUID |
-| `attr_path` | TEXT | Nix attribute path being updated |
-| `phase` | TEXT | Phase name (e.g., 'fetch', 'build', 'test', 'publish') |
-| `started_at` | TEXT | RFC 3339 timestamp when the phase started |
-| `completed_at` | TEXT | RFC 3339 timestamp when the phase completed |
-| `duration_ms` | INTEGER | Duration in milliseconds |
-| `status` | TEXT | Phase status: 'running', 'success', 'failed' |
-| `error_type` | TEXT | Type of error if failed (e.g., 'HashMismatch') |
-| `error_details` | TEXT | JSON serialization of error details |
-| `artifacts_path` | TEXT | Path to preserved failure artifacts |
+| `id` | INTEGER PRIMARY KEY | Phase record ID |
+| `session_id` | TEXT | Session UUID |
+| `repo_name`, `attr_path` | TEXT | Package |
+| `phase` | TEXT | `metadata_extraction`, `source_discovery`, `version_selection`, `source_hash_update`, `dependency_hash_update`, `build`, `patch_recovery`, `testing`, `agent_fix`, `pr_creation` |
+| `started_at`, `completed_at` | TEXT | Timing |
+| `duration_ms` | INTEGER | Duration |
+| `status` | TEXT | `running`, `success`, `failed`, `skipped` |
+| `error_type` | TEXT | `UpdateError` variant, e.g. `BuildError` |
+| `error_details` | TEXT | JSON `UpdateError` (tagged with `"type": "build_error"`, ...) |
+| `artifacts_path` | TEXT | Preserved failure artifacts (`--preserve-failures`) |
 
-**Example:**
-```
-id: 42
-session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-attr_path: "python312Packages.requests"
-phase: "build"
-started_at: "2024-05-15T08:15:00Z"
-completed_at: "2024-05-15T08:18:30Z"
-duration_ms: 210000
-status: "failed"
-error_type: "BuildFailure"
-error_details: "{...}"
-artifacts_path: "/home/user/.cache/ekapkgs-update/failed/a1b2c3d4.../python312Packages_requests/"
-```
+## Watch Tables
+
+### watched_repos
+
+One row per repository watched by `ekapkgs-update watch` (`''` = legacy mode).
+
+| Column | Description |
+|--------|-------------|
+| `name`, `upstream`, `path`, `entrypoint`, `base_branch`, `fork_remote` | Configuration |
+| `head_commit`, `head_subject` | `HEAD` after the last sync |
+| `sync_status`, `sync_error`, `last_synced_at` | `ok`, `diverged`, `error`, `unmanaged` |
+| `index_status`, `index_error`, `last_indexed_at`, `index_duration_ms` | `indexing`, `ok`, `error` |
+| `evaluated_count`, `indexed_count`, `index_skipped`, `index_errors` | Last index build |
+| `bootstrapped_at` | First completed poll (baselines recorded) |
+
+### watch_cycles
+
+One row per poll cycle or index build.
+
+| Column | Description |
+|--------|-------------|
+| `kind` | `poll` or `index` |
+| `repo_name` | Index: the repo. Poll: `NULL` (all repos) |
+| `started_at`, `completed_at`, `duration_ms`, `status`, `error` | `running`, `completed`, `failed` |
+| `bootstrap` | Poll recorded at least one baseline |
+| `sources_polled`, `sources_failed`, `new_releases` | Poll statistics |
+| `packages_observed` | Poll: packages compared. Index: packages indexed |
+| `dispatched`, `updated`, `failed`, `session_id` | Updates started by this poll |
+
+Uneventful poll cycles are pruned after 7 days.
+
+### upstream_sources
+
+Poll health and latest release per unique upstream source.
+
+| Column | Description |
+|--------|-------------|
+| `upstream_type`, `upstream_key`, `instance` | Source (`instance = ''` when not applicable) |
+| `latest_version`, `latest_tag`, `release_count`, `latest_changed_at` | Newest stable release |
+| `first_seen_at`, `last_polled_at`, `last_success_at` | Timing |
+| `last_error`, `consecutive_failures` | Poll failures |
+
+Join against `upstream_index` with
+`COALESCE(upstream_index.instance, '') = upstream_sources.instance`.
+
+### upstream_index
+
+Maps `(repo_name, attr_path)` to its upstream source. Also stores the
+version-selection settings the poller uses: `pname`, `semver_strategy`,
+`version_regex`, `include_prereleases`, `current_version`, `src_url` and
+`indexed_at`.
+
+## Autofix Tables
+
+### autofix_queue
+
+One row per preserved failure awaiting or undergoing an LLM fix. It is unique
+on `(repo_name, attr_path, session_id)`, because one watch session can fail the
+same attr in several repos. `status` is one of `queued`, `processing`, `fixed`,
+`escalated` or `skipped`.
+
+### autofix_attempts
+
+One row per LLM attempt. `queue_id` references `autofix_queue`. `repo_name` is
+copied from the queue row when the attempt is inserted.
+
+### autofix_embeddings
+
+Embedded error summaries of past attempts, used for retrieval. These are not
+repo-scoped: a fix that worked in one repo is a useful example for another.
+
+## Cache Tables
 
 ### cve_cache
 
@@ -146,16 +201,6 @@ Caches CVE/vulnerability data from the OSV database to minimize API calls.
 
 **Primary Key:** `(ecosystem, package_name, version)`
 
-**Example:**
-```
-ecosystem: "PyPI"
-package_name: "requests"
-version: "2.32.0"
-cached_data: "[{\"id\":\"CVE-2023-12345\",\"severity\":\"MEDIUM\",...}]"
-cached_at: "2024-05-15T08:00:00Z"
-expires_at: "2024-05-22T08:00:00Z"
-```
-
 ### repology_cache
 
 Caches Repology API responses for cross-distribution version comparisons.
@@ -167,85 +212,13 @@ Caches Repology API responses for cross-distribution version comparisons.
 | `cached_at` | TEXT | RFC 3339 timestamp of when data was cached |
 | `expires_at` | TEXT | RFC 3339 timestamp of when the cache entry should be refreshed |
 
-**Example:**
-```
-package_name: "requests"
-cached_data: "{\"repositories\":{\"pypi\":{\"version\":\"2.32.0\"},\"debian\":{\"version\":\"2.31.0\"}}}"
-cached_at: "2024-05-15T08:00:00Z"
-expires_at: "2024-05-22T08:00:00Z"
-```
-
-### backoff_state
-
-Manages exponential backoff for failed package checks.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `attr_path` | TEXT PRIMARY KEY | Nix attribute path |
-| `consecutive_failures` | INTEGER | Number of consecutive failed attempts |
-| `last_failure_time` | TEXT | RFC 3339 timestamp of most recent failure |
-| `backoff_multiplier` | REAL | Current backoff multiplier (defaults to 1.0) |
-
-**Note:** This table is implicit in the `next_attempt` field of the `updates` table. See [Backoff Strategy](#backoff-strategy) below.
-
 ## Backoff Strategy
 
-The system implements exponential backoff to prevent excessive API traffic while ensuring packages are eventually re-checked.
+See [Backoff Strategy](./backoff.md). In short:
 
-### Backoff Schedule
-
-- **First failure** (no prior attempt): re-check in **2 days**
-- **Second failure** (within 2 days of first): re-check in **4 days**
-- **Subsequent failures**: re-check in **6 days** (maximum backoff)
-- **Successful update**: reset backoff to **2 days**
-
-### Implementation
-
-When `record_no_update()` is called, the system:
-
-1. Retrieves the package's `last_attempted` timestamp
-2. Calculates the days since that attempt
-3. Determines the backoff duration:
-   ```
-   if last_attempted is NULL:
-       backoff = 2 days     # First failure
-   else if (now - last_attempted) <= 2 days:
-       backoff = 4 days     # Recent retry
-   else:
-       backoff = 6 days     # Older retry
-   ```
-4. Sets `next_attempt = now + backoff`
-5. Updates the database
-
-### Examples
-
-**Scenario 1: Package never checked before**
-```
-last_attempted: NULL
-next_attempt: now + 2 days
-```
-
-**Scenario 2: Checked 1 day ago, no update available again**
-```
-last_attempted: 2024-05-15T08:00:00Z (1 day ago)
-now: 2024-05-16T08:00:00Z
-Decision: (now - last_attempted) = 1 day <= 2 days → backoff = 4 days
-next_attempt: 2024-05-20T08:00:00Z
-```
-
-**Scenario 3: Checked 3 days ago, no update available again**
-```
-last_attempted: 2024-05-12T08:00:00Z (3 days ago)
-now: 2024-05-15T08:00:00Z
-Decision: (now - last_attempted) = 3 days > 2 days → backoff = 6 days
-next_attempt: 2024-05-21T08:00:00Z
-```
-
-**Scenario 4: Successful update resets backoff**
-```
-Any previous state → record_successful_update() called
-next_attempt: now + 2 days
-```
+- **Checks with nothing to do** (`record_no_update`): 2 → 4 → 6 days, based on the time since the last check.
+- **Failed attempts** (`record_failed_update`): 2 → 4 → 6 days, based on `failure_count`.
+- **Successful updates** reset `failure_count` and set the backoff to 2 days.
 
 ## Rebuild Impact Analysis
 
@@ -314,8 +287,8 @@ use ekapkgs_update::database::Database;
 
 let db = Database::new("~/.cache/ekapkgs-update/updates.db").await?;
 
-// Now ready to use:
-let should_check = db.should_check_update("python312Packages.requests").await?;
+// repo_name '' is the default scope used by `run`
+let should_check = db.should_check_update("", "python312Packages.requests").await?;
 ```
 
 ## Common Queries
@@ -343,7 +316,7 @@ LIMIT 20;
 ### Get recent failures for a package
 
 ```sql
-SELECT timestamp, status, error_log, old_version, new_version
+SELECT timestamp, phase, error_type, old_version, new_version
 FROM update_logs
 WHERE attr_path = 'python312Packages.requests'
 ORDER BY timestamp DESC
@@ -389,15 +362,17 @@ let db = Database::new("updates.db").await?;
 let db_clone = db.clone();  // Shares the same connection pool
 
 tokio::spawn(async move {
-    db_clone.record_successful_update("pkg1", "1.0", "2.0").await?
+    db_clone
+        .record_successful_update("", "pkg1", "1.0", "2.0", None, None)
+        .await
 });
 
-db.record_no_update("pkg2", "1.0", "1.0.1").await?;
+db.record_no_update("", "pkg2", "1.0", Some("1.0"), None).await?;
 ```
 
 ## Performance Considerations
 
-1. **Indexing**: The `attr_path` is a primary key in `updates` for fast lookups
+1. **Indexing**: `(repo_name, attr_path)` is the primary key of `updates`; `attr_path`, `status` and the upstream columns are indexed as well
 2. **WAL Mode**: Enables concurrent reads while writes are in progress
 3. **Cache Cleanup**: Expired cache entries are cleaned during initialization, not continuously
 4. **Query Planning**: Use `EXPLAIN QUERY PLAN` for complex queries to ensure indexes are used

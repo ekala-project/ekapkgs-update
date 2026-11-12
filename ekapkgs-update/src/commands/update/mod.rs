@@ -47,6 +47,9 @@ use crate::package::PackageMetadata;
 
 /// Update a package from a specific file path.
 /// Returns removed patches and the test result.
+///
+/// Each workflow step is recorded as an `update_phases` row through
+/// `update_config.tracker` (a no-op unless the caller enabled it).
 pub async fn update_from_file_path(
     eval_entry_point: String,
     attr_path: String,
@@ -54,17 +57,29 @@ pub async fn update_from_file_path(
     version_config: VersionConfig,
     update_config: UpdateConfig,
 ) -> anyhow::Result<(Vec<String>, TestResult)> {
+    use self::types::UpdatePhase;
+
     info!(
         "Starting generic update for {} at {}",
         attr_path, file_location
     );
+    let tracker = update_config.tracker.clone();
 
     // Step 1: Extract package metadata
-    let metadata = PackageMetadata::from_attr_path(&eval_entry_point, &attr_path).await?;
+    let metadata = tracker
+        .run(
+            UpdatePhase::MetadataExtraction,
+            PackageMetadata::from_attr_path(&eval_entry_point, &attr_path),
+        )
+        .await?;
     info!("Current version: {}", metadata.version);
 
     // Step 2: Determine upstream source
-    let upstream_source = metadata.resolve_upstream_source()?;
+    let upstream_source = tracker
+        .run(UpdatePhase::SourceDiscovery, async {
+            metadata.resolve_upstream_source()
+        })
+        .await?;
 
     info!("{}", upstream_source.description());
 
@@ -78,14 +93,17 @@ pub async fn update_from_file_path(
         .or(version_config.version_regex.as_deref());
 
     // Step 3: Fetch best compatible release
-    let best_release = upstream_source
-        .get_compatible_release(
-            &metadata.version,
-            version_config.strategy,
-            None,
-            version_config.explicit_version.as_deref(),
-            version_regex,
-            include_prereleases,
+    let best_release = tracker
+        .run(
+            UpdatePhase::VersionSelection,
+            upstream_source.get_compatible_release(
+                &metadata.version,
+                version_config.strategy,
+                None,
+                version_config.explicit_version.as_deref(),
+                version_regex,
+                include_prereleases,
+            ),
         )
         .await?;
 
@@ -95,95 +113,134 @@ pub async fn update_from_file_path(
         version_config.strategy, metadata.version, new_version
     );
 
-    // Step 4: Update source hash
-    let actual_file_location: std::path::PathBuf = update_source_hash(
-        &eval_entry_point,
-        &attr_path,
-        Path::new(&file_location),
-        &metadata.version,
-        new_version,
-        metadata.output_hash.as_deref(),
-        Some(&best_release.tag_name),
-    )
-    .await?;
+    // Step 4: Update source hash (and platform-specific source hashes)
+    let actual_file_location: std::path::PathBuf = tracker
+        .run(UpdatePhase::SourceHashUpdate, async {
+            let location = update_source_hash(
+                &eval_entry_point,
+                &attr_path,
+                Path::new(&file_location),
+                &metadata.version,
+                new_version,
+                metadata.output_hash.as_deref(),
+                Some(&best_release.tag_name),
+            )
+            .await?;
 
-    // Step 4b: Update platform-specific source hashes if needed
-    if let Some(ref platforms) = metadata.platform_hashes {
-        info!(
-            "Discovering source hashes for {} platforms: {:?}",
-            platforms.len(),
-            platforms
-        );
-        update_platform_hashes(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            platforms,
-        )
+            if let Some(ref platforms) = metadata.platform_hashes {
+                info!(
+                    "Discovering source hashes for {} platforms: {:?}",
+                    platforms.len(),
+                    platforms
+                );
+                update_platform_hashes(&eval_entry_point, &attr_path, &location, platforms).await?;
+            }
+            Ok(location)
+        })
         .await?;
-    }
 
     // Step 5: Update dependency hashes (unless --src-only is set)
-    if !update_config.src_only {
-        // Update cargoHash for Rust packages
-        update_cargo_hash_if_needed(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            metadata.cargo_hash.as_deref(),
-        )
-        .await?;
-
-        // Update vendorHash for Go packages
-        update_vendor_hash_if_needed(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            metadata.vendor_hash.as_deref(),
-        )
-        .await?;
-
-        // Update npmDepsHash for Node.js packages
-        update_npm_deps_hash_if_needed(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            metadata.npm_deps_hash.as_deref(),
-        )
-        .await?;
-
-        // Update nugetDeps for .NET packages
-        update_nuget_deps_hash_if_needed(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            metadata.nuget_deps_hash.as_deref(),
-        )
-        .await?;
-
-        // Update composerDepsHash for PHP packages
-        update_composer_deps_hash_if_needed(
-            &eval_entry_point,
-            &attr_path,
-            &actual_file_location,
-            metadata.composer_deps_hash.as_deref(),
-        )
-        .await?;
-    } else {
+    let has_dependency_hashes = metadata.cargo_hash.is_some()
+        || metadata.vendor_hash.is_some()
+        || metadata.npm_deps_hash.is_some()
+        || metadata.nuget_deps_hash.is_some()
+        || metadata.composer_deps_hash.is_some();
+    if update_config.src_only {
         info!("Skipping dependency hash updates (--src-only flag set)");
+    } else if has_dependency_hashes {
+        tracker
+            .run(UpdatePhase::DependencyHashUpdate, async {
+                // Update cargoHash for Rust packages
+                update_cargo_hash_if_needed(
+                    &eval_entry_point,
+                    &attr_path,
+                    &actual_file_location,
+                    metadata.cargo_hash.as_deref(),
+                )
+                .await?;
+
+                // Update vendorHash for Go packages
+                update_vendor_hash_if_needed(
+                    &eval_entry_point,
+                    &attr_path,
+                    &actual_file_location,
+                    metadata.vendor_hash.as_deref(),
+                )
+                .await?;
+
+                // Update npmDepsHash for Node.js packages
+                update_npm_deps_hash_if_needed(
+                    &eval_entry_point,
+                    &attr_path,
+                    &actual_file_location,
+                    metadata.npm_deps_hash.as_deref(),
+                )
+                .await?;
+
+                // Update nugetDeps for .NET packages
+                update_nuget_deps_hash_if_needed(
+                    &eval_entry_point,
+                    &attr_path,
+                    &actual_file_location,
+                    metadata.nuget_deps_hash.as_deref(),
+                )
+                .await?;
+
+                // Update composerDepsHash for PHP packages
+                update_composer_deps_hash_if_needed(
+                    &eval_entry_point,
+                    &attr_path,
+                    &actual_file_location,
+                    metadata.composer_deps_hash.as_deref(),
+                )
+                .await
+            })
+            .await?;
     }
 
     // Step 6: Build with patch recovery
-    let removed_patches =
-        build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location).await?;
+    let removed_patches = tracker
+        .run(
+            UpdatePhase::Build,
+            build_with_patch_recovery(&eval_entry_point, &attr_path, &actual_file_location),
+        )
+        .await?;
 
     // Step 7: Run passthru.tests if requested
-    let test_result = run_package_tests(
-        &eval_entry_point,
-        &attr_path,
-        update_config.run_passthru_tests,
-    )
-    .await?;
+    let test_result = if update_config.run_passthru_tests {
+        let handle = tracker.start(UpdatePhase::Testing).await;
+        match run_package_tests(&eval_entry_point, &attr_path, true).await {
+            Ok(result) => {
+                match &result {
+                    TestResult::Passed => handle.success().await,
+                    TestResult::Failed(output) => {
+                        handle
+                            .fail(errors::UpdateError::TestError {
+                                phase: UpdatePhase::Testing,
+                                test_name: Some(format!("{attr_path}.passthru.tests")),
+                                output: output.clone(),
+                                exit_code: 1,
+                            })
+                            .await;
+                    },
+                    TestResult::NoTests | TestResult::NotRequested => handle.skipped().await,
+                }
+                result
+            },
+            Err(e) => {
+                handle
+                    .fail(errors::UpdateError::classify(
+                        UpdatePhase::Testing,
+                        &attr_path,
+                        &e,
+                    ))
+                    .await;
+                return Err(e);
+            },
+        }
+    } else {
+        TestResult::NotRequested
+    };
 
     // Step 8: Format the file if requested
     if update_config.format {
@@ -203,7 +260,7 @@ pub async fn update_from_file_path(
     }
 
     // Step 9: Handle commit and PR creation
-    pr::PostUpdateParams {
+    let post_update = pr::PostUpdateParams {
         attr_path: &attr_path,
         metadata: &metadata,
         new_version,
@@ -214,9 +271,14 @@ pub async fn update_from_file_path(
         tests_passed: test_result.passed(),
         eval_entry_point: Some(&eval_entry_point),
         pr_enhancements: &update_config.pr_enhancements,
+    };
+    if update_config.commit || update_config.create_pr {
+        tracker
+            .run(UpdatePhase::PrCreation, post_update.execute())
+            .await?;
+    } else {
+        post_update.execute().await?;
     }
-    .execute()
-    .await?;
 
     Ok((removed_patches, test_result))
 }

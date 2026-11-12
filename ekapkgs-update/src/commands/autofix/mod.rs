@@ -108,7 +108,8 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
         for item in recent_fixes.iter().take(5) {
             println!(
                 "  {} — fixed after {} attempt(s)",
-                item.attr_path, item.attempts
+                item.display_name(),
+                item.attempts
             );
         }
     }
@@ -119,7 +120,8 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
         for item in escalated.iter().take(5) {
             println!(
                 "  {} — {} attempts exhausted",
-                item.attr_path, item.max_attempts
+                item.display_name(),
+                item.max_attempts
             );
         }
     }
@@ -148,7 +150,9 @@ pub async fn history(
     for item in &items {
         println!(
             "\n{} [{}] — {} attempt(s)",
-            item.attr_path, item.status, item.attempts
+            item.display_name(),
+            item.status,
+            item.attempts
         );
         println!(
             "  Error: {} (phase: {})",
@@ -216,7 +220,10 @@ pub async fn enqueue(
         }
 
         // Skip if already queued
-        if db.is_autofix_queued(&artifact.attr_path).await? {
+        if db
+            .is_autofix_queued(&artifact.repo_name, &artifact.attr_path)
+            .await?
+        {
             println!("  {} — already queued, skipping", artifact.attr_path);
             continue;
         }
@@ -228,6 +235,7 @@ pub async fn enqueue(
             .unwrap_or_default();
 
         db.enqueue_autofix(
+            &artifact.repo_name,
             &artifact.attr_path,
             &artifact.session_id,
             artifact.failed_phase.as_str(),
@@ -277,7 +285,10 @@ async fn auto_enqueue(db: &Database, max_attempts: i64) -> anyhow::Result<usize>
     let mut count = 0;
 
     for artifact in &artifacts {
-        if db.is_autofix_queued(&artifact.attr_path).await? {
+        if db
+            .is_autofix_queued(&artifact.repo_name, &artifact.attr_path)
+            .await?
+        {
             continue;
         }
 
@@ -288,6 +299,7 @@ async fn auto_enqueue(db: &Database, max_attempts: i64) -> anyhow::Result<usize>
             .unwrap_or_default();
 
         db.enqueue_autofix(
+            &artifact.repo_name,
             &artifact.attr_path,
             &artifact.session_id,
             artifact.failed_phase.as_str(),

@@ -16,6 +16,8 @@ use crate::database::Database;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutofixQueueItem {
     pub id: i64,
+    /// Repository scope (`''` for `run` / single-repo watch).
+    pub repo_name: String,
     pub attr_path: String,
     pub session_id: String,
     pub error_type: String,
@@ -35,6 +37,8 @@ pub struct AutofixQueueItem {
 pub struct AutofixAttemptRecord {
     pub id: i64,
     pub queue_id: i64,
+    /// Copied from the queue row.
+    pub repo_name: String,
     pub attempt_number: i64,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -48,6 +52,17 @@ pub struct AutofixAttemptRecord {
     pub build_stderr: Option<String>,
     pub status: String,
     pub error_message: Option<String>,
+}
+
+impl AutofixQueueItem {
+    /// `repo:attr` in multi-repo mode, plain `attr` otherwise.
+    pub fn display_name(&self) -> String {
+        if self.repo_name.is_empty() {
+            self.attr_path.clone()
+        } else {
+            format!("{}:{}", self.repo_name, self.attr_path)
+        }
+    }
 }
 
 /// Aggregate statistics for the autofix queue.
@@ -172,12 +187,13 @@ impl Attempt {
 
         let result = sqlx::query(
             "INSERT INTO autofix_attempts
-                (queue_id, attempt_number, started_at, completed_at,
+                (queue_id, repo_name, attempt_number, started_at, completed_at,
                  prompt_tokens, completion_tokens,
                  prompt_text, response_text, changes_json,
                  changes_applied, build_success, build_stderr,
                  status, error_message)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?1, (SELECT repo_name FROM autofix_queue WHERE id = ?1),
+                     ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(self.queue_id)
         .bind(self.attempt_number)
@@ -206,10 +222,12 @@ impl Attempt {
 impl Database {
     /// Add a failed update to the autofix queue.
     ///
-    /// Returns the queue item ID. If the (attr_path, session_id) pair already
-    /// exists, the existing row is left unchanged and its ID is returned.
+    /// Returns the queue item ID. If the (repo_name, attr_path, session_id)
+    /// triple already exists, the existing row is left unchanged and its ID is
+    /// returned.
     pub async fn enqueue_autofix(
         &self,
+        repo_name: &str,
         attr_path: &str,
         session_id: &str,
         error_type: &str,
@@ -221,11 +239,12 @@ impl Database {
 
         let result = sqlx::query(
             "INSERT INTO autofix_queue
-                (attr_path, session_id, error_type, failed_phase,
+                (repo_name, attr_path, session_id, error_type, failed_phase,
                  artifacts_path, max_attempts, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(attr_path, session_id) DO NOTHING",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(repo_name, attr_path, session_id) DO NOTHING",
         )
+        .bind(repo_name)
         .bind(attr_path)
         .bind(session_id)
         .bind(error_type)
@@ -243,8 +262,10 @@ impl Database {
             Ok(result.last_insert_rowid())
         } else {
             let id: i64 = sqlx::query_scalar(
-                "SELECT id FROM autofix_queue WHERE attr_path = ? AND session_id = ?",
+                "SELECT id FROM autofix_queue
+                 WHERE repo_name = ? AND attr_path = ? AND session_id = ?",
             )
+            .bind(repo_name)
             .bind(attr_path)
             .bind(session_id)
             .fetch_one(self.pool())
@@ -265,7 +286,7 @@ impl Database {
         // two-step approach within a transaction-like sequence. Because we
         // are the only writer (serial processing), this is safe.
         let row = sqlx::query(
-            "SELECT id, attr_path, session_id, error_type, failed_phase,
+            "SELECT id, repo_name, attr_path, session_id, error_type, failed_phase,
                     status, priority, attempts, max_attempts,
                     created_at, updated_at, fixed_at, artifacts_path
              FROM autofix_queue
@@ -292,6 +313,7 @@ impl Database {
 
         let item = AutofixQueueItem {
             id,
+            repo_name: row.get("repo_name"),
             attr_path: row.get("attr_path"),
             session_id: row.get("session_id"),
             error_type: row.get("error_type"),
@@ -360,7 +382,7 @@ impl Database {
     /// Get all attempts for a queue item, ordered by attempt number.
     pub async fn get_autofix_attempts(&self, queue_id: i64) -> Result<Vec<AutofixAttemptRecord>> {
         let rows = sqlx::query(
-            "SELECT id, queue_id, attempt_number, started_at, completed_at,
+            "SELECT id, queue_id, repo_name, attempt_number, started_at, completed_at,
                     prompt_tokens, completion_tokens,
                     prompt_text, response_text, changes_json,
                     changes_applied, build_success, build_stderr,
@@ -380,6 +402,7 @@ impl Database {
                 Some(AutofixAttemptRecord {
                     id: row.get("id"),
                     queue_id: row.get("queue_id"),
+                    repo_name: row.get("repo_name"),
                     attempt_number: row.get("attempt_number"),
                     started_at: parse_rfc3339(row.get("started_at"))?,
                     completed_at: parse_optional_rfc3339(row.get("completed_at")),
@@ -431,7 +454,7 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<Vec<AutofixQueueItem>> {
         let mut sql = String::from(
-            "SELECT id, attr_path, session_id, error_type, failed_phase,
+            "SELECT id, repo_name, attr_path, session_id, error_type, failed_phase,
                     status, priority, attempts, max_attempts,
                     created_at, updated_at, fixed_at, artifacts_path
              FROM autofix_queue",
@@ -462,6 +485,7 @@ impl Database {
             .filter_map(|row| {
                 Some(AutofixQueueItem {
                     id: row.get("id"),
+                    repo_name: row.get("repo_name"),
                     attr_path: row.get("attr_path"),
                     session_id: row.get("session_id"),
                     error_type: row.get("error_type"),
@@ -481,12 +505,14 @@ impl Database {
         Ok(items)
     }
 
-    /// Check if an attr_path is already in the queue (any non-terminal status).
-    pub async fn is_autofix_queued(&self, attr_path: &str) -> Result<bool> {
+    /// Check if a repo's attr_path is already in the queue (any non-terminal
+    /// status).
+    pub async fn is_autofix_queued(&self, repo_name: &str, attr_path: &str) -> Result<bool> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM autofix_queue
-             WHERE attr_path = ? AND status IN ('queued', 'processing')",
+             WHERE repo_name = ? AND attr_path = ? AND status IN ('queued', 'processing')",
         )
+        .bind(repo_name)
         .bind(attr_path)
         .fetch_one(self.pool())
         .await

@@ -2,25 +2,27 @@
 //!
 //! ## Schema
 //!
-//! The database manages two primary tables:
-//!
-//! - **`updates`**: Tracks the state of each package, including when it was last checked, when it
-//!   should be re-checked, current version, proposed version, and rebuild impact (if known). The
-//!   `attr_path` column is the primary key.
-//!
-//! - **`update_logs`**: Records failures for post-mortem analysis, indexed by derivation path. Each
-//!   log entry captures the error message, old/new versions, and timestamp.
+//! - **`updates`**: Per-package state, keyed by `(repo_name, attr_path)`.
+//!   `repo_name` is `''` for the `run` command and legacy single-repo watch
+//!   mode. Holds the lifecycle [`UpdateStatus`], current/latest/proposed
+//!   versions, the watch bootstrap `baseline_version`, failure bookkeeping,
+//!   backoff timestamps, PR details and cached package metadata.
+//! - **`update_logs`**: Full error logs of failed attempts, keyed by derivation
+//!   path (or a synthetic `<repo>:<attr>@<version>` key).
+//! - **`update_sessions`** / **`update_phases`**: One session per `run` (or per
+//!   watch poll cycle that dispatched updates) and one row per update phase,
+//!   with live counters (see [`sessions`]).
+//! - **`watched_repos`**, **`watch_cycles`**, **`upstream_sources`**: Watch
+//!   mode repository state, poll/index cycle log and per-source poll health
+//!   (see [`watch`]).
+//! - **`upstream_index`**: Reverse index from upstream source to attr_path.
 //!
 //! ## Backoff Semantics
 //!
-//! When an update check finds no new version, the system backs off exponentially:
-//!
-//! - **First failure**: re-check in 2 days ([`FIRST_BACKOFF_DAYS`])
-//! - **Second failure** (within 2 days of the first): re-check in 4 days ([`SECOND_BACKOFF_DAYS`])
-//! - **Subsequent failures**: re-check in 6 days ([`MAX_BACKOFF_DAYS`])
-//!
-//! Successful updates reset the backoff to 2 days. This prevents excessive API
-//! traffic while ensuring packages are eventually re-checked.
+//! Checks that find nothing to do back off 2 days → 4 days → 6 days (max).
+//! Failed attempts back off by consecutive failure count: 2 days → 4 days →
+//! 6 days (max). Successful updates reset the backoff to 2 days and clear the
+//! failure counter.
 //!
 //! ## Connection Pool and Cleanup
 //!
@@ -34,19 +36,25 @@
 
 mod sessions;
 mod types;
+mod updates;
+mod watch;
 
 use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
-#[allow(unused_imports)] // Used by ekapkgs-update-web
-pub use sessions::{PhaseRecord, SessionStatus, UpdateSession};
+use chrono::{DateTime, Utc};
+#[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
+pub use sessions::{PhaseRecord, SessionCounter, SessionMode, SessionStatus, UpdateSession};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use tracing::{debug, info};
-pub use types::UpdateLog;
-use types::UpdateRecord;
+#[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
+pub use types::{FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus};
+#[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
+pub use watch::{
+    IndexOutcome, RepoSyncStatus, SourcePoll, WatchCycleKind, WatchCycleStats, WatchedRepoInfo,
+};
 
 /// Parse an optional RFC 3339 timestamp string into UTC, ignoring parse errors.
 ///
@@ -57,13 +65,12 @@ fn parse_rfc3339(s: Option<String>) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// First-failure backoff: how many days before re-checking after the first
-/// failed update attempt.
+/// First backoff step (days): first check, or first failed attempt.
 const FIRST_BACKOFF_DAYS: i64 = 2;
-/// Second-failure backoff: applied when the previous attempt was within
-/// `FIRST_BACKOFF_DAYS` days.
+/// Second backoff step (days): re-check shortly after the previous window,
+/// or second consecutive failure.
 const SECOND_BACKOFF_DAYS: i64 = 4;
-/// Maximum backoff: applied for any subsequent failure.
+/// Maximum backoff (days).
 const MAX_BACKOFF_DAYS: i64 = 6;
 
 /// Upper bound (inclusive) of the "small" rebuild bucket.
@@ -184,359 +191,6 @@ impl Database {
     /// This is used by other modules (like CVE) that need direct database access
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
-    }
-
-    /// Get an update record for a specific package
-    pub async fn get_update_record(&self, attr_path: &str) -> Result<Option<UpdateRecord>> {
-        let row = sqlx::query(
-            r#"
-            SELECT attr_path, last_attempted, next_attempt, current_version,
-                   proposed_version, latest_upstream_version
-            FROM updates
-            WHERE attr_path = ?
-            "#,
-        )
-        .bind(attr_path)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| format!("get update record for {attr_path}"))?;
-
-        row.map(|row| {
-            let last_attempted: Option<String> = row.try_get("last_attempted")?;
-            let next_attempt: Option<String> = row.try_get("next_attempt")?;
-            Ok(UpdateRecord {
-                last_attempted: parse_rfc3339(last_attempted),
-                next_attempt: parse_rfc3339(next_attempt),
-                proposed_version: row.try_get("proposed_version")?,
-            })
-        })
-        .transpose()
-    }
-
-    /// Check if a package should be checked for updates
-    /// Returns true if:
-    /// - No record exists (first check)
-    /// - next_attempt is null
-    /// - next_attempt is in the past
-    pub async fn should_check_update(&self, attr_path: &str) -> Result<bool> {
-        let Some(record) = self.get_update_record(attr_path).await? else {
-            debug!("{}: No record found, should check", attr_path);
-            return Ok(true);
-        };
-
-        let Some(next_attempt) = record.next_attempt else {
-            debug!("{}: No next_attempt set, should check", attr_path);
-            return Ok(true);
-        };
-
-        let now = Utc::now();
-        let should_check = next_attempt <= now;
-        if should_check {
-            debug!(
-                "{}: next_attempt ({}) is in the past, should check",
-                attr_path, next_attempt
-            );
-        } else {
-            debug!(
-                "{}: next_attempt ({}) is in the future, skip",
-                attr_path, next_attempt
-            );
-        }
-        Ok(should_check)
-    }
-
-    /// Record that no update was available for a package
-    /// Implements backoff: 2 days -> 4 days -> 6 days (max)
-    pub async fn record_no_update(
-        &self,
-        attr_path: &str,
-        current_version: &str,
-        latest_upstream_version: &str,
-    ) -> Result<()> {
-        let now = Utc::now();
-        let record = self.get_update_record(attr_path).await?;
-
-        // Calculate next backoff: first failure -> FIRST, recent retry -> SECOND,
-        // any older retry -> MAX.
-        let backoff_days = match record.as_ref().and_then(|r| r.last_attempted) {
-            None => FIRST_BACKOFF_DAYS,
-            Some(last) => {
-                let days_since = (now - last).num_days();
-                if days_since <= FIRST_BACKOFF_DAYS {
-                    SECOND_BACKOFF_DAYS
-                } else {
-                    MAX_BACKOFF_DAYS
-                }
-            },
-        };
-
-        let next_attempt = now + Duration::days(backoff_days);
-
-        debug!(
-            "{}: No update available, setting next_attempt to {} ({} days)",
-            attr_path,
-            next_attempt.to_rfc3339(),
-            backoff_days
-        );
-
-        sqlx::query(
-            r#"
-            INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
-                                proposed_version, latest_upstream_version)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(attr_path) DO UPDATE SET
-                last_attempted = excluded.last_attempted,
-                next_attempt = excluded.next_attempt,
-                current_version = excluded.current_version,
-                latest_upstream_version = excluded.latest_upstream_version
-            "#,
-        )
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(next_attempt.to_rfc3339())
-        .bind(current_version)
-        .bind(record.and_then(|r| r.proposed_version)) // Keep existing proposed_version
-        .bind(latest_upstream_version)
-        .execute(&self.pool)
-        .await
-        .context("Failed to record no update")?;
-
-        Ok(())
-    }
-
-    /// Record a successful update
-    /// Resets backoff to 2 days
-    ///
-    /// Convenience wrapper around [`Self::record_successful_update_with_rebuild_count`]
-    /// for callers that do not have a rebuild-impact figure to record.
-    #[allow(dead_code)] // public API; retained for callers that don't need rebuild count
-    pub async fn record_successful_update(
-        &self,
-        attr_path: &str,
-        old_version: &str,
-        new_version: &str,
-    ) -> Result<()> {
-        self.record_successful_update_with_rebuild_count(attr_path, old_version, new_version, None)
-            .await
-    }
-
-    /// Record a successful update with optional rebuild count
-    /// Resets backoff to 2 days
-    pub async fn record_successful_update_with_rebuild_count(
-        &self,
-        attr_path: &str,
-        old_version: &str,
-        new_version: &str,
-        rebuild_count: Option<usize>,
-    ) -> Result<()> {
-        let now = Utc::now();
-        let next_attempt = now + Duration::days(2);
-
-        if let Some(count) = rebuild_count {
-            info!(
-                "{}: Successful update from {} to {} ({} rebuilds), resetting next_attempt to 2 \
-                 days",
-                attr_path, old_version, new_version, count
-            );
-        } else {
-            info!(
-                "{}: Successful update from {} to {}, resetting next_attempt to 2 days",
-                attr_path, old_version, new_version
-            );
-        }
-
-        let rebuild_count_i64 = rebuild_count
-            .map(i64::try_from)
-            .transpose()
-            .context("rebuild_count overflowed i64")?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
-                                proposed_version, latest_upstream_version, rebuild_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(attr_path) DO UPDATE SET
-                last_attempted = excluded.last_attempted,
-                next_attempt = excluded.next_attempt,
-                current_version = excluded.current_version,
-                proposed_version = NULL,
-                latest_upstream_version = excluded.latest_upstream_version,
-                rebuild_count = excluded.rebuild_count
-            "#,
-        )
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(next_attempt.to_rfc3339())
-        .bind(new_version)
-        .bind(new_version)
-        .bind(rebuild_count_i64)
-        .execute(&self.pool)
-        .await
-        .context("Failed to record successful update")?;
-
-        Ok(())
-    }
-
-    /// Record PR information for a successful update
-    pub async fn record_pr_info(
-        &self,
-        attr_path: &str,
-        pr_url: &str,
-        pr_number: i64,
-    ) -> Result<()> {
-        info!("{}: Recording PR #{} ({})", attr_path, pr_number, pr_url);
-
-        sqlx::query(
-            r#"
-            UPDATE updates
-            SET pr_url = ?, pr_number = ?
-            WHERE attr_path = ?
-            "#,
-        )
-        .bind(pr_url)
-        .bind(pr_number)
-        .bind(attr_path)
-        .execute(&self.pool)
-        .await
-        .context("Failed to record PR info")?;
-
-        Ok(())
-    }
-
-    /// Record a failed update attempt with error log
-    pub async fn record_failed_update(
-        &self,
-        drv_path: &str,
-        attr_path: &str,
-        error_log: &str,
-        old_version: Option<&str>,
-        new_version: Option<&str>,
-    ) -> Result<()> {
-        let now = Utc::now();
-
-        debug!(
-            "{}: Recording failed update attempt for drv {}",
-            attr_path, drv_path
-        );
-
-        sqlx::query(
-            r#"
-            INSERT INTO update_logs (drv_path, attr_path, timestamp, status, error_log,
-                                    old_version, new_version)
-            VALUES (?, ?, ?, 'failed', ?, ?, ?)
-            ON CONFLICT(drv_path) DO UPDATE SET
-                timestamp = excluded.timestamp,
-                error_log = excluded.error_log,
-                old_version = excluded.old_version,
-                new_version = excluded.new_version
-            "#,
-        )
-        .bind(drv_path)
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(error_log)
-        .bind(old_version)
-        .bind(new_version)
-        .execute(&self.pool)
-        .await
-        .context("Failed to record failed update")?;
-
-        Ok(())
-    }
-
-    /// Get a log entry by drv_path (supports both full path and hash-name format)
-    pub async fn get_log_by_drv(&self, drv_identifier: &str) -> Result<Option<UpdateLog>> {
-        // Try exact match first
-        let mut log = sqlx::query_as::<_, UpdateLog>(
-            r#"
-            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
-            FROM update_logs
-            WHERE drv_path = ?
-            "#,
-        )
-        .bind(drv_identifier)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| format!("get log by drv {drv_identifier}"))?;
-
-        // If no exact match and identifier doesn't start with /nix/store/,
-        // try matching the end of drv_path
-        if log.is_none() && !drv_identifier.starts_with("/nix/store/") {
-            log = sqlx::query_as::<_, UpdateLog>(
-                r#"
-                SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
-                FROM update_logs
-                WHERE drv_path LIKE ?
-                "#,
-            )
-            .bind(format!("%/{drv_identifier}"))
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("get log by drv suffix {drv_identifier}"))?;
-        }
-
-        Ok(log)
-    }
-
-    /// Get all failed logs for an attr_path, ordered by most recent
-    pub async fn get_all_failed_logs_by_attr(&self, attr_path: &str) -> Result<Vec<UpdateLog>> {
-        let logs = sqlx::query_as::<_, UpdateLog>(
-            r#"
-            SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
-            FROM update_logs
-            WHERE attr_path = ?
-            ORDER BY timestamp DESC
-            "#,
-        )
-        .bind(attr_path)
-        .fetch_all(&self.pool)
-        .await
-        .with_context(|| format!("get failed logs for {attr_path}"))?;
-
-        Ok(logs)
-    }
-
-    /// Query failed update logs with optional filtering
-    pub async fn query_failed_logs(
-        &self,
-        package_pattern: Option<&str>,
-        since: Option<DateTime<Utc>>,
-        limit: Option<usize>,
-    ) -> Result<Vec<UpdateLog>> {
-        let mut query = String::from(
-            "SELECT drv_path, attr_path, timestamp, status, error_log, old_version, new_version
-             FROM update_logs
-             WHERE status = 'failed'",
-        );
-
-        if package_pattern.is_some() {
-            query.push_str(" AND attr_path LIKE ?");
-        }
-        if since.is_some() {
-            query.push_str(" AND timestamp >= ?");
-        }
-
-        query.push_str(" ORDER BY timestamp DESC");
-
-        if let Some(lim) = limit {
-            query.push_str(&format!(" LIMIT {lim}"));
-        }
-
-        let mut q = sqlx::query_as::<_, UpdateLog>(&query);
-
-        if let Some(pattern) = package_pattern {
-            q = q.bind(pattern.to_owned());
-        }
-        if let Some(since_dt) = since {
-            q = q.bind(since_dt.to_rfc3339());
-        }
-
-        let logs = q
-            .fetch_all(&self.pool)
-            .await
-            .context("query failed update logs")?;
-
-        Ok(logs)
     }
 
     /// Get rebuild count for a specific package (most recent update)
@@ -694,7 +348,8 @@ impl Database {
     // ── Upstream index (watch command) ──────────────────────────────
 
     /// Insert or update an upstream index entry mapping an attr_path to its
-    /// upstream source.
+    /// upstream source (without version-selection settings).
+    #[allow(dead_code)] // used by integration tests; the indexer uses upsert_indexed_package
     pub async fn upsert_upstream_index(
         &self,
         repo_name: &str,
@@ -705,28 +360,53 @@ impl Database {
         current_version: &str,
         src_url: Option<&str>,
     ) -> Result<()> {
+        self.upsert_indexed_package(&IndexedPackage {
+            repo_name,
+            attr_path,
+            upstream_type,
+            upstream_key,
+            instance,
+            current_version,
+            src_url,
+            ..IndexedPackage::default()
+        })
+        .await
+    }
+
+    /// Insert or update an upstream index entry, including the per-package
+    /// version-selection settings used by the watch poller.
+    pub async fn upsert_indexed_package(&self, pkg: &IndexedPackage<'_>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             r#"
             INSERT INTO upstream_index
-                (repo_name, attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (repo_name, attr_path, upstream_type, upstream_key, instance, current_version,
+                 src_url, indexed_at, pname, semver_strategy, version_regex, include_prereleases)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo_name, attr_path, upstream_type, upstream_key)
             DO UPDATE SET
                 instance = excluded.instance,
                 current_version = excluded.current_version,
                 src_url = excluded.src_url,
-                indexed_at = excluded.indexed_at
+                indexed_at = excluded.indexed_at,
+                pname = excluded.pname,
+                semver_strategy = excluded.semver_strategy,
+                version_regex = excluded.version_regex,
+                include_prereleases = excluded.include_prereleases
             "#,
         )
-        .bind(repo_name)
-        .bind(attr_path)
-        .bind(upstream_type)
-        .bind(upstream_key)
-        .bind(instance)
-        .bind(current_version)
-        .bind(src_url)
+        .bind(pkg.repo_name)
+        .bind(pkg.attr_path)
+        .bind(pkg.upstream_type)
+        .bind(pkg.upstream_key)
+        .bind(pkg.instance)
+        .bind(pkg.current_version)
+        .bind(pkg.src_url)
         .bind(&now)
+        .bind(pkg.pname)
+        .bind(pkg.semver_strategy)
+        .bind(pkg.version_regex)
+        .bind(pkg.include_prereleases)
         .execute(&self.pool)
         .await
         .context("upsert upstream_index")?;
@@ -743,10 +423,12 @@ impl Database {
     ) -> Result<Vec<UpstreamIndexEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT repo_name, attr_path, upstream_type, upstream_key, instance, current_version, src_url, indexed_at
+            SELECT repo_name, attr_path, upstream_type, upstream_key, instance, current_version,
+                   src_url, pname, semver_strategy, version_regex, include_prereleases
             FROM upstream_index
             WHERE upstream_type = ? AND upstream_key = ?
               AND (instance IS ? OR (instance IS NOT NULL AND instance = ?))
+            ORDER BY repo_name, attr_path
             "#,
         )
         .bind(upstream_type)
@@ -757,54 +439,37 @@ impl Database {
         .await
         .context("get attr_paths for source")?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| UpstreamIndexEntry {
-                repo_name: row.get("repo_name"),
-                attr_path: row.get("attr_path"),
-                upstream_type: row.get("upstream_type"),
-                upstream_key: row.get("upstream_key"),
-                instance: row.get("instance"),
-                current_version: row.get("current_version"),
-                src_url: row.get("src_url"),
-            })
-            .collect())
+        Ok(rows.iter().map(UpstreamIndexEntry::from_row).collect())
     }
 
     /// Get all unique upstream sources from the index, for feed subscription.
     pub async fn get_all_upstream_sources(&self) -> Result<Vec<UpstreamIndexEntry>> {
         let rows = sqlx::query(
             r#"
-            SELECT DISTINCT upstream_type, upstream_key, instance,
+            SELECT upstream_type, upstream_key, instance,
                    MIN(repo_name) AS repo_name, MIN(attr_path) AS attr_path,
                    MIN(current_version) AS current_version,
-                   MIN(src_url) AS src_url
+                   MIN(src_url) AS src_url, MIN(pname) AS pname,
+                   MIN(semver_strategy) AS semver_strategy,
+                   MIN(version_regex) AS version_regex,
+                   MAX(include_prereleases) AS include_prereleases
             FROM upstream_index
             GROUP BY upstream_type, upstream_key, instance
+            ORDER BY upstream_type, upstream_key
             "#,
         )
         .fetch_all(&self.pool)
         .await
         .context("get all upstream sources")?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| UpstreamIndexEntry {
-                repo_name: row.get("repo_name"),
-                attr_path: row.get("attr_path"),
-                upstream_type: row.get("upstream_type"),
-                upstream_key: row.get("upstream_key"),
-                instance: row.get("instance"),
-                current_version: row.get("current_version"),
-                src_url: row.get("src_url"),
-            })
-            .collect())
+        Ok(rows.iter().map(UpstreamIndexEntry::from_row).collect())
     }
 
     /// Remove entries from the upstream index before a re-index.
     ///
     /// When `repo_name` is `Some`, only entries for that repo are cleared.
     /// When `None`, all entries are cleared (full re-index).
+    #[allow(dead_code)] // the indexer prunes stale rows instead; kept for tooling/tests
     pub async fn clear_upstream_index(&self, repo_name: Option<&str>) -> Result<()> {
         match repo_name {
             Some(name) => {
@@ -824,14 +489,54 @@ impl Database {
         Ok(())
     }
 
-    /// Count entries in the upstream index.
-    pub async fn upstream_index_count(&self) -> Result<i64> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_index")
-            .fetch_one(&self.pool)
-            .await
-            .context("count upstream_index")?;
+    /// Delete a repo's index entries that were not refreshed since `since`
+    /// (i.e. packages that disappeared from the repo). Returns rows removed.
+    pub async fn prune_upstream_index(&self, repo_name: &str, since: &str) -> Result<u64> {
+        let result =
+            sqlx::query("DELETE FROM upstream_index WHERE repo_name = ? AND indexed_at < ?")
+                .bind(repo_name)
+                .bind(since)
+                .execute(&self.pool)
+                .await
+                .context("prune upstream_index")?;
+        Ok(result.rows_affected())
+    }
+
+    /// Count entries in the upstream index (all repos, or one repo).
+    pub async fn upstream_index_count(&self, repo_name: Option<&str>) -> Result<i64> {
+        let count: i64 = match repo_name {
+            Some(name) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM upstream_index WHERE repo_name = ?")
+                    .bind(name)
+                    .fetch_one(&self.pool)
+                    .await
+            },
+            None => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM upstream_index")
+                    .fetch_one(&self.pool)
+                    .await
+            },
+        }
+        .context("count upstream_index")?;
         Ok(count)
     }
+}
+
+/// A package to write into the `upstream_index` table.
+#[derive(Debug, Clone, Default)]
+pub struct IndexedPackage<'a> {
+    pub repo_name: &'a str,
+    pub attr_path: &'a str,
+    pub upstream_type: &'a str,
+    pub upstream_key: &'a str,
+    pub instance: Option<&'a str>,
+    pub current_version: &'a str,
+    pub src_url: Option<&'a str>,
+    pub pname: Option<&'a str>,
+    /// Effective semver strategy (`SemverStrategy` display form).
+    pub semver_strategy: Option<&'a str>,
+    pub version_regex: Option<&'a str>,
+    pub include_prereleases: bool,
 }
 
 /// A row from the `upstream_index` table.
@@ -844,5 +549,41 @@ pub struct UpstreamIndexEntry {
     pub upstream_key: String,
     pub instance: Option<String>,
     pub current_version: Option<String>,
+    #[allow(dead_code)] // informational; read by tests and library users
     pub src_url: Option<String>,
+    #[allow(dead_code)] // informational; read by tests and library users
+    pub pname: Option<String>,
+    /// Effective semver strategy recorded at index time (`None` = latest).
+    pub semver_strategy: Option<String>,
+    pub version_regex: Option<String>,
+    pub include_prereleases: bool,
+}
+
+impl UpstreamIndexEntry {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Self {
+        Self {
+            repo_name: row.get("repo_name"),
+            attr_path: row.get("attr_path"),
+            upstream_type: row.get("upstream_type"),
+            upstream_key: row.get("upstream_key"),
+            instance: row.get("instance"),
+            current_version: row.get("current_version"),
+            src_url: row.get("src_url"),
+            pname: row.get("pname"),
+            semver_strategy: row.get("semver_strategy"),
+            version_regex: row.get("version_regex"),
+            include_prereleases: row
+                .get::<Option<i64>, _>("include_prereleases")
+                .unwrap_or(0)
+                != 0,
+        }
+    }
+
+    /// The effective semver strategy for release selection.
+    pub fn strategy(&self) -> crate::vcs_sources::SemverStrategy {
+        self.semver_strategy
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(crate::vcs_sources::SemverStrategy::Latest)
+    }
 }

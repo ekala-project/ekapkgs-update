@@ -341,6 +341,11 @@ pub enum Commands {
         database: String,
         /// Package attribute path to retry
         attr_path: String,
+        /// Repository of the failure (a `[[repos]]` name, or `default` for
+        /// `run` / single-repo watch). Required when the attr failed in
+        /// several repos.
+        #[arg(long)]
+        repo: Option<String>,
         /// Resume from specific phase (if supported)
         #[arg(long)]
         from_phase: Option<String>,
@@ -358,6 +363,11 @@ pub enum Commands {
         database: String,
         /// Package attribute path to export
         attr_path: String,
+        /// Repository of the failure (a `[[repos]]` name, or `default` for
+        /// `run` / single-repo watch). Required when the attr failed in
+        /// several repos.
+        #[arg(long)]
+        repo: Option<String>,
         /// Export format: json or markdown
         #[arg(long, default_value = "json")]
         format: String,
@@ -372,6 +382,11 @@ pub enum Commands {
         database: String,
         /// Package attribute path to apply fix to
         attr_path: String,
+        /// Repository of the failure (a `[[repos]]` name, or `default` for
+        /// `run` / single-repo watch). Required when the attr failed in
+        /// several repos.
+        #[arg(long)]
+        repo: Option<String>,
         /// Patch file to apply
         #[arg(long)]
         patch: Option<std::path::PathBuf>,
@@ -646,11 +661,20 @@ pub enum WorktreesCommand {
         /// Path to SQLite database
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only list failures from this repository (`default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// Show details of a specific preserved worktree
     Show {
         /// Package attribute path
         attr_path: String,
+        /// Repository of the failure (a `[[repos]]` name, or `default` for
+        /// `run` / single-repo watch). Required when the attr failed in
+        /// several repos.
+        #[arg(long)]
+        repo: Option<String>,
         /// Path to SQLite database
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
@@ -844,41 +868,54 @@ impl Commands {
             Commands::Retry {
                 database,
                 attr_path,
+                repo,
                 from_phase,
                 apply_patch,
                 version,
             } => {
-                commands::retry::retry(database, attr_path, from_phase, apply_patch, version).await
+                commands::retry::retry(database, attr_path, repo, from_phase, apply_patch, version)
+                    .await
             },
             Commands::Export {
                 database,
                 attr_path,
+                repo,
                 format,
                 output,
             } => {
-                let fmt = commands::export::ExportFormat::from_str(&format)?;
-                commands::export::export(database, attr_path, fmt, output).await
+                let fmt: commands::export::ExportFormat = format.parse()?;
+                commands::export::export(database, attr_path, repo, fmt, output).await
             },
             Commands::Apply {
                 database,
                 attr_path,
+                repo,
                 patch,
                 changes_json,
                 validate,
                 resume,
             } => {
-                commands::apply::apply(database, attr_path, patch, changes_json, validate, resume)
-                    .await
+                commands::apply::apply(
+                    database,
+                    attr_path,
+                    repo,
+                    patch,
+                    changes_json,
+                    validate,
+                    resume,
+                )
+                .await
             },
             Commands::Migrate { file, target } => commands::migrate::migrate(file, target).await,
             Commands::Worktrees { command } => match command {
-                WorktreesCommand::List { database } => {
-                    commands::worktrees::list_worktrees(database).await
+                WorktreesCommand::List { database, repo } => {
+                    commands::worktrees::list_worktrees(database, repo).await
                 },
                 WorktreesCommand::Show {
                     attr_path,
+                    repo,
                     database,
-                } => commands::worktrees::show_worktree(database, attr_path).await,
+                } => commands::worktrees::show_worktree(database, attr_path, repo).await,
                 WorktreesCommand::Clean { older_than } => {
                     commands::worktrees::clean_worktrees(older_than).await
                 },

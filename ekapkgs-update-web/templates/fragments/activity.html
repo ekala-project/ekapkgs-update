@@ -1,0 +1,31 @@
+{% import "macros.html" as m %}
+{%- if activity.items.is_empty() %}
+<p class="muted">No update activity recorded yet.</p>
+{%- else %}
+<ul class="feed">
+  {%- for i in activity.items %}
+  <li class="feed-item">
+    {% call m::badge(i.badge) %}
+    <a href="{{ i.href }}" class="attr">{{ i.attr_path }}</a>{% if i.repo != "default" %} <span class="muted">({{ i.repo }})</span>{% endif %}
+    {%- if !i.phase.is_empty() %} <span class="tag" title="Last phase reached">{{ i.phase }}</span>{% endif %}
+    {%- if !i.detail.is_empty() %} <span class="feed-detail">{{ i.detail }}</span>{% endif %}
+    {%- if let Some(pr) = i.pr_url %} <a href="{{ pr }}" rel="noopener noreferrer" target="_blank">{{ i.pr_label }}</a>{% endif %}
+    <span class="feed-meta muted small">{% call m::ts(i.when) %} · <a href="{{ i.session_href }}">{{ i.mode }} {{ i.session_short }}</a></span>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+{%- if !activity.prs.is_empty() %}
+<h3 class="subhead">Latest PRs</h3>
+<ul class="feed">
+  {%- for p in activity.prs %}
+  <li class="feed-item">
+    {% call m::badge(p.badge) %}
+    <a href="{{ p.href }}" class="attr">{{ p.attr_path }}</a>
+    <span class="feed-detail">{% call m::ver(p.current) %} → {% call m::ver(p.proposed) %}</span>
+    {%- if let Some(pr) = p.pr_url %} <a href="{{ pr }}" rel="noopener noreferrer" target="_blank">{{ p.pr_label }}</a>{% endif %}
+    <span class="feed-meta muted small">{% call m::ts(p.checked) %}</span>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endif %}

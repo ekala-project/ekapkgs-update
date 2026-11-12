@@ -5,12 +5,14 @@ use anyhow::Context;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
 use super::preservation::preserve_failure;
 use super::types::{UpdateRequest, UpdateResult};
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::commands::update::errors::UpdateError;
+use crate::commands::update::instrumentation::{PhaseHandle, PhaseTracker};
 use crate::commands::update::types::UpdatePhase;
-use crate::database::Database;
+use crate::database::{Database, FailedUpdate};
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
@@ -32,7 +34,178 @@ fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathB
     Ok(repo_dir.to_path_buf())
 }
 
-/// Perform a package update
+/// Database bookkeeping for one update attempt, shared by worktree and
+/// branch mode: workflow phase rows (via [`PhaseTracker`]), the package's
+/// `updates` row and its failure log.
+struct Attempt<'a> {
+    db: &'a Database,
+    session_id: &'a str,
+    req: &'a UpdateRequest,
+    tracker: PhaseTracker,
+}
+
+impl<'a> Attempt<'a> {
+    fn new(db: &'a Database, session_id: &'a str, req: &'a UpdateRequest) -> Self {
+        let tracker = PhaseTracker::new(db.clone(), session_id, req.repo(), &req.attr_path);
+        Self {
+            db,
+            session_id,
+            req,
+            tracker,
+        }
+    }
+
+    /// Build an [`crate::commands::update::UpdateConfig`] for running the
+    /// update workflow in place (no commit / PR; handled by the caller).
+    fn update_config(&self, run_passthru_tests: bool) -> crate::commands::update::UpdateConfig {
+        crate::commands::update::UpdateConfig {
+            commit: false,             // Don't auto-commit in run mode
+            create_pr: false,          // PRs / commits are handled by the caller
+            upstream: None,            // upstream - not needed in run mode
+            fork: "origin".to_owned(), // fork - not used since create_pr is false
+            run_passthru_tests,
+            src_only: false, // Update all dependencies (not src-only)
+            format: false,   // No formatting in run mode (worktree cleanup would lose it)
+            // Directory diff is handled separately in run mode using the worktree-aware method.
+            pr_enhancements: PrEnhancementsConfig::default(),
+            tracker: self.tracker.clone(),
+        }
+    }
+
+    /// The structured error of the phase that failed, falling back to a
+    /// generic infrastructure error when the failure was not tracked.
+    fn failure(&self, error_message: &str) -> UpdateError {
+        self.tracker
+            .last_failure()
+            .unwrap_or_else(|| UpdateError::InfrastructureError {
+                phase: UpdatePhase::Build,
+                component: "update".to_owned(),
+                details: error_message.to_owned(),
+            })
+    }
+
+    /// Record a successful update (status `proposed`, backoff reset).
+    async fn record_success(&self, rebuild_count: Option<usize>) {
+        if let Err(e) = self
+            .db
+            .record_successful_update(
+                self.req.repo(),
+                &self.req.attr_path,
+                &self.req.current_version,
+                &self.req.new_version,
+                rebuild_count,
+                Some(self.session_id),
+            )
+            .await
+        {
+            warn!(
+                "{}: Failed to record successful update: {}",
+                self.req.attr_path, e
+            );
+        }
+    }
+
+    /// Record a failed attempt (failure log, `failed` status, backoff) and
+    /// return the result to report.
+    async fn record_failure(&self, error: &UpdateError, error_log: &str) -> UpdateResult {
+        let record = FailedUpdate {
+            repo_name: self.req.repo(),
+            attr_path: &self.req.attr_path,
+            drv_path: self.req.drv_path.as_deref(),
+            session_id: Some(self.session_id),
+            old_version: Some(&self.req.current_version),
+            new_version: Some(&self.req.new_version),
+            error_log,
+            phase: Some(error.phase().as_str()),
+            error_type: Some(error.error_type_name()),
+        };
+        if let Err(e) = self.db.record_failed_update(&record).await {
+            warn!(
+                "{}: Failed to record update failure: {}",
+                self.req.attr_path, e
+            );
+        }
+        UpdateResult::Failed(error.summary())
+    }
+
+    /// Fail the attempt before the update workflow ran (e.g. the package's
+    /// file could not be located).
+    async fn fail_setup(
+        &self,
+        phase: UpdatePhase,
+        component: &str,
+        error: &anyhow::Error,
+    ) -> UpdateResult {
+        let message = format!("{error:#}");
+        let update_error = UpdateError::InfrastructureError {
+            phase,
+            component: component.to_owned(),
+            details: message.clone(),
+        };
+        self.tracker.record_failure(update_error.clone()).await;
+        self.record_failure(&update_error, &message).await
+    }
+}
+
+/// Finish an `agent_fix` phase according to the Claude fix outcome.
+async fn record_agent_fix(handle: PhaseHandle<'_>, result: &ClaudeFixResult) {
+    let infra = |details: &str| UpdateError::InfrastructureError {
+        phase: UpdatePhase::AgentFix,
+        component: "claude".to_owned(),
+        details: details.to_owned(),
+    };
+    match result {
+        ClaudeFixResult::Fixed => handle.success().await,
+        ClaudeFixResult::StillBroken { stderr } => {
+            handle
+                .fail(UpdateError::BuildError {
+                    phase: UpdatePhase::AgentFix,
+                    exit_code: 1,
+                    stderr: stderr.clone(),
+                    suspected_cause: None,
+                })
+                .await;
+        },
+        ClaudeFixResult::ClaudeNotAvailable => handle.skipped().await,
+        ClaudeFixResult::TimedOut => handle.fail(infra("fix attempt timed out")).await,
+        ClaudeFixResult::InvocationError { message } => handle.fail(infra(message)).await,
+    }
+}
+
+/// Log a Claude fix outcome that did not fix the build.
+fn log_unfixed(attr_path: &str, result: &ClaudeFixResult) {
+    match result {
+        ClaudeFixResult::Fixed => {},
+        ClaudeFixResult::StillBroken { stderr } => {
+            info!(
+                "{}: Claude Code fix did not resolve the build failure, continuing",
+                attr_path
+            );
+            let end = stderr
+                .char_indices()
+                .nth(500)
+                .map_or(stderr.len(), |(i, _)| i);
+            debug!("{}: Post-fix build stderr: {}", attr_path, &stderr[..end]);
+        },
+        ClaudeFixResult::ClaudeNotAvailable => {
+            warn!(
+                "{}: claude CLI not found on PATH, skipping fix attempt",
+                attr_path
+            );
+        },
+        ClaudeFixResult::TimedOut => {
+            warn!("{}: Claude Code fix attempt timed out", attr_path);
+        },
+        ClaudeFixResult::InvocationError { message } => {
+            warn!("{}: Claude Code invocation error: {}", attr_path, message);
+        },
+    }
+}
+
+/// Perform a package update in an isolated git worktree.
+///
+/// Failed attempts are recorded in the database and reported as
+/// `Ok(UpdateResult::Failed)`.
 pub(super) async fn perform_update(
     db: &Database,
     session_id: &str,
@@ -45,7 +218,7 @@ pub(super) async fn perform_update(
     pr_enhancements: &PrEnhancementsConfig,
     interactive: bool,
     preserve_failures: bool,
-    claude_fix: Option<&super::claude_fix::ClaudeFixConfig>,
+    claude_fix: Option<&ClaudeFixConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
@@ -58,6 +231,8 @@ pub(super) async fn perform_update(
             new_version: new_version.clone(),
         });
     }
+
+    let attempt = Attempt::new(db, session_id, req);
 
     // Derive repository directory from eval entry point
     let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point) {
@@ -73,8 +248,14 @@ pub(super) async fn perform_update(
         },
     };
 
-    // Create a worktree for this update
-    let worktree_path = match create_worktree(&repo_dir, attr_path).await {
+    // Create a worktree for this update (repo-qualified so the same attr
+    // path in two watched repos doesn't share a worktree)
+    let worktree_key = if req.repo().is_empty() {
+        attr_path.clone()
+    } else {
+        format!("{}-{}", req.repo(), attr_path)
+    };
+    let worktree_path = match create_worktree(&repo_dir, &worktree_key).await {
         Ok(path) => path,
         Err(e) => {
             warn!("{}: Failed to create worktree: {}", attr_path, e);
@@ -90,7 +271,9 @@ pub(super) async fn perform_update(
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
             cleanup_worktree(&repo_dir, &worktree_path).await.ok();
-            return Ok(UpdateResult::Skipped("Could not locate file".to_owned()));
+            return Ok(attempt
+                .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
+                .await);
         },
     };
 
@@ -111,17 +294,7 @@ pub(super) async fn perform_update(
     // could select a version outside the checker's semver constraints.
     let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest)
         .with_explicit_version(Some(new_version.clone()));
-    let update_config = crate::commands::update::UpdateConfig {
-        commit: false,             // Don't auto-commit in run mode
-        create_pr: false,          // Don't create PR here (handled separately)
-        upstream: None,            // upstream - not needed in run mode
-        fork: "origin".to_owned(), // fork - not used since create_pr is false
-        run_passthru_tests,
-        src_only: false, // Update all dependencies (not src-only)
-        format: false,   // No formatting in run mode (worktree cleanup would lose it)
-        // Directory diff is handled separately in run mode using the worktree-aware method.
-        pr_enhancements: PrEnhancementsConfig::default(),
-    };
+    let update_config = attempt.update_config(run_passthru_tests);
 
     // Resolve the eval entry point relative to the worktree so that all nix
     // builds/evaluations use the worktree's (modified) files, not the originals.
@@ -131,12 +304,9 @@ pub(super) async fn perform_update(
     let worktree_entry_point = worktree_path.join(entry_point_filename);
     let worktree_entry_str = worktree_entry_point.to_string_lossy().to_string();
 
-    // Keep copies for the Claude fix path (originals are moved into update_from_file_path)
-    let worktree_entry_str_for_fix = worktree_entry_str.clone();
-
     let update_result = update_config
         .update_from_file_path(
-            worktree_entry_str,
+            worktree_entry_str.clone(),
             attr_path.clone(),
             worktree_file_str,
             version_config,
@@ -202,18 +372,9 @@ pub(super) async fn perform_update(
             };
 
             // Record successful update first (with rebuild count if available)
-            let db_rebuild_count = rebuild_analysis.as_ref().map(|a| a.rebuild_count);
-            if let Err(e) = db
-                .record_successful_update_with_rebuild_count(
-                    attr_path,
-                    current_version,
-                    new_version,
-                    db_rebuild_count,
-                )
-                .await
-            {
-                warn!("{}: Failed to record successful update: {}", attr_path, e);
-            }
+            attempt
+                .record_success(rebuild_analysis.as_ref().map(|a| a.rebuild_count))
+                .await;
 
             // Create PR if configured
             if let Some(config) = pr_config {
@@ -242,20 +403,27 @@ pub(super) async fn perform_update(
                 };
 
                 if should_create_pr {
-                    match create_pr_for_update(
-                        db,
-                        &worktree_path,
-                        attr_path,
-                        current_version,
-                        new_version,
-                        config,
-                        fork,
-                        rebuild_analysis.as_ref(),
-                        pr_enhancements,
-                        &test_result,
-                    )
-                    .await
-                    {
+                    let pr = attempt
+                        .tracker
+                        .run(
+                            UpdatePhase::PrCreation,
+                            create_pr_for_update(
+                                db,
+                                req.repo(),
+                                &worktree_path,
+                                &worktree_entry_str,
+                                attr_path,
+                                current_version,
+                                new_version,
+                                config,
+                                fork,
+                                rebuild_analysis.as_ref(),
+                                pr_enhancements,
+                                &test_result,
+                            ),
+                        )
+                        .await;
+                    match pr {
                         Ok((pr_url, pr_number)) => {
                             if tests_failed {
                                 info!(
@@ -290,6 +458,7 @@ pub(super) async fn perform_update(
             // Update failed - record the failure log
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
+            let failure = attempt.failure(&error_message);
 
             // Attempt Claude Code fix if enabled and error is plausibly fixable
             if let Some(fix_config) = claude_fix {
@@ -305,9 +474,10 @@ pub(super) async fn perform_update(
                         .unwrap_or_default();
                     let relative_path = relative_file_location.to_string_lossy().to_string();
 
+                    let handle = attempt.tracker.start(UpdatePhase::AgentFix).await;
                     let fix_result = super::claude_fix::attempt_claude_fix(
                         &worktree_path,
-                        &worktree_entry_str_for_fix,
+                        &worktree_entry_str,
                         attr_path,
                         &error_message,
                         Some(&error_message),
@@ -318,134 +488,107 @@ pub(super) async fn perform_update(
                         fix_config,
                     )
                     .await;
+                    record_agent_fix(handle, &fix_result).await;
 
-                    match fix_result {
-                        super::claude_fix::ClaudeFixResult::Fixed => {
-                            info!(
-                                "{}: Claude Code fixed the build! Proceeding with update.",
-                                attr_path
-                            );
+                    if matches!(fix_result, ClaudeFixResult::Fixed) {
+                        info!(
+                            "{}: Claude Code fixed the build! Proceeding with update.",
+                            attr_path
+                        );
 
-                            // Record successful update in database
-                            if let Err(db_err) = db
-                                .record_successful_update_with_rebuild_count(
-                                    attr_path,
-                                    current_version,
-                                    new_version,
-                                    None,
+                        attempt.record_success(None).await;
+
+                        // Create PR if configured
+                        if let Some(config) = pr_config {
+                            let pr = attempt
+                                .tracker
+                                .run(
+                                    UpdatePhase::PrCreation,
+                                    create_pr_for_update(
+                                        db,
+                                        req.repo(),
+                                        &worktree_path,
+                                        &worktree_entry_str,
+                                        attr_path,
+                                        current_version,
+                                        new_version,
+                                        config,
+                                        fork,
+                                        None, // No rebuild analysis for Claude-fixed updates
+                                        pr_enhancements,
+                                        &crate::commands::update::TestResult::NotRequested,
+                                    ),
                                 )
-                                .await
-                            {
-                                warn!(
-                                    "{}: Failed to record successful update: {}",
-                                    attr_path, db_err
-                                );
+                                .await;
+                            match pr {
+                                Ok((pr_url, pr_number)) => {
+                                    info!(
+                                        "{}: Created PR #{} (Claude-fixed): {}",
+                                        attr_path, pr_number, pr_url
+                                    );
+                                },
+                                Err(pr_err) => {
+                                    warn!("{}: Failed to create PR: {}", attr_path, pr_err);
+                                },
                             }
+                        }
 
-                            // Create PR if configured
-                            if let Some(config) = pr_config {
-                                match create_pr_for_update(
-                                    db,
-                                    &worktree_path,
-                                    attr_path,
-                                    current_version,
-                                    new_version,
-                                    config,
-                                    fork,
-                                    None, // No rebuild analysis for Claude-fixed updates
-                                    pr_enhancements,
-                                    &crate::commands::update::TestResult::NotRequested,
-                                )
-                                .await
-                                {
-                                    Ok((pr_url, pr_number)) => {
-                                        info!(
-                                            "{}: Created PR #{} (Claude-fixed): {}",
-                                            attr_path, pr_number, pr_url
-                                        );
-                                    },
-                                    Err(pr_err) => {
-                                        warn!("{}: Failed to create PR: {}", attr_path, pr_err);
-                                    },
-                                }
-                            }
-
-                            // Clean up the worktree
-                            if let Err(cleanup_err) =
-                                cleanup_worktree(&repo_dir, &worktree_path).await
-                            {
-                                warn!(
-                                    "{}: Failed to clean up worktree: {}",
-                                    attr_path, cleanup_err
-                                );
-                            }
-
-                            return Ok(UpdateResult::Updated {
-                                old_version: current_version.clone(),
-                                new_version: new_version.clone(),
-                            });
-                        },
-                        super::claude_fix::ClaudeFixResult::StillBroken { stderr } => {
-                            info!(
-                                "{}: Claude Code fix did not resolve the build failure, continuing",
-                                attr_path
-                            );
-                            debug!(
-                                "{}: Post-fix build stderr: {}",
-                                attr_path,
-                                &stderr[..stderr.len().min(500)]
-                            );
-                        },
-                        super::claude_fix::ClaudeFixResult::ClaudeNotAvailable => {
+                        // Clean up the worktree
+                        if let Err(cleanup_err) = cleanup_worktree(&repo_dir, &worktree_path).await
+                        {
                             warn!(
-                                "{}: claude CLI not found on PATH, skipping fix attempt",
-                                attr_path
+                                "{}: Failed to clean up worktree: {}",
+                                attr_path, cleanup_err
                             );
-                        },
-                        super::claude_fix::ClaudeFixResult::TimedOut => {
-                            warn!("{}: Claude Code fix attempt timed out", attr_path);
-                        },
-                        super::claude_fix::ClaudeFixResult::InvocationError { message } => {
-                            warn!("{}: Claude Code invocation error: {}", attr_path, message);
-                        },
+                        }
+
+                        return Ok(UpdateResult::Updated {
+                            old_version: current_version.clone(),
+                            new_version: new_version.clone(),
+                        });
                     }
+                    log_unfixed(attr_path, &fix_result);
                 } // else (should_attempt_claude_fix)
             }
 
             // Preserve failure artifacts if requested
             let artifacts_path = if preserve_failures {
-                // Create a structured error from the anyhow error
-                // For now, use a generic InfrastructureError since we don't have granular error
-                // info
-                let update_error = UpdateError::InfrastructureError {
-                    phase: UpdatePhase::Build, // Default to Build phase
-                    component: "update".to_string(),
-                    details: error_message.clone(),
+                let test_output = match &failure {
+                    UpdateError::TestError { output, .. } => Some(output.clone()),
+                    _ => None,
                 };
-
                 match preserve_failure(
                     session_id,
+                    req.repo(),
                     attr_path,
-                    UpdatePhase::Build, // We don't know exact phase, default to Build
+                    failure.phase(),
                     &worktree_path,
-                    &update_error,
+                    &failure,
                     Some(error_message.clone()), // Build/update error message
-                    None,                        // Test output requires deeper capture plumbing
+                    test_output,
                 )
                 .await
                 {
                     Ok(artifacts) => {
                         info!("{}: Preserved failure artifacts", attr_path);
-                        Some(
-                            artifacts
-                                .worktree_path
-                                .parent()
-                                .and_then(|p| p.parent())
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_else(|| {
-                                    artifacts.worktree_path.to_string_lossy().to_string()
-                                }),
-                        )
+                        let path = artifacts
+                            .worktree_path
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| {
+                                artifacts.worktree_path.to_string_lossy().to_string()
+                            });
+                        if let Err(db_err) = db
+                            .set_failed_phase_artifacts(session_id, req.repo(), attr_path, &path)
+                            .await
+                        {
+                            warn!(
+                                "{}: Failed to link failure artifacts: {}",
+                                attr_path, db_err
+                            );
+                        }
+                        Some(path)
                     },
                     Err(preserve_err) => {
                         warn!(
@@ -474,21 +617,7 @@ pub(super) async fn perform_update(
                 );
             }
 
-            if let Err(db_err) = db
-                .record_failed_update(
-                    req.drv_path.as_deref().unwrap_or("unknown"),
-                    attr_path,
-                    &error_message,
-                    Some(current_version),
-                    Some(new_version),
-                )
-                .await
-            {
-                warn!("{}: Failed to record update failure: {}", attr_path, db_err);
-            }
-
-            // Return as skipped so it doesn't count as a successful update
-            Ok(UpdateResult::Skipped(format!("Update failed: {e}")))
+            Ok(attempt.record_failure(&failure, &error_message).await)
         },
     }
 }
@@ -508,6 +637,9 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
         Ok(UpdateResult::Skipped(reason)) => {
             debug!("{}: Skipped - {}", attr_path, reason);
         },
+        Ok(UpdateResult::Failed(reason)) => {
+            info!("{}: Failed - {}", attr_path, reason);
+        },
         Ok(UpdateResult::DryRun {
             current_version,
             new_version,
@@ -523,28 +655,48 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
     }
 }
 
+/// `git commit` the staged changes of a branch-mode update, in the
+/// repository containing `pkg_dir` (matching `branch_git`'s staging).
+async fn git_commit(pkg_dir: &str, commit_msg: &str) -> anyhow::Result<()> {
+    let output = tokio::process::Command::new("git")
+        .args(["-C", pkg_dir, "commit", "-m", commit_msg])
+        .output()
+        .await
+        .context("Failed to run git commit")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Perform a package update directly in the working tree (no worktree isolation).
 /// Used in commit mode where changes are committed directly to the repo.
 /// On failure, reverts every path the update dirtied (see `branch_git`).
 pub(super) async fn perform_direct_update(
     db: &Database,
-    _session_id: &str,
+    session_id: &str,
     eval_entry_point: &str,
     req: &UpdateRequest,
     run_passthru_tests: bool,
     git_mutex: Arc<Mutex<()>>,
-    claude_fix: Option<&super::claude_fix::ClaudeFixConfig>,
+    claude_fix: Option<&ClaudeFixConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let current_version = &req.current_version;
     let new_version = &req.new_version;
+    let attempt = Attempt::new(db, session_id, req);
 
     // Get file location from meta.position
     let file_location = match get_file_location(eval_entry_point, attr_path).await {
         Ok(loc) => loc,
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
-            return Ok(UpdateResult::Skipped("Could not locate file".to_owned()));
+            return Ok(attempt
+                .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
+                .await);
         },
     };
 
@@ -569,16 +721,7 @@ pub(super) async fn perform_direct_update(
     // could select a version outside the checker's semver constraints.
     let version_config = crate::commands::update::VersionConfig::new(SemverStrategy::Latest)
         .with_explicit_version(Some(new_version.clone()));
-    let update_config = crate::commands::update::UpdateConfig {
-        commit: false,
-        create_pr: false,
-        upstream: None,
-        fork: "origin".to_owned(),
-        run_passthru_tests,
-        src_only: false,
-        format: false,
-        pr_enhancements: crate::commands::pr_enhancements::PrEnhancementsConfig::default(),
-    };
+    let update_config = attempt.update_config(run_passthru_tests);
 
     let update_result = update_config
         .update_from_file_path(
@@ -588,6 +731,8 @@ pub(super) async fn perform_direct_update(
             version_config,
         )
         .await;
+
+    let commit_msg = format!("{attr_path}: {current_version} -> {new_version}");
 
     match update_result {
         Ok((removed_patches, test_result)) => {
@@ -606,22 +751,8 @@ pub(super) async fn perform_direct_update(
                 // Record as a test failure (distinct from build failure)
                 let error_message =
                     format!("passthru.tests failed after update to {new_version}:\n{stderr}");
-                if let Err(db_err) = db
-                    .record_failed_update(
-                        req.drv_path.as_deref().unwrap_or("unknown"),
-                        attr_path,
-                        &error_message,
-                        Some(current_version),
-                        Some(new_version),
-                    )
-                    .await
-                {
-                    warn!("{}: Failed to record test failure: {}", attr_path, db_err);
-                }
-
-                return Ok(UpdateResult::Skipped(format!(
-                    "passthru.tests failed after update to {new_version}"
-                )));
+                let failure = attempt.failure(&error_message);
+                return Ok(attempt.record_failure(&failure, &error_message).await);
             }
 
             info!("{}: Successfully updated to {}", attr_path, new_version);
@@ -642,38 +773,17 @@ pub(super) async fn perform_direct_update(
 
                 snapshot.stage(attr_path, &pkg_dir).await;
 
-                let commit_msg = format!("{attr_path}: {current_version} -> {new_version}");
-                let commit_output = tokio::process::Command::new("git")
-                    .args(["commit", "-m", &commit_msg])
-                    .output()
-                    .await;
-
-                match commit_output {
-                    Ok(output) if output.status.success() => {
-                        info!("{}: Committed: {}", attr_path, commit_msg);
-                    },
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!("{}: git commit failed: {}", attr_path, stderr);
-                    },
-                    Err(e) => {
-                        warn!("{}: Failed to run git commit: {}", attr_path, e);
-                    },
+                match attempt
+                    .tracker
+                    .run(UpdatePhase::PrCreation, git_commit(&pkg_dir, &commit_msg))
+                    .await
+                {
+                    Ok(()) => info!("{}: Committed: {}", attr_path, commit_msg),
+                    Err(e) => warn!("{}: {:#}", attr_path, e),
                 }
             }
 
-            // Record successful update in database
-            if let Err(e) = db
-                .record_successful_update_with_rebuild_count(
-                    attr_path,
-                    current_version,
-                    new_version,
-                    None,
-                )
-                .await
-            {
-                warn!("{}: Failed to record successful update: {}", attr_path, e);
-            }
+            attempt.record_success(None).await;
 
             Ok(UpdateResult::Updated {
                 old_version: current_version.clone(),
@@ -683,6 +793,7 @@ pub(super) async fn perform_direct_update(
         Err(e) => {
             let error_message = format!("{e:#}");
             warn!("{}: Update failed: {}", attr_path, error_message);
+            let failure = attempt.failure(&error_message);
 
             // Attempt Claude Code fix if enabled (files are still dirty)
             if let Some(fix_config) = claude_fix {
@@ -701,6 +812,7 @@ pub(super) async fn perform_direct_update(
                         .parent()
                         .unwrap_or(std::path::Path::new("."));
 
+                    let handle = attempt.tracker.start(UpdatePhase::AgentFix).await;
                     let fix_result = super::claude_fix::attempt_claude_fix(
                         repo_dir,
                         eval_entry_point,
@@ -714,8 +826,9 @@ pub(super) async fn perform_direct_update(
                         fix_config,
                     )
                     .await;
+                    record_agent_fix(handle, &fix_result).await;
 
-                    if matches!(fix_result, super::claude_fix::ClaudeFixResult::Fixed) {
+                    if matches!(fix_result, ClaudeFixResult::Fixed) {
                         info!("{}: Claude Code fixed the build! Committing.", attr_path);
 
                         // Commit the fix under the git mutex
@@ -724,48 +837,22 @@ pub(super) async fn perform_direct_update(
 
                             snapshot.stage(attr_path, &pkg_dir).await;
 
-                            let commit_msg =
-                                format!("{attr_path}: {current_version} -> {new_version}");
-                            let commit_output = tokio::process::Command::new("git")
-                                .args(["commit", "-m", &commit_msg])
-                                .output()
-                                .await;
-
-                            match commit_output {
-                                Ok(output) if output.status.success() => {
+                            match attempt
+                                .tracker
+                                .run(UpdatePhase::PrCreation, git_commit(&pkg_dir, &commit_msg))
+                                .await
+                            {
+                                Ok(()) => {
                                     info!(
                                         "{}: Committed (Claude-fixed): {}",
                                         attr_path, commit_msg
                                     );
                                 },
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    warn!("{}: git commit failed: {}", attr_path, stderr);
-                                },
-                                Err(commit_err) => {
-                                    warn!(
-                                        "{}: Failed to run git commit: {}",
-                                        attr_path, commit_err
-                                    );
-                                },
+                                Err(commit_err) => warn!("{}: {:#}", attr_path, commit_err),
                             }
                         }
 
-                        // Record successful update in database
-                        if let Err(db_err) = db
-                            .record_successful_update_with_rebuild_count(
-                                attr_path,
-                                current_version,
-                                new_version,
-                                None,
-                            )
-                            .await
-                        {
-                            warn!(
-                                "{}: Failed to record successful update: {}",
-                                attr_path, db_err
-                            );
-                        }
+                        attempt.record_success(None).await;
 
                         return Ok(UpdateResult::Updated {
                             old_version: current_version.clone(),
@@ -773,25 +860,7 @@ pub(super) async fn perform_direct_update(
                         });
                     }
 
-                    // Log non-Fixed outcomes
-                    match fix_result {
-                        super::claude_fix::ClaudeFixResult::Fixed => unreachable!(),
-                        super::claude_fix::ClaudeFixResult::StillBroken { .. } => {
-                            info!(
-                                "{}: Claude Code fix did not resolve the build failure",
-                                attr_path
-                            );
-                        },
-                        super::claude_fix::ClaudeFixResult::ClaudeNotAvailable => {
-                            warn!("{}: claude CLI not found on PATH", attr_path);
-                        },
-                        super::claude_fix::ClaudeFixResult::TimedOut => {
-                            warn!("{}: Claude Code fix attempt timed out", attr_path);
-                        },
-                        super::claude_fix::ClaudeFixResult::InvocationError { message } => {
-                            warn!("{}: Claude Code invocation error: {}", attr_path, message);
-                        },
-                    }
+                    log_unfixed(attr_path, &fix_result);
                 } // else (should_attempt_claude_fix)
             }
 
@@ -802,22 +871,7 @@ pub(super) async fn perform_direct_update(
                 snapshot.revert(attr_path, &pkg_dir).await;
             }
 
-            // Record failure in database
-            if let Err(db_err) = db
-                .record_failed_update(
-                    req.drv_path.as_deref().unwrap_or("unknown"),
-                    attr_path,
-                    &error_message,
-                    Some(current_version),
-                    Some(new_version),
-                )
-                .await
-            {
-                warn!("{}: Failed to record update failure: {}", attr_path, db_err);
-            }
-
-            // Return as skipped so it doesn't count as a successful update
-            Ok(UpdateResult::Skipped(format!("Update failed: {e}")))
+            Ok(attempt.record_failure(&failure, &error_message).await)
         },
     }
 }
@@ -842,9 +896,13 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
 }
 
 /// Create a pull request for a successful update
+///
+/// `eval_entry_point` is the worktree's entry point (the updated tree).
 async fn create_pr_for_update(
     db: &Database,
+    repo_name: &str,
     worktree_path: &Path,
+    eval_entry_point: &str,
     attr_path: &str,
     old_version: &str,
     new_version: &str,
@@ -869,8 +927,7 @@ async fn create_pr_for_update(
     .await?;
 
     // Fetch package metadata for PR body
-    let eval_entry_point = normalize_entry_point("<nixpkgs>");
-    let metadata = PackageMetadata::from_attr_path(&eval_entry_point, attr_path)
+    let metadata = PackageMetadata::from_attr_path(eval_entry_point, attr_path)
         .await
         .ok();
 
@@ -888,6 +945,19 @@ async fn create_pr_for_update(
     } else {
         None
     };
+    if let Some(analysis) = cve_analysis.as_ref() {
+        if let Err(e) = db
+            .record_cve_counts(
+                repo_name,
+                attr_path,
+                analysis.resolved.len(),
+                analysis.introduced.len(),
+            )
+            .await
+        {
+            warn!("{}: Failed to record CVE counts: {}", attr_path, e);
+        }
+    }
 
     // Push build outputs to Cachix (if enabled) before the directory diff
     // step, since the diff pass runs `git checkout HEAD~1` and would
@@ -897,7 +967,7 @@ async fn create_pr_for_update(
     // updates don't typically need the raw store paths or `cachix use`
     // boilerplate, and the cache name is already visible in the deployment.
     if let Err(e) = pr_enhancements
-        .perform_worktree_cachix_push(worktree_path, &eval_entry_point, attr_path)
+        .perform_worktree_cachix_push(worktree_path, eval_entry_point, attr_path)
         .await
     {
         warn!("{}: Cachix push raised an error: {:#}", attr_path, e);
@@ -905,7 +975,7 @@ async fn create_pr_for_update(
 
     // Audit the built package if requested
     let audit_markdown = match pr_enhancements
-        .perform_worktree_audit(worktree_path, &eval_entry_point, attr_path)
+        .perform_worktree_audit(worktree_path, eval_entry_point, attr_path)
         .await
     {
         Ok(md) => md,
@@ -917,7 +987,7 @@ async fn create_pr_for_update(
 
     // Perform directory diff if requested
     let diff_markdown = pr_enhancements
-        .perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path)
+        .perform_worktree_directory_diff(worktree_path, eval_entry_point, attr_path)
         .await
         .ok()
         .flatten();
@@ -1053,7 +1123,7 @@ async fn create_pr_for_update(
     .await?;
 
     // Record PR info in database
-    db.record_pr_info(attr_path, &pr.html_url, pr.number)
+    db.record_pr_info(repo_name, attr_path, &pr.html_url, pr.number)
         .await?;
 
     Ok((pr.html_url, pr.number))

@@ -19,6 +19,10 @@ use crate::commands::update::types::UpdatePhase;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureArtifacts {
     pub session_id: String,
+    /// Repository scope (`''` for `run` / single-repo watch). Missing in
+    /// manifests written before multi-repo support.
+    #[serde(default)]
+    pub repo_name: String,
     pub attr_path: String,
     pub failed_phase: UpdatePhase,
     pub timestamp: DateTime<Utc>,
@@ -33,8 +37,14 @@ pub struct FailureArtifacts {
 }
 
 impl FailureArtifacts {
-    /// Directory structure: ~/.cache/ekapkgs-update/failed/{session_id}/{attr_path}/
-    pub fn base_path(session_id: &str, attr_path: &str) -> anyhow::Result<PathBuf> {
+    /// Directory structure:
+    /// `~/.cache/ekapkgs-update/failed/{session_id}/[{repo_name}-]{attr_path}/`
+    /// (one watch session can fail the same attr in several repos).
+    pub fn base_path(
+        session_id: &str,
+        repo_name: &str,
+        attr_path: &str,
+    ) -> anyhow::Result<PathBuf> {
         let base_dirs = directories::ProjectDirs::from("com", "ekapusta", "ekapkgs-update")
             .context("Failed to determine project directories")?;
         let cache_dir = base_dirs.cache_dir();
@@ -42,14 +52,24 @@ impl FailureArtifacts {
         let path = cache_dir
             .join("failed")
             .join(session_id)
-            .join(attr_path.replace('.', "_").replace('/', "_"));
+            .join(package_dir_name(repo_name, attr_path));
         Ok(path)
+    }
+}
+
+fn package_dir_name(repo_name: &str, attr_path: &str) -> String {
+    let attr = attr_path.replace(['.', '/'], "_");
+    if repo_name.is_empty() {
+        attr
+    } else {
+        format!("{}-{attr}", repo_name.replace(['.', '/'], "_"))
     }
 }
 
 /// Preserve a failed update's context for later inspection
 pub async fn preserve_failure(
     session_id: &str,
+    repo_name: &str,
     attr_path: &str,
     phase: UpdatePhase,
     worktree_path: &Path,
@@ -57,7 +77,7 @@ pub async fn preserve_failure(
     build_log: Option<String>,
     test_output: Option<String>,
 ) -> anyhow::Result<FailureArtifacts> {
-    let base_path = FailureArtifacts::base_path(session_id, attr_path)?;
+    let base_path = FailureArtifacts::base_path(session_id, repo_name, attr_path)?;
     fs::create_dir_all(&base_path).await?;
 
     info!(
@@ -115,8 +135,9 @@ pub async fn preserve_failure(
 
     // Create artifacts manifest
     let artifacts = FailureArtifacts {
-        session_id: session_id.to_string(),
-        attr_path: attr_path.to_string(),
+        session_id: session_id.to_owned(),
+        repo_name: repo_name.to_owned(),
+        attr_path: attr_path.to_owned(),
         failed_phase: phase,
         timestamp: Utc::now(),
         worktree_path: preserved_worktree,
@@ -298,7 +319,165 @@ pub async fn list_preserved_failures() -> anyhow::Result<Vec<FailureArtifacts>> 
     }
 
     // Sort by timestamp, most recent first
-    all_artifacts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    all_artifacts.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
 
     Ok(all_artifacts)
+}
+
+/// Label used on the command line for the unnamed (`''`) repo scope, the
+/// same label the dashboard uses (reserved by `ConfigFile::validate`).
+pub const DEFAULT_REPO_LABEL: &str = crate::config::RESERVED_REPO_NAME;
+
+/// Map a `--repo` value to a `repo_name`: `default` selects `''`.
+pub fn repo_from_label(label: &str) -> &str {
+    if label == DEFAULT_REPO_LABEL {
+        ""
+    } else {
+        label
+    }
+}
+
+/// Display name of a repo scope (`''` → `default`).
+pub fn repo_label(repo_name: &str) -> &str {
+    if repo_name.is_empty() {
+        DEFAULT_REPO_LABEL
+    } else {
+        repo_name
+    }
+}
+
+/// Whether `artifacts` belongs to the `--repo` selection (`None` = any repo).
+pub fn matches_repo(artifacts: &FailureArtifacts, repo: Option<&str>) -> bool {
+    repo.is_none_or(|label| artifacts.repo_name == repo_from_label(label))
+}
+
+/// Pick the most recent preserved failure of `attr_path`.
+///
+/// `list` must be sorted most recent first (as [`list_preserved_failures`]
+/// returns it). Without `repo`, the attr must have failed in only one
+/// repository; otherwise the caller is asked to choose with `--repo` rather
+/// than silently getting another repo's worktree.
+pub fn find_preserved<'a>(
+    list: &'a [FailureArtifacts],
+    attr_path: &str,
+    repo: Option<&str>,
+) -> anyhow::Result<&'a FailureArtifacts> {
+    let mut candidates = list
+        .iter()
+        .filter(|a| a.attr_path == attr_path && matches_repo(a, repo));
+    let Some(first) = candidates.next() else {
+        return Err(match repo {
+            Some(label) => {
+                anyhow::anyhow!("No preserved artifacts found for {attr_path} in repo '{label}'")
+            },
+            None => anyhow::anyhow!("No preserved artifacts found for {attr_path}"),
+        });
+    };
+    if repo.is_none() {
+        let mut repos: Vec<&str> = std::iter::once(first)
+            .chain(candidates)
+            .map(|a| repo_label(&a.repo_name))
+            .collect();
+        repos.sort_unstable();
+        repos.dedup();
+        if repos.len() > 1 {
+            anyhow::bail!(
+                "{attr_path} has preserved failures in several repos ({}); choose one with --repo",
+                repos.join(", ")
+            );
+        }
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact(repo: &str, attr: &str, session: &str) -> FailureArtifacts {
+        FailureArtifacts {
+            session_id: session.to_owned(),
+            repo_name: repo.to_owned(),
+            attr_path: attr.to_owned(),
+            failed_phase: UpdatePhase::Build,
+            timestamp: Utc::now(),
+            worktree_path: PathBuf::from("/w"),
+            build_log_path: None,
+            test_output_path: None,
+            diff_path: PathBuf::from("/d"),
+            metadata_path: PathBuf::from("/m"),
+            error_context_path: PathBuf::from("/e"),
+        }
+    }
+
+    #[test]
+    fn find_preserved_by_repo() {
+        // Most recent first.
+        let list = vec![
+            artifact("", "foo", "new"),
+            artifact("", "foo", "old"),
+            artifact("core", "bar", "b1"),
+            artifact("", "bar", "b2"),
+        ];
+
+        // Unambiguous: most recent wins.
+        assert_eq!(
+            find_preserved(&list, "foo", None).unwrap().session_id,
+            "new"
+        );
+        // `default` selects the unnamed scope.
+        assert_eq!(
+            find_preserved(&list, "foo", Some("default"))
+                .unwrap()
+                .session_id,
+            "new"
+        );
+        assert!(find_preserved(&list, "foo", Some("core")).is_err());
+
+        // Ambiguous without --repo.
+        let err = find_preserved(&list, "bar", None).unwrap_err().to_string();
+        assert!(err.contains("core, default"), "{err}");
+        assert_eq!(
+            find_preserved(&list, "bar", Some("core"))
+                .unwrap()
+                .session_id,
+            "b1"
+        );
+        assert_eq!(
+            find_preserved(&list, "bar", Some("default"))
+                .unwrap()
+                .session_id,
+            "b2"
+        );
+
+        assert!(find_preserved(&list, "missing", None).is_err());
+    }
+
+    #[test]
+    fn package_dir_is_repo_qualified() {
+        assert_eq!(
+            package_dir_name("", "python3Packages.foo"),
+            "python3Packages_foo"
+        );
+        assert_eq!(
+            package_dir_name("core", "python3Packages.foo"),
+            "core-python3Packages_foo"
+        );
+        assert_ne!(
+            package_dir_name("core", "foo"),
+            package_dir_name("extra", "foo")
+        );
+    }
+
+    #[test]
+    fn old_manifest_defaults_to_unscoped_repo() {
+        let manifest = r#"{
+            "session_id": "s", "attr_path": "foo", "failed_phase": "build",
+            "timestamp": "2026-01-01T00:00:00Z", "worktree_path": "/w",
+            "build_log_path": null, "test_output_path": null, "diff_path": "/d",
+            "metadata_path": "/m", "error_context_path": "/e"
+        }"#;
+        let artifacts: FailureArtifacts = serde_json::from_str(manifest).unwrap();
+        assert_eq!(artifacts.repo_name, "");
+    }
 }

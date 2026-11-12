@@ -1,0 +1,47 @@
+{% import "macros.html" as m %}
+{%- if stats.is_empty %}
+<div class="empty-state">
+  <h2>No packages tracked yet</h2>
+  <p>Run <code>ekapkgs-update run</code> or start <code>ekapkgs-update watch</code>; packages appear here as soon as they are checked.</p>
+</div>
+{%- endif %}
+<div class="tiles">
+  {%- for t in stats.tiles %}
+  <div class="tile">
+    <a class="tile-link" href="{{ t.href }}">
+      <span class="tile-label">{% if t.tone != "neutral" %}<span class="dot tone-{{ t.tone }}" aria-hidden="true"></span>{% endif %}{{ t.label }}</span>
+      <span class="tile-value">{{ t.value }}</span>
+    </a>
+    {%- if !t.note.is_empty() %}
+    {%- if let Some(nh) = t.note_href %}<a class="tile-note" href="{{ nh }}">{{ t.note }}</a>
+    {%- else %}<span class="tile-note">{{ t.note }}</span>{% endif %}
+    {%- endif %}
+  </div>
+  {%- endfor %}
+  <div class="tile tile-rate">
+    <span class="tile-label">Success rate · {{ stats.window_days }} days</span>
+    <span class="tile-value">{{ stats.success_rate }}</span>
+    <span class="tile-note">{{ stats.success_detail }}</span>
+    {%- if !stats.success_delta.is_empty() %}
+    <span class="tile-delta tone-{{ stats.success_delta_tone }}">{{ stats.success_delta }}</span>
+    {%- endif %}
+  </div>
+</div>
+{%- if let Some(h) = stats.backlog_href %}
+<p class="small tile-footnote">Backlog packages are outdated only because <code>watch</code> saw the release during its observe-only bootstrap; <a href="{{ h }}">review the backlog</a> or let <code>run</code> pick them up.</p>
+{%- endif %}
+{%- if !stats.is_empty %}
+<div class="composition">
+  {% call m::segbar(stats.composition) %}
+  <ul class="legend" aria-hidden="true">
+    <li><span class="swatch seg-good"></span>up to date</li>
+    <li><span class="swatch seg-info"></span>proposed</li>
+    <li><span class="swatch seg-warn"></span>outdated</li>
+    <li><span class="swatch seg-warn-light"></span>backlog</li>
+    <li><span class="swatch seg-critical"></span>failed</li>
+    <li><span class="swatch seg-serious"></span>upstream error</li>
+    <li><span class="swatch seg-neutral"></span>pending</li>
+  </ul>
+  <p class="sr-only">{{ stats.composition.label }}</p>
+</div>
+{%- endif %}

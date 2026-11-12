@@ -21,6 +21,13 @@ pub struct UpdateRequest {
     pub fork: Option<String>,
 }
 
+impl UpdateRequest {
+    /// Repo scope used for database rows (`''` = default / `run` command).
+    pub fn repo(&self) -> &str {
+        self.repo_name.as_deref().unwrap_or("")
+    }
+}
+
 /// Result of an update operation
 #[derive(Debug)]
 pub enum UpdateResult {
@@ -28,7 +35,12 @@ pub enum UpdateResult {
         old_version: String,
         new_version: String,
     },
+    /// Not attempted / not applicable (e.g. rebuild threshold exceeded,
+    /// worktree setup failed). Not recorded as a package failure.
     Skipped(String),
+    /// The update was attempted and failed; already recorded in the
+    /// database (failure log, backoff). Carries a one-line summary.
+    Failed(String),
     DryRun {
         current_version: String,
         new_version: String,

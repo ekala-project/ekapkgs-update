@@ -71,6 +71,9 @@ fn print_log_entry(log: &crate::database::UpdateLog, show_full_log: bool) {
     info!("Failed Update Log");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("");
+    if !log.repo_name.is_empty() {
+        info!("Repository:     {}", log.repo_name);
+    }
     info!("Attribute Path: {}", log.attr_path);
     info!("Derivation:     {}", log.drv_path);
     info!(
@@ -85,6 +88,15 @@ fn print_log_entry(log: &crate::database::UpdateLog, show_full_log: bool) {
     }
 
     info!("Status:         {}", log.status);
+    if let Some(phase) = &log.phase {
+        info!("Failed Phase:   {}", phase);
+    }
+    if let Some(error_type) = &log.error_type {
+        info!("Error Type:     {}", error_type);
+    }
+    if let Some(session) = &log.session_id {
+        info!("Session:        {}", session);
+    }
     info!("");
     info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     info!("Error Log");

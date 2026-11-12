@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block title %}Failures{% endblock %}
+{% block nav_failures %}aria-current="page"{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Failures</h1>
+  <p class="muted">Recorded update failures with the tail of each build or error log.</p>
+</div>
+
+<form class="filters" method="get" action="/failures" role="search">
+  <label class="field grow">
+    <span>Attribute</span>
+    <input type="search" name="q" value="{{ list.q }}" placeholder="attribute path contains…">
+  </label>
+  <label class="field">
+    <span>Repository</span>
+    <select name="repo">
+      {%- for o in list.repo_options %}
+      <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Phase</span>
+    <select name="phase">
+      {%- for o in list.phase_options %}
+      <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Error type</span>
+    <select name="error_type">
+      {%- for o in list.error_type_options %}
+      <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+      {%- endfor %}
+    </select>
+  </label>
+  <div class="field-actions">
+    <button class="button primary" type="submit">Apply</button>
+    {%- if list.has_filters %}<a class="button" href="/failures">Clear</a>{% endif %}
+  </div>
+</form>
+
+{%- if list.db_empty %}
+<div class="empty-state">
+  <h2>No failures recorded</h2>
+  <p>Failed update attempts appear here with their logs.</p>
+</div>
+{%- else if list.items.is_empty() %}
+<div class="empty-state">
+  <h2>No matching failures</h2>
+  <p><a href="/failures">Show all failures</a>.</p>
+</div>
+{%- else %}
+<div class="log-list">
+  {%- for l in list.items %}
+  {% call m::log_entry(l, true) %}
+  {%- endfor %}
+</div>
+{%- endif %}
+{% call m::pager(list.pager) %}
+{% endblock %}

@@ -1,77 +1,22 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 
-{% block title %}Sessions - ekapkgs-update Portal{% endblock %}
-{% block nav_sessions %}active{% endblock %}
+{% block title %}Sessions{% endblock %}
+{% block nav_sessions %}aria-current="page"{% endblock %}
 
 {% block content %}
-<div class="sessions">
-    <h2>Update Sessions</h2>
+<div class="page-head">
+  <h1>Sessions</h1>
+  <p class="muted">One session per <code>run</code> invocation, and one per <code>watch</code> poll that dispatched updates.</p>
+</div>
 
-    <div class="filter-bar">
-        <a href="/sessions" class="btn {% match filter_status %}{% when None %}active{% when Some with (_) %}{% endmatch %}">All</a>
-        <a href="/sessions?status=running" class="btn">Running</a>
-        <a href="/sessions?status=completed" class="btn">Completed</a>
-        <a href="/sessions?status=failed" class="btn">Failed</a>
-        <a href="/sessions?status=cancelled" class="btn">Cancelled</a>
-    </div>
+<div class="filter-row">
+  {% call m::chips(list.status_chips, "Filter by status") %}
+  {% call m::chips(list.mode_chips, "Filter by mode") %}
+  {%- if list.has_filters %}<a class="small" href="/sessions">Clear filters</a>{% endif %}
+</div>
 
-    <table class="sessions-table">
-        <thead>
-            <tr>
-                <th>Session ID</th>
-                <th>Started</th>
-                <th>Completed</th>
-                <th>Duration</th>
-                <th>Status</th>
-                <th>Attempted</th>
-                <th>Succeeded</th>
-                <th>Failed</th>
-                <th>Skipped</th>
-                <th>Success Rate</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for session in sessions %}
-            <tr>
-                <td><code>{{ session.id }}</code></td>
-                <td>{{ session.started_at }}</td>
-                <td>
-                    {% match session.completed_at %}
-                        {% when Some with (completed) %}
-                            {{ completed }}
-                        {% when None %}
-                            —
-                    {% endmatch %}
-                </td>
-                <td>
-                    {% match session.completed_at %}
-                        {% when Some with (completed) %}
-                            {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }}m
-                        {% when None %}
-                            Running...
-                    {% endmatch %}
-                </td>
-                <td><span class="badge badge-{{ session.status }}">{{ session.status }}</span></td>
-                <td>{{ session.packages_attempted }}</td>
-                <td class="success">{{ session.packages_succeeded }}</td>
-                <td class="error">{{ session.packages_failed }}</td>
-                <td class="warning">{{ session.packages_skipped }}</td>
-                <td>
-                    {% if session.packages_attempted > 0 %}
-                        {{ session.packages_succeeded * 100 / session.packages_attempted }}%
-                    {% else %}
-                        —
-                    {% endif %}
-                </td>
-                <td><a href="/sessions/{{ session.id }}" class="btn btn-small">View Details</a></td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-
-    {% if sessions.is_empty() %}
-    <p class="no-data">No sessions found.</p>
-    {% endif %}
+<div class="live-region" hx-get="{{ list.fragment_href }}" hx-trigger="live-update from:body, every 60s" hx-swap="innerHTML">
+  {% include "fragments/sessions_table.html" %}
 </div>
 {% endblock %}

@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block title %}Watch{% endblock %}
+{% block nav_watch %}aria-current="page"{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Watch</h1>
+  <p class="muted">Passive mode: repositories are indexed periodically and upstream feeds are polled for new releases.</p>
+</div>
+
+<details class="explainer"{% if !w.configured || w.awaiting_bootstrap %} open{% endif %}>
+  <summary>How watch mode works</summary>
+  <ol>
+    <li><strong>Index.</strong> Each repository is evaluated with <code>nix-eval-jobs</code>; every package with a recognisable upstream source is recorded in the index.</li>
+    <li><strong>Bootstrap (observe only).</strong> The first poll after a package is indexed records the current upstream release as a <em>baseline</em> and dispatches nothing. Packages that were already behind upstream at that moment become <a href="/packages?status=backlog">backlog</a>: outdated, but left for <code>ekapkgs-update run</code>.</li>
+    <li><strong>Poll.</strong> Later polls compare feeds against the baselines; only releases published after the bootstrap are dispatched as updates, each poll that dispatches creating a session.</li>
+  </ol>
+</details>
+
+{%- if !w.configured %}
+<div class="empty-state">
+  <h2>Watch mode has not run yet</h2>
+  <p>Start <code>ekapkgs-update watch</code> (or enable the <code>ekapkgs-update-watch</code> service) to index repositories and poll upstream feeds.</p>
+</div>
+{%- else %}
+
+<div class="tiles tiles-compact">
+  <div class="tile"><span class="tile-label">Repositories</span><span class="tile-value">{{ w.repos.len() }}</span></div>
+  <div class="tile"><span class="tile-label">Upstream sources</span><span class="tile-value">{{ w.sources_total }}</span></div>
+  <div class="tile"><span class="tile-label">{% if w.failing_total > 0 %}<span class="dot tone-serious" aria-hidden="true"></span>{% endif %}Failing sources</span><span class="tile-value">{{ w.failing_total_text }}</span></div>
+  <div class="tile"><a class="tile-link" href="/packages?status=backlog"><span class="tile-label">{% if w.backlog > 0 %}<span class="dot tone-warn" aria-hidden="true"></span>{% endif %}Backlog</span><span class="tile-value">{{ w.backlog_text }}</span></a></div>
+  <div class="tile">
+    <span class="tile-label">Last poll</span>
+    {%- if let Some(c) = w.last_poll %}
+    <span class="tile-value tile-value-sm">{% call m::ts(c.started) %}</span>
+    <span class="tile-note">{% call m::badge(c.badge) %} {{ c.new_releases }} new · {{ c.dispatched }} dispatched</span>
+    {%- else %}
+    <span class="tile-value tile-value-sm muted">never</span>
+    {%- endif %}
+  </div>
+</div>
+
+<section class="panel" aria-labelledby="h-repos">
+  <header class="panel-head"><h2 id="h-repos">Repositories</h2></header>
+  {%- if w.repos.is_empty() %}
+  <p class="muted">No repositories recorded yet.</p>
+  {%- else %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Repository</th>
+          <th scope="col">Checkout</th>
+          <th scope="col">Sync</th>
+          <th scope="col">Index</th>
+          <th scope="col" class="num">Evaluated</th>
+          <th scope="col" class="num">Indexed</th>
+          <th scope="col" class="num">Skipped</th>
+          <th scope="col">Bootstrap</th>
+          <th scope="col" class="num">Backlog</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- for r in w.repos %}
+        <tr>
+          <td>
+            <a href="{{ r.packages_href }}"><strong>{{ r.name }}</strong></a>
+            {%- if let Some(u) = r.upstream_url %}<div class="small"><a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ r.upstream }}</a></div>{% else if !r.upstream.is_empty() %}<div class="small muted">{{ r.upstream }}</div>{% endif %}
+          </td>
+          <td class="small">
+            <code>{{ r.path }}</code>
+            {%- if !r.entrypoint.is_empty() && r.entrypoint != r.path %}<div class="muted">entry <code>{{ r.entrypoint }}</code></div>{% endif %}
+            {%- if !r.branch.is_empty() %}<div>branch <code>{{ r.branch }}</code>{% if !r.fork_remote.is_empty() %} · fork <code>{{ r.fork_remote }}</code>{% endif %}</div>{% endif %}
+            {%- if !r.head_sha.is_empty() %}<div class="muted" title="{{ r.head_full }}"><code>{{ r.head_sha }}</code> {{ r.head_subject }}</div>{% endif %}
+          </td>
+          <td>{% call m::badge(r.sync_badge) %}<div class="small muted">{% call m::ts(r.synced) %}</div>{% if !r.sync_error.is_empty() %}<div class="small tone-text-critical clip" title="{{ r.sync_error }}">{{ r.sync_error }}</div>{% endif %}</td>
+          <td>{% call m::badge(r.index_badge) %}<div class="small muted">{% call m::ts(r.indexed) %} · {{ r.index_duration }}</div>{% if !r.index_error.is_empty() %}<div class="small tone-text-critical clip" title="{{ r.index_error }}">{{ r.index_error }}</div>{% endif %}</td>
+          <td class="num">{{ r.evaluated }}</td>
+          <td class="num">{{ r.indexed_count }}{% if r.index_errors > 0 %}<div class="small tone-text-critical">{{ r.index_errors }} eval errors</div>{% endif %}</td>
+          <td class="num">{{ r.index_skipped }}</td>
+          <td>{% if r.is_bootstrapped %}{% call m::ts(r.bootstrapped) %}{% else %}<span class="tag">pending</span>{% endif %}</td>
+          <td class="num">{% if r.backlog > 0 %}<a href="{{ r.backlog_href }}">{{ r.backlog_text }}</a>{% else %}<span class="muted">0</span>{% endif %}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+</section>
+
+<section class="panel" aria-labelledby="h-cycles">
+  <header class="panel-head"><h2 id="h-cycles">Cycles</h2></header>
+  {% call m::chips(w.kind_chips, "Filter cycles") %}
+  {%- if w.cycles.is_empty() %}
+  <p class="muted">No cycles recorded.</p>
+  {%- else %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Cycle</th>
+          <th scope="col">Status</th>
+          <th scope="col">Started</th>
+          <th scope="col">Duration</th>
+          <th scope="col" class="num">Sources</th>
+          <th scope="col" class="num">Packages</th>
+          <th scope="col" class="num">New releases</th>
+          <th scope="col" class="num">Dispatched</th>
+          <th scope="col" class="num">Updated / failed</th>
+          <th scope="col">Session</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- for c in w.cycles %}
+        <tr>
+          <td>#{{ c.id }} <span class="tag">{{ c.kind }}</span> <span class="small muted">{{ c.repo }}</span>{% if c.bootstrap %} <span class="tag tag-warn" title="Recorded baselines; observe only">bootstrap</span>{% endif %}</td>
+          <td>{% call m::badge(c.badge) %}{% if !c.error.is_empty() %}<div class="small tone-text-critical clip" title="{{ c.error }}">{{ c.error }}</div>{% endif %}</td>
+          <td>{% call m::ts(c.started) %}</td>
+          <td>{{ c.duration }}</td>
+          <td class="num">{{ c.sources_polled }}{% if c.sources_failed > 0 %} <span class="tone-text-serious small">({{ c.sources_failed }} failed)</span>{% endif %}</td>
+          <td class="num">{{ c.observed }}</td>
+          <td class="num">{{ c.new_releases }}</td>
+          <td class="num">{{ c.dispatched }}</td>
+          <td class="num">{{ c.updated }} / {% if c.failed > 0 %}<span class="tone-text-critical">{{ c.failed }}</span>{% else %}0{% endif %}</td>
+          <td>{% if let Some(sh) = c.session_href %}<a href="{{ sh }}" class="mono">{{ c.session_short }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+  {% call m::pager(w.cycle_pager) %}
+</section>
+
+<div class="grid-2">
+  <section class="panel" aria-labelledby="h-types">
+    <header class="panel-head"><h2 id="h-types">Sources by type</h2></header>
+    {%- if w.types.is_empty() %}
+    <p class="muted">No upstream sources polled yet.</p>
+    {%- else %}
+    <ol class="hbars">
+      {%- for t in w.types %}
+      <li class="hbar-row">
+        <span class="hbar-label">{{ t.kind }}</span>
+        <span class="hbar-track"><span class="hbar-fill" style="width: {{ t.width }}" data-tip="{{ t.tip }}" tabindex="0"></span></span>
+        <span class="hbar-value">{{ t.total }}</span>
+      </li>
+      {%- endfor %}
+    </ol>
+    <table class="table compact">
+      <thead><tr><th scope="col">Type</th><th scope="col" class="num">Sources</th><th scope="col" class="num">Never polled</th><th scope="col">Failing</th></tr></thead>
+      <tbody>
+        {%- for t in w.types %}
+        <tr>
+          <td>{{ t.kind }}</td>
+          <td class="num">{{ t.total }}</td>
+          <td class="num">{{ t.never_polled }}</td>
+          <td><span class="meter"><span class="meter-fill tone-bg-{{ t.failure.tone }}" style="width: {{ t.failure.width }}"></span></span> <span class="small{% if t.failing > 0 %} tone-text-serious{% endif %}">{{ t.failing_text }} · {{ t.failure.text }}</span></td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+    {%- endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="failing-sources">
+    <header class="panel-head"><h2 id="failing-sources">Failing sources</h2></header>
+    {%- if w.failing.is_empty() %}
+    <p class="muted">Every polled source answered on its last poll.</p>
+    {%- else %}
+    <div class="table-wrap">
+      <table class="table compact">
+        <thead><tr><th scope="col">Source</th><th scope="col">Failures</th><th scope="col">Last success</th><th scope="col" class="num">Packages</th></tr></thead>
+        <tbody>
+          {%- for s in w.failing %}
+          <tr>
+            <td><span class="tag">{{ s.kind }}</span> {% if let Some(u) = s.url %}<a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ s.key }}</a>{% else %}{{ s.key }}{% endif %}{% if !s.error.is_empty() %}<div class="small tone-text-critical clip" title="{{ s.error }}">{{ s.error }}</div>{% endif %}</td>
+            <td>{% call m::badge(s.badge) %}</td>
+            <td>{% call m::ts(s.success) %}</td>
+            <td class="num">{{ s.packages }}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    {%- endif %}
+  </section>
+</div>
+
+<section class="panel" aria-labelledby="h-releases">
+  <header class="panel-head"><h2 id="h-releases">Recently changed releases</h2></header>
+  {%- if w.recent.is_empty() %}
+  <p class="muted">No release changes observed yet.</p>
+  {%- else %}
+  <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th scope="col">Source</th><th scope="col">Latest</th><th scope="col">Changed</th><th scope="col" class="num">Releases</th><th scope="col" class="num">Packages</th><th scope="col">Poll</th></tr></thead>
+      <tbody>
+        {%- for s in w.recent %}
+        <tr>
+          <td><span class="tag">{{ s.kind }}</span> {% if let Some(u) = s.url %}<a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ s.key }}</a>{% else %}{{ s.key }}{% endif %}{% if !s.instance.is_empty() %} <span class="muted small">@ {{ s.instance }}</span>{% endif %}</td>
+          <td>{% call m::ver(s.latest) %}{% if !s.tag.is_empty() && s.tag != s.latest.full %} <span class="muted small">{{ s.tag }}</span>{% endif %}</td>
+          <td>{% call m::ts(s.changed) %}</td>
+          <td class="num">{{ s.releases }}</td>
+          <td class="num">{{ s.packages }}</td>
+          <td>{% call m::badge(s.badge) %}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+</section>
+{%- endif %}
+{% endblock %}

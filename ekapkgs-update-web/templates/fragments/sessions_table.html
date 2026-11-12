@@ -1,0 +1,58 @@
+{% import "macros.html" as m %}
+{%- if list.hidden_empty > 0 %}
+<p class="small muted">{% if list.hidden_empty == 1 %}1 finished watch session that attempted nothing is hidden. <a href="{{ list.toggle_empty_href }}">Show it</a>.{% else %}{{ list.hidden_empty_text }} finished watch sessions that attempted nothing are hidden. <a href="{{ list.toggle_empty_href }}">Show them</a>.{% endif %}</p>
+{%- else if list.show_empty %}
+<p class="small muted">Showing empty watch sessions. <a href="{{ list.toggle_empty_href }}">Hide them</a>.</p>
+{%- endif %}
+{%- if list.db_empty %}
+<div class="empty-state">
+  <h2>No sessions yet</h2>
+  <p>Sessions are recorded by <code>ekapkgs-update run</code> and by <code>watch</code> polls that dispatch updates.</p>
+</div>
+{%- else if list.items.is_empty() %}
+<div class="empty-state">
+  <h2>No matching sessions</h2>
+  <p><a href="/sessions">Show all sessions</a>.</p>
+</div>
+{%- else %}
+<div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th scope="col">Session</th>
+        <th scope="col">Status</th>
+        <th scope="col">Started</th>
+        <th scope="col">Duration</th>
+        <th scope="col" class="num">Evaluated</th>
+        <th scope="col" class="num">Attempted</th>
+        <th scope="col" class="num">Succeeded</th>
+        <th scope="col" class="num">Failed</th>
+        <th scope="col" class="num">Skipped</th>
+        <th scope="col">Progress</th>
+      </tr>
+    </thead>
+    <tbody>
+      {%- for s in list.items %}
+      <tr{% if s.is_running %} class="row-active"{% endif %}>
+        <td><a href="{{ s.href }}" class="mono">{{ s.short_id }}</a> <span class="tag">{{ s.mode }}</span></td>
+        <td>{% call m::badge(s.badge) %}</td>
+        <td>{% call m::ts(s.started) %}</td>
+        <td>{{ s.duration }}</td>
+        <td class="num">{{ s.evaluated }}</td>
+        <td class="num">{{ s.attempted }}</td>
+        <td class="num">{{ s.succeeded }}</td>
+        <td class="num">{{ s.failed }}</td>
+        <td class="num">{{ s.skipped }}</td>
+        <td class="progress-cell">
+          {%- if s.has_attempts %}
+          {% call m::segbar(s.progress) %}
+          <span class="small muted">{% if s.is_running %}{{ s.progress_text }}{% else %}{{ s.success_rate }} success{% endif %}</span>
+          {%- else %}<span class="muted small">nothing attempted</span>{% endif %}
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+</div>
+{%- endif %}
+{% call m::pager(list.pager) %}

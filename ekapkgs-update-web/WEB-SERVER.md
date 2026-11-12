@@ -1,374 +1,174 @@
-# ekapkgs-update-web: Implementation Complete ✅
+# ekapkgs-update-web: implementation notes
 
-## Summary
+Notes for working on the dashboard. [README.md](./README.md) has the user-facing
+summary of routes, options and the API.
 
-A fully functional web portal for monitoring **ekapkgs-update** package updates has been successfully implemented!
+## Principles
 
-## What Was Built
+- **Read-only.** Handlers only `SELECT`. The one exception is startup:
+  `ekapkgs_update::database::Database::new` creates the file if needed,
+  applies migrations, and prunes expired CVE/Repology cache rows.
+- **Decoupled from the CLI's types.** The web crate uses only
+  `Database::{new, from, pool}` from the library. Every read is a raw `sqlx`
+  query in `src/queries/` that maps into row structs owned by this crate. A
+  CLI refactor therefore breaks the dashboard only if the schema changes, and
+  the in-memory tests catch that because they run the real migrations.
+- **Pre-formatted views.** Templates do not compute anything. `src/views/`
+  and the route modules turn rows into view models whose fields are display
+  strings: relative and absolute times, durations, thousands separators,
+  badges with a tone, hrefs. Formatting rules live in `src/format.rs`, which
+  has table-driven tests.
+- **Lenient input.** Query strings are parsed into a `HashMap` and each
+  parameter is validated by hand. An unknown `status`, `sort` or `range` falls
+  back to the default, and an out-of-range `page` clamps to the last page, so
+  a stale bookmark never produces an error.
 
-### 1. **Cargo Workspace Architecture**
-- Converted project to workspace with two members:
-  - `ekapkgs-update` (existing CLI tool)
-  - `ekapkgs-update-web` (new web portal)
-- Shared dependencies and lints across workspace
-- Type reuse via library interface
-
-### 2. **Backend Implementation (Rust + Axum)**
-- ✅ Axum web server with routing
-- ✅ Database integration (shared SQLite, read-only)
-- ✅ RESTful API endpoints
-- ✅ WebSocket support for real-time updates
-- ✅ Direct SQLx queries (no ORM overhead)
-
-### 3. **Frontend (HTMX + Server-Side Rendering)**
-- ✅ Askama templates for type-safe HTML generation
-- ✅ 6 complete pages:
-  - Dashboard with live stats
-  - Sessions list and detail view
-  - Packages searchable list
-  - Analytics with charts
-- ✅ HTMX integration for dynamic updates
-- ✅ Clean, responsive CSS styling
-
-### 4. **Real-Time Features**
-- ✅ WebSocket connection for live session updates
-- ✅ Auto-refreshing dashboard stats
-- ✅ Progress bars for active sessions
-- ✅ 2-second polling interval
-
-### 5. **Database Enhancements**
-- ✅ Added `Serialize`/`Deserialize` traits to:
-  - `UpdateSession`
-  - `PhaseRecord`
-  - `SessionStatus`
-- ✅ Added `Display` trait for `SessionStatus`
-- ✅ Exposed `pool()` method for direct queries
-
-### 6. **Documentation**
-- ✅ Comprehensive README.md
-- ✅ Usage examples and CLI options
-- ✅ Architecture documentation
-- ✅ Deployment scenarios
-
-## Project Structure
+## Request flow
 
 ```
-ekapkgs-update/ (workspace root)
-├── Cargo.toml (workspace config)
-├── ekapkgs-update/
-│   ├── Cargo.toml
-│   ├── src/
-│   ├── migrations/
-│   └── tests/
-└── ekapkgs-update-web/
-    ├── Cargo.toml
-    ├── README.md
-    ├── WEB-SERVER.md (this file)
-    ├── src/
-    │   ├── main.rs
-    │   ├── state.rs
-    │   ├── templates.rs
-    │   └── routes/
-    │       ├── mod.rs
-    │       ├── dashboard.rs
-    │       ├── sessions.rs
-    │       ├── packages.rs
-    │       ├── analytics.rs
-    │       └── ws.rs
-    ├── templates/
-    │   ├── base.html
-    │   ├── dashboard.html
-    │   ├── sessions.html
-    │   ├── session_detail.html
-    │   ├── packages.html
-    │   └── analytics.html
-    └── static/
-        ├── css/styles.css
-        └── js/htmx.min.js
+Router (routes/mod.rs)
+  ├── pages       routes/{dashboard,packages,sessions,failures,watch,analytics}.rs
+  │                 → queries/* → views/* → templates.rs (Askama) → HTML
+  ├── fragments   same handlers' data, rendered without base.html
+  ├── /api/*      routes/api.rs → queries/* → serde_json (raw values)
+  ├── /ws/live    routes/ws.rs  → queries/live.rs fingerprint
+  ├── /static/*   assets.rs (embedded)
+  └── fallback    error.rs (404 page)
 ```
 
-## Usage
-
-### Running Locally
-
-```bash
-# From workspace root
-cargo run -p ekapkgs-update-web -- \\
-  --database ~/.local/share/ekapkgs-update/db.sqlite \\
-  --port 3000
-
-# Then open http://localhost:3000
-```
-
-### Building Release Binary
-
-```bash
-cargo build --release -p ekapkgs-update-web
-
-# Binary located at:
-./target/release/ekapkgs-update-web
-```
-
-### CLI Options
-
-```
-ekapkgs-update-web [OPTIONS]
-
-Options:
-  -d, --database <PATH>    Path to SQLite database
-                           [default: ~/.local/share/ekapkgs-update/db.sqlite]
-  -p, --port <PORT>        Port to listen on [default: 3000]
-      --host <HOST>        Host to bind to [default: 127.0.0.1]
-      --cors               Enable CORS for public access
-  -h, --help               Print help
-```
-
-## Pages & Features
-
-### Dashboard (`/`)
-- **Live Statistics**: Total packages, success rate, active updates, total sessions
-- **Active Session Monitor**: Real-time progress bar for running sessions
-- **Recent Activity**: Last 10 sessions with status badges
-- **Auto-refresh**: Stats update every 5 seconds via HTMX
-
-### Sessions (`/sessions`)
-- **List All Sessions**: Filterable by status (running/completed/failed/cancelled)
-- **Session Metrics**: Duration, success/failure counts, success rate
-- **Detailed View**: Click any session to see phase-by-phase breakdown
-
-### Session Detail (`/sessions/:id`)
-- **Session Metadata**: ID, timestamps, duration, status
-- **Progress Overview**: Succeeded/failed/skipped counts
-- **Success List**: All successfully updated packages
-- **Failure Analysis**: Error types, details, logs for failed updates
-
-### Packages (`/packages`)
-- **Searchable List**: Filter packages by name
-- **Version Tracking**: Current vs latest version
-- **Status Indicators**: Up-to-date, PR created, update failed, pending
-- **PR Links**: Direct links to created pull requests
-
-### Analytics (`/analytics`)
-- **Error Distribution**: Chart of error types and frequencies
-- **Phase Statistics**: Success/failure rates and average durations per phase
-- **Success Rate Trend**: Historical success rates over last 30 days
-- **Performance Metrics**: Identify bottlenecks and problem areas
-
-## API Endpoints
-
-### HTML (Server-Side Rendered)
-- `GET /` - Dashboard
-- `GET /sessions` - Sessions list
-- `GET /sessions/:id` - Session detail
-- `GET /packages` - Packages list
-- `GET /analytics` - Analytics page
-
-### JSON (For AJAX/API)
-- `GET /api/stats` - Live statistics
-- `GET /api/sessions` - Sessions list as JSON
-- `GET /api/sessions/:id/phases` - Phase records as JSON
-
-### WebSocket
-- `WebSocket /ws/live` - Real-time session updates (2s interval)
-
-## Technical Highlights
-
-### Clean Architecture
-- **Separation of Concerns**: Standalone service, doesn't modify CLI
-- **Type Safety**: Askama templates are type-checked at compile time
-- **Zero Runtime Overhead**: All templates compiled to Rust code
-
-### Performance
-- **Minimal Dependencies**: Only essential crates (Axum, Askama, SQLx)
-- **Direct Database Access**: No ORM overhead, prepared statements
-- **Efficient Queries**: Indexed lookups, limited result sets
-- **Static File Serving**: Optimized via tower-http
-
-### Security
-- **Read-Only**: Web portal never writes to database
-- **SQL Injection Protection**: Prepared statements via SQLx
-- **Input Validation**: All query parameters validated
-- **Optional CORS**: Can be enabled for public deployment
-
-### Developer Experience
-- **Fast Compilation**: ~1-3 seconds incremental builds
-- **Hot Reload**: Restart server to pick up changes
-- **Type-Safe Templates**: Compile-time errors for template issues
-- **Clear Error Messages**: Askama provides excellent diagnostics
-
-## Deployment Scenarios
-
-### 1. Local Development
-```bash
-cargo run -p ekapkgs-update-web
-# Access at http://localhost:3000
-```
-
-### 2. Internal Team Dashboard
-```bash
-./ekapkgs-update-web --host 0.0.0.0 --port 8080
-# Accessible on local network
-```
-
-### 3. Public-Facing Portal
-```bash
-./ekapkgs-update-web --host 0.0.0.0 --port 3000 --cors
-# Behind nginx reverse proxy with SSL
-```
-
-### 4. Systemd Service
-Create `/etc/systemd/system/ekapkgs-update-web.service`:
-```ini
-[Unit]
-Description=ekapkgs-update Web Portal
-After=network.target
-
-[Service]
-Type=simple
-User=ekapkgs
-ExecStart=/usr/local/bin/ekapkgs-update-web \\
-  --database /var/lib/ekapkgs-update/db.sqlite \\
-  --host 0.0.0.0 \\
-  --port 3000 \\
-  --cors
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 5. Docker (Future)
-```dockerfile
-FROM rust:1.75 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release -p ekapkgs-update-web
-
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/ekapkgs-update-web /usr/local/bin/
-EXPOSE 3000
-CMD ["ekapkgs-update-web", "--host", "0.0.0.0"]
-```
-
-## Build Statistics
-
-- **Build Time**: ~3-5 seconds (incremental)
-- **Binary Size**: ~15MB (release)
-- **Dependencies**: 50+ crates
-- **Lines of Code**: ~1,500 lines (excluding templates)
-- **Template Lines**: ~500 lines HTML
-
-## Testing Checklist
-
-### ✅ Compilation
-- [x] Workspace builds without errors
-- [x] No warnings in release mode
-- [x] All templates compile
-
-### 🔄 Manual Testing Needed
-- [ ] Start server and access dashboard
-- [ ] Verify stats display correctly
-- [ ] Check WebSocket connects and updates
-- [ ] Test session filtering
-- [ ] Verify session detail page
-- [ ] Test package search
-- [ ] Check analytics charts render
-- [ ] Confirm links work (sessions, packages, PRs)
-- [ ] Test on mobile/responsive
-- [ ] Verify CORS when enabled
-
-### 🚀 Ready for Production
-- [ ] Set up reverse proxy (nginx/caddy)
-- [ ] Configure SSL certificate
-- [ ] Set up systemd service
-- [ ] Configure database backups
-- [ ] Set up monitoring/alerting
-- [ ] Document deployment process
-
-## Next Steps
-
-1. **Test Against Real Database**
-   - Run ekapkgs-update to generate some data
-   - Start web server and verify everything works
-   - Check performance with realistic data volumes
-
-2. **Deploy to Server**
-   - Set up systemd service
-   - Configure nginx reverse proxy
-   - Set up SSL with Let's Encrypt
-
-3. **Future Enhancements**
-   - Add authentication (OAuth, basic auth)
-   - Implement retry/skip buttons (requires mutations)
-   - Add email/webhook notifications
-   - Custom date formatting filters
-   - Advanced search and filtering
-   - Export data (CSV, JSON)
-   - Performance caching layer
-
-## Design Decisions
-
-### Why Standalone Service?
-- **Flexibility**: Can deploy separately from CLI
-- **Scaling**: Can run multiple instances behind load balancer
-- **Security**: Read-only access, can't interfere with updates
-- **Simplicity**: No complex integration with CLI lifecycle
-
-### Why HTMX + SSR?
-- **Simplicity**: Minimal JavaScript, easy to maintain
-- **Performance**: Fast page loads, efficient updates
-- **SEO**: Fully rendered HTML for search engines
-- **Progressive Enhancement**: Works without JavaScript
-
-### Why Askama?
-- **Type Safety**: Compile-time template checking
-- **Performance**: Zero runtime overhead
-- **Integration**: Native Axum support
-- **Familiar Syntax**: Jinja2-like templates
-
-### Why Direct SQLx?
-- **Performance**: No ORM translation layer
-- **Flexibility**: Full SQL expressiveness
-- **Type Safety**: Compile-time query checking
-- **Simplicity**: No complex ORM configuration
-
-## Troubleshooting
-
-### Empty Dashboard / No Data
-
-If the web portal starts but shows no data:
-
-**Solution**: The database is created automatically but is empty. Run `ekapkgs-update run` to populate it with update data.
-
-```bash
-# In another terminal
-ekapkgs-update run --file ./your-packages.nix
-```
-
-The web portal will automatically show data as it becomes available.
-
-### Templates Not Found
-```
-Error: template "dashboard.html" not found
-```
-**Solution**: Ensure working directory is workspace root, or templates are in correct location
-
-### WebSocket Disconnects
-**Solution**: Check firewall settings, ensure websockets not blocked by proxy
-
-### High Memory Usage
-**Solution**: Increase database query limits, implement pagination, add caching layer
-
-## Contributing
-
-See main repository README for contribution guidelines.
-
-## License
-
-Same as parent project (ekapkgs-update).
-
----
-
-**Status**: ✅ **COMPLETE AND READY TO USE**
-
-Built with ❤️ using Rust, Axum, HTMX, and Askama.
+`AppError` (`src/error.rs`) has `NotFound` and `Internal`. Pages render
+`templates/error.html`; `/api/*` returns `{"error", "status"}`. Internal
+errors are logged with `tracing` and shown without the SQL text.
+
+## Data sources
+
+| Page | Tables |
+|---|---|
+| Dashboard | `updates` (status counts, latest PRs), `update_sessions` (running), `update_phases` (in-flight packages, recent activity), `watch_cycles`, `watched_repos`, `upstream_sources` |
+| Packages | `updates` |
+| Package detail | `updates`, `upstream_index`, `upstream_sources`, `update_phases`, `update_logs`, `autofix_queue`, `autofix_attempts` |
+| Sessions / detail | `update_sessions`, `update_phases`, `update_logs`, `watch_cycles` (the cycle that created a watch session) |
+| Failures | `update_logs` |
+| Watch | `watched_repos`, `watch_cycles`, `upstream_sources`, `upstream_index`, `updates` (backlog per repository) |
+| Analytics | `update_sessions`, `update_phases`, `updates`, `autofix_queue`, `autofix_attempts` |
+
+Conventions that come from the schema:
+
+- `updates`, `update_phases`, `update_logs` and `upstream_index` are keyed by
+  `repo_name`. `''` is the repository used by `run` and single-repo watch. It
+  is displayed as `default`, and `?repo=default` selects it.
+- **Backlog** means `status = 'outdated'` with `latest_upstream_version` equal
+  to `baseline_version`. Watch observed that release at bootstrap and leaves
+  it to `run`.
+- Finished watch sessions with `packages_attempted = 0` are legacy rows from
+  before sessions were created lazily. They are hidden from lists and counts
+  unless `show_empty=1`.
+- A session's success rate is `succeeded / (succeeded + failed)`. Skipped
+  packages were not attempted, so they are excluded.
+
+## Live updates
+
+Each `/ws/live` connection runs its own loop:
+
+1. Every 2 s it computes `queries::live::fingerprint`, a single cheap query
+   over indexed maxima and counts: max phase id, running phases, latest cycle
+   id and status, running-session counters, max session `updated_at` and
+   `started_at`, and max `watched_repos.updated_at`.
+2. It sends `{"type":"live","v":"%016x"}` (an FNV-1a hash of the
+   fingerprint) on connect and whenever the value changes.
+3. It pings after 30 s without sending anything, and exits when the client
+   goes away.
+
+`static/js/live.js` remembers the last value across reconnects and dispatches
+`live-update` on `<body>` only when it changes. HTMX regions use
+`hx-trigger="live-update from:body, every 60s"`. A running session's detail
+fragment polls every 30 s as well. When the session finishes, the swapped-in
+fragment no longer carries `hx-get`, so polling stops.
+
+The socket only says that something changed and carries no data.
+Fragments are ordinary GET handlers, so every live panel also works with
+JavaScript off (the content is just as fresh as the page load).
+
+## Charts
+
+Charts are plain HTML and CSS. There is no chart library and no canvas.
+
+- **Segmented bars** (`segbar` macro) for status mixes. Segments use
+  `flex-grow`, a 2px surface gap and rounded ends.
+- **Horizontal bars** (`hbars` macro) for ranked categories such as error
+  types, upstream types and autofix outcomes. The list is folded to an
+  "Other" row after the top entries.
+- **Column chart** on `/analytics` for daily outcomes. Columns are stacked
+  succeeded/failed, gaps are filled with empty days, and the axis uses nice
+  ticks (`views/charts.rs`).
+- **Meters** for phase failure rates.
+
+Every chart has a legend or a title naming the series, a `data-tip` tooltip
+that also shows on keyboard focus, and a `<details>` table view. Colors are
+CSS custom properties defined once for light mode and once for dark mode.
+Dark mode applies under `prefers-color-scheme` unless
+`data-theme="light"`, or when `data-theme="dark"` is set. Status colors are
+reserved for status: good, warn, serious and critical. The single data
+series uses blue. `forced-colors` and print rules keep marks visible.
+
+## Templates
+
+- `base.html` holds the layout, nav (`aria-current="page"`) and live
+  indicator. `macros.html` holds shared helpers. `fragments/` holds the
+  partials that HTMX swaps in. Pages include fragments so the first render
+  and later refreshes share markup.
+- Askama 0.12 quirks:
+  - Macro arguments are bound by name, so a parameter that shares its name
+    with a template field shadows that field. Every macro parameter
+    therefore has a unique name.
+  - `{% for x in a.b %}` inside a macro moves the value, so macros always
+    loop over `.iter()`.
+- Askama escapes all output by default. The tests check this against a
+  description containing markup.
+
+## Static assets
+
+`assets.rs` embeds `css/styles.css`, `js/htmx.min.js` and `js/live.js` with
+`include_str!`. Responses carry:
+
+- an `ETag` (FNV-1a of the content), with `If-None-Match` answered by 304;
+- `Cache-Control: public, max-age=86400`.
+
+Pages reference assets as `?v=<hash of all assets>`, so a new build busts
+the cache. Nothing is installed next to the binary, and `nix/package-web.nix`
+has no `postInstall`.
+
+## Testing
+
+`src/routes/tests.rs` builds the router on `sqlite::memory:` with
+`sqlx::migrate!("../ekapkgs-update/migrations")` and drives it with
+`tower::ServiceExt::oneshot`:
+
+- A fixture covers every table the dashboard reads. Timestamps are written as
+  `AGO(minutes)` and expanded relative to now, so relative times are stable.
+- One test requests every page, fragment and API endpoint against the
+  fixture, and another does the same against an empty database (empty
+  states).
+- Further tests cover:
+  - filters, sorting and pagination (including clamping and bad input);
+  - 404s (HTML and JSON) and HTML escaping;
+  - asset ETag/304 and the cache-busting query;
+  - the live fingerprint changing after a write, and `/ws/live` rejecting
+    a non-upgrade request.
+
+Formatting, chart scaling and query helpers have unit tests next to their
+code.
+
+## Known limitations
+
+- There is no authentication. Bind to localhost or put the portal behind a
+  proxy that provides auth.
+- `autofix_queue` has no `repo_name`, so the autofix section on a package
+  page matches by attribute path across all repositories.
+- `/failures` lists `update_logs`. The error-type breakdown on `/analytics`
+  counts failed `update_phases`. The two can differ when a failure was
+  recorded in only one of them.
+- A repository actually named `default` would be indistinguishable from the
+  `''` repository in URLs.
+- The portal and the CLI must be built from the same migration set: an
+  older portal refuses to start against a database migrated by a newer CLI.

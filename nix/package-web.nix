@@ -40,12 +40,8 @@ rustPlatform.buildRustPackage {
   # This causes the build to occur again, but in debug mode
   doCheck = false;
 
-  # Copy static assets to the output
-  postInstall = ''
-    mkdir -p $out/share/ekapkgs-update-web
-    cp -r ekapkgs-update-web/templates $out/share/ekapkgs-update-web/
-    cp -r ekapkgs-update-web/static $out/share/ekapkgs-update-web/
-  '';
+  # Templates (askama) and static assets (include_str!) are compiled into
+  # the binary, so nothing needs to be installed alongside it.
 
   meta = with lib; {
     description = "Web monitoring portal for ekapkgs-update";

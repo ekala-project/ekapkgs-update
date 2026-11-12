@@ -54,10 +54,18 @@ ekapkgs-update export python312Packages.requests
 #### `--database <PATH>` (short: `-d`)
 Path to SQLite database.
 
-**Default:** `~/.cache/ekapkgs-update/db.sqlite3`
+**Default:** `~/.cache/ekapkgs-update/updates.db`
 
 ```bash
 ekapkgs-update export --database /var/lib/ekapkgs-update/db.sqlite3 mypackage
+```
+
+#### `--repo <NAME>`
+
+Repository the failure belongs to: a `[[repos]]` name from multi-repo `watch`, or `default` for `run` and single-repo watch. Without it, the most recent failure of the attr is used, unless the attr has failed in several repos; then the command stops and lists them.
+
+```bash
+ekapkgs-update export mypackage --repo core
 ```
 
 #### `--format <FORMAT>`
@@ -270,10 +278,18 @@ ekapkgs-update apply python312Packages.requests --patch fix.patch
 #### `--database <PATH>` (short: `-d`)
 Path to SQLite database.
 
-**Default:** `~/.cache/ekapkgs-update/db.sqlite3`
+**Default:** `~/.cache/ekapkgs-update/updates.db`
 
 ```bash
 ekapkgs-update apply --database /var/lib/ekapkgs-update/db.sqlite3 mypackage --patch fix.patch
+```
+
+#### `--repo <NAME>`
+
+Repository the failure belongs to: a `[[repos]]` name from multi-repo `watch`, or `default` for `run` and single-repo watch. Without it, the most recent failure of the attr is used, unless the attr has failed in several repos; then the command stops and lists them.
+
+```bash
+ekapkgs-update apply mypackage --repo core --patch fix.patch
 ```
 
 #### `--patch <PATH>`

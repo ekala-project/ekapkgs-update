@@ -1,62 +1,91 @@
+//! `/ws/live`: tells browsers when something on screen may have changed.
+//!
+//! Each connection polls a cheap database fingerprint every
+//! [`POLL_INTERVAL`] and sends `{"type":"live","v":"<hash>"}` only when it
+//! changes (plus once on connect). The page's `live.js` turns a changed value
+//! into a `live-update` DOM event that HTMX panels refresh on.
+
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use ekapkgs_update::database::SessionStatus;
-use tokio::time::interval;
+use axum::response::Response;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 
+use crate::queries::live::fingerprint;
 use crate::state::AppState;
 
-pub async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_websocket(socket, state))
+/// How often each connection re-reads the fingerprint.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Send a ping when nothing else was sent for this long (keeps proxies from
+/// closing idle connections).
+const PING_AFTER: Duration = Duration::from_secs(30);
+
+/// `GET /ws/live`
+pub async fn live(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| serve(socket, state))
 }
 
-async fn handle_websocket(mut socket: WebSocket, state: AppState) {
-    let mut tick = interval(Duration::from_secs(2));
+/// The message for a fingerprint: a short hash, so nothing about the
+/// database leaks and messages stay tiny.
+pub fn message(fp: &str) -> String {
+    format!(
+        r#"{{"type":"live","v":"{:016x}"}}"#,
+        crate::assets::fnv1a(fp.as_bytes())
+    )
+}
+
+async fn serve(mut socket: WebSocket, state: AppState) {
+    let mut tick = interval(POLL_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last: Option<String> = None;
+    let mut last_send = Instant::now();
 
     loop {
-        tick.tick().await;
-
-        // Get running sessions and their status
-        let running_sessions = state
-            .db
-            .get_sessions_by_status(SessionStatus::Running)
-            .await
-            .unwrap_or_default();
-
-        // Prepare update message
-        let update = serde_json::json!({
-            "type": "update",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "active_sessions": running_sessions.len(),
-            "sessions": running_sessions.iter().map(|s| {
-                serde_json::json!({
-                    "id": s.id,
-                    "started_at": s.started_at.to_rfc3339(),
-                    "packages_attempted": s.packages_attempted,
-                    "packages_succeeded": s.packages_succeeded,
-                    "packages_failed": s.packages_failed,
-                    "packages_skipped": s.packages_skipped,
-                })
-            }).collect::<Vec<_>>(),
-        });
-
-        let msg = match serde_json::to_string(&update) {
-            Ok(s) => Message::Text(s),
-            Err(e) => {
-                tracing::warn!("Failed to serialize WebSocket update: {e}");
-                continue;
+        tokio::select! {
+            _ = tick.tick() => {
+                let fp = match fingerprint(state.db.pool()).await {
+                    Ok(fp) => fp,
+                    Err(e) => {
+                        tracing::warn!("live fingerprint query failed: {e}");
+                        continue;
+                    },
+                };
+                let outgoing = if last.as_deref() == Some(fp.as_str()) {
+                    (last_send.elapsed() >= PING_AFTER).then(|| Message::Ping(Vec::new()))
+                } else {
+                    let msg = Message::Text(message(&fp));
+                    last = Some(fp);
+                    Some(msg)
+                };
+                if let Some(msg) = outgoing {
+                    if socket.send(msg).await.is_err() {
+                        break;
+                    }
+                    last_send = Instant::now();
+                }
             },
-        };
-
-        // Send update to client
-        if socket.send(msg).await.is_err() {
-            // Client disconnected
-            break;
+            incoming = socket.recv() => {
+                match incoming {
+                    // Pongs and stray client messages are ignored.
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(_)) => {},
+                }
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message;
+
+    #[test]
+    fn message_is_small_and_stable() {
+        let a = message("1|0||0:0:|");
+        assert_eq!(a, message("1|0||0:0:|"));
+        assert_ne!(a, message("2|0||0:0:|"));
+        assert!(a.starts_with(r#"{"type":"live","v":""#));
+        assert!(a.len() < 48);
     }
 }

@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::fs;
 use tracing::info;
 
-use crate::commands::run::preservation::list_preserved_failures;
+use crate::commands::run::preservation::{find_preserved, list_preserved_failures};
 use crate::database::Database;
 
 /// Export format for failure context
@@ -18,8 +18,10 @@ pub enum ExportFormat {
     Markdown,
 }
 
-impl ExportFormat {
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+impl std::str::FromStr for ExportFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
         match s.to_lowercase().as_str() {
             "json" => Ok(Self::Json),
             "markdown" | "md" => Ok(Self::Markdown),
@@ -32,6 +34,9 @@ impl ExportFormat {
 #[derive(Debug, Serialize)]
 struct LlmContext {
     package: String,
+    /// Repository scope; omitted for `run` / single-repo watch.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     session_id: String,
     failed_phase: String,
     timestamp: String,
@@ -62,6 +67,7 @@ struct PhaseInfo {
 pub async fn export(
     database_path: String,
     attr_path: String,
+    repo: Option<String>,
     format: ExportFormat,
     output: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -72,10 +78,7 @@ pub async fn export(
 
     // Find the most recent preserved failure
     let artifacts_list = list_preserved_failures().await?;
-    let artifact = artifacts_list
-        .iter()
-        .find(|a| a.attr_path == attr_path)
-        .with_context(|| format!("No preserved artifacts found for {}", attr_path))?;
+    let artifact = find_preserved(&artifacts_list, &attr_path, repo.as_deref())?;
 
     info!(
         "Found preserved failure from session {}",
@@ -129,7 +132,8 @@ pub async fn export(
     };
 
     // Get historical context from database
-    let phases = db.get_phases_by_attr(&attr_path).await?;
+    let mut phases = db.get_phases_by_attr(&attr_path).await?;
+    phases.retain(|p| p.repo_name == artifact.repo_name);
     let mut sessions: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
     for phase in &phases {
         sessions
@@ -166,8 +170,9 @@ pub async fn export(
     // Build complete context
     let context = LlmContext {
         package: attr_path.clone(),
+        repo: artifact.repo_name.clone(),
         session_id: artifact.session_id.clone(),
-        failed_phase: artifact.failed_phase.as_str().to_string(),
+        failed_phase: artifact.failed_phase.as_str().to_owned(),
         timestamp: artifact.timestamp.to_rfc3339(),
         error: error_json,
         diff,
@@ -207,10 +212,13 @@ fn export_markdown(context: &LlmContext) -> anyhow::Result<String> {
 
     md.push_str("## Package Information\n\n");
     md.push_str(&format!("- **Package**: `{}`\n", context.package));
+    if !context.repo.is_empty() {
+        md.push_str(&format!("- **Repository**: `{}`\n", context.repo));
+    }
     md.push_str(&format!("- **Session ID**: `{}`\n", context.session_id));
     md.push_str(&format!("- **Failed Phase**: `{}`\n", context.failed_phase));
     md.push_str(&format!("- **Timestamp**: `{}`\n", context.timestamp));
-    md.push_str("\n");
+    md.push('\n');
 
     md.push_str("## Error Details\n\n");
     md.push_str("```json\n");
@@ -280,14 +288,14 @@ fn export_markdown(context: &LlmContext) -> anyhow::Result<String> {
                 let duration = if let Some(ms) = phase.duration_ms {
                     format!("{:.1}s", ms as f64 / 1000.0)
                 } else {
-                    "---".to_string()
+                    "---".to_owned()
                 };
                 md.push_str(&format!(
                     "| {} | {} | {} |\n",
                     phase.phase, phase.status, duration
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
     }
 

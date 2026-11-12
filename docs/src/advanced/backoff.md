@@ -82,95 +82,56 @@ Time: ────────────────────────�
 
 ## Implementation Details
 
-### Database Storage
+Backoff state lives in the `updates` table (`next_attempt`, `last_checked`,
+`last_attempted`, `failure_count`, `failed_version`). The table is scoped per
+repository (`repo_name`; `''` for `run`). The constants are in
+`ekapkgs-update/src/database/mod.rs`.
 
-The backoff state is stored implicitly in the `updates` table:
+There are two kinds of backoff.
 
-```sql
-UPDATE updates
-SET
-  last_attempted = ?,      -- Timestamp of this attempt
-  next_attempt = ?,        -- Calculated by backoff logic
-  current_version = ?
-WHERE attr_path = ?;
+### Check backoff (nothing to do)
+
+`record_no_update()` is called when the checker finds nothing to dispatch. That
+happens when the package is already up to date, the version was already
+proposed, or upstream could not be queried. The next check is scheduled from
+the time since the **previous check**:
+
+```
+if never checked:                    backoff = 2 days
+elif now - last_checked <= 2 days:   backoff = 4 days
+else:                                backoff = 6 days
 ```
 
-**Example state:**
-```
-attr_path: "python312Packages.requests"
-last_attempted: "2024-05-15T10:30:00Z"  -- Last time we checked
-next_attempt: "2024-05-17T10:30:00Z"    -- Next time to check (2 days later)
-current_version: "2.31.0"
-proposed_version: NULL                   -- No update available
-```
+### Failure backoff (an attempt failed)
 
-### Calculation Code
+`record_failed_update()` increments `failure_count`, records the target
+version in `failed_version` and schedules the next attempt:
 
-```rust
-pub async fn record_no_update(
-    &self,
-    attr_path: &str,
-    current_version: &str,
-    latest_upstream_version: &str,
-) -> Result<()> {
-    let now = Utc::now();
-    let record = self.get_update_record(attr_path).await?;
+| `failure_count` | Backoff |
+|-----------------|---------|
+| 1 | 2 days |
+| 2 | 4 days |
+| 3+ | 6 days |
 
-    // Calculate backoff duration
-    let backoff_days = match record.as_ref().and_then(|r| r.last_attempted) {
-        None => FIRST_BACKOFF_DAYS,  // 2 days for first failure
-        Some(last) => {
-            let days_since = (now - last).num_days();
-            if days_since <= FIRST_BACKOFF_DAYS {  // Within 2 days?
-                SECOND_BACKOFF_DAYS  // 4 days for recent retry
-            } else {
-                MAX_BACKOFF_DAYS     // 6 days for older retry
-            }
-        }
-    };
+The package's `status` becomes `failed` and `last_error` holds a one-line
+summary. The full log goes to `update_logs`.
 
-    // Schedule next check
-    let next_attempt = now + Duration::days(backoff_days);
+### Success reset
 
-    // Update database
-    sqlx::query(/* ... */)
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(next_attempt.to_rfc3339())
-        .bind(current_version)
-        .execute(&self.pool)
-        .await?;
+`record_successful_update()` sets `status = 'proposed'` and
+`proposed_version`, resets `failure_count` to 0, and schedules the next check
+in 2 days.
 
-    Ok(())
-}
-```
+### Watch mode
 
-### Success Reset
+The `watch` poller reads cheap feeds on every poll, so the check backoff does
+not apply to it. It respects the failure backoff only for the **version that
+failed**:
 
-When an update succeeds, backoff is always reset to 2 days:
+- the same release is not retried until `next_attempt`
+- a newer release is dispatched immediately
 
-```rust
-pub async fn record_successful_update(
-    &self,
-    attr_path: &str,
-    old_version: &str,
-    new_version: &str,
-) -> Result<()> {
-    let now = Utc::now();
-    let next_attempt = now + Duration::days(2);  // Always 2 days
-
-    // Update database and clear proposed_version
-    sqlx::query(/* ... */)
-        .bind(attr_path)
-        .bind(now.to_rfc3339())
-        .bind(next_attempt.to_rfc3339())
-        .bind(new_version)
-        .execute(&self.pool)
-        .await?;
-
-    Ok(())
-}
-```
+See [watch](../cli/watch.md).
 
 ## Practical Examples
 
@@ -227,42 +188,30 @@ Session 4: 2024-05-27 08:00 and beyond
 
 ### Example 3: Failed and Retried
 
-A package with mid-stream failures:
+A package whose update fails to build:
 
 ```
 Session 1: 2024-05-15
-  Check my-package (1.0.0)
-  → Latest upstream: 2.0.0
-  → Create PR
-  → PR build fails
-  → Mark as failed update
-  → Schedule next: 2024-05-17 (+2 days)
+  Check my-package (1.0.0) → latest upstream 2.0.0
+  → Build fails → status 'failed', failure_count 1, failed_version 2.0.0
+  → Next attempt: 2024-05-17 (+2 days)
 
-Session 2: 2024-05-17
-  Check my-package (1.0.0)
-  → Latest upstream: 2.0.1 (new patch released)
-  → Days since attempt: 2 days
-  → Backoff still at 2 days (no successful update yet)
-  → Schedule next: 2024-05-19 (+2 days)
+Session 2: 2024-05-16
+  my-package is in backoff → skipped (counted as "backoff" in the session)
 
-Session 3: 2024-05-19
-  Check my-package (1.0.0)
-  → Latest upstream: 2.0.2 (another new patch)
-  → Days since attempt: 2 days
-  → Schedule next: 2024-05-23 (+4 days)
+Session 3: 2024-05-17
+  Check my-package (1.0.0) → latest upstream 2.0.0
+  → Build fails again → failure_count 2
+  → Next attempt: 2024-05-21 (+4 days)
 
-Session 4: 2024-05-23
-  Check my-package (1.0.0)
-  → Latest upstream: 2.0.3
-  → Days since attempt: 4 days
-  → Schedule next: 2024-05-29 (+6 days)
-
-Session 5: 2024-05-29
-  Check my-package (1.0.0)
-  → Latest upstream: 2.0.3
-  → Days since attempt: 6 days
-  → Schedule next: 2024-06-04 (+6 days, backoff maxed)
+Session 4: 2024-05-21
+  Check my-package (1.0.0) → latest upstream 2.0.1
+  → Build succeeds → status 'proposed', failure_count reset to 0
+  → Next check: 2024-05-23 (+2 days)
 ```
+
+With `watch`, the 2.0.1 release would have been dispatched as soon as it
+appeared, without waiting for the 2.0.0 backoff to expire.
 
 ## Impact on Resource Usage
 
@@ -366,9 +315,11 @@ Query the database to see current backoff status:
 
 ```sql
 SELECT
+    repo_name,
     attr_path,
+    status,
     current_version,
-    last_attempted,
+    failure_count,
     next_attempt,
     CAST((julianday(next_attempt) - julianday('now')) AS INT) as days_until_check
 FROM updates
