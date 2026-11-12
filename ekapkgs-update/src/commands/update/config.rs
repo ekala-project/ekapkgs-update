@@ -5,6 +5,7 @@
 
 use tracing::{debug, info, warn};
 
+use super::instrumentation::PhaseTracker;
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::nix::{
     eval_nix_expr, get_variants_list, is_many_variants_package, normalize_entry_point,
@@ -38,6 +39,9 @@ pub struct UpdateConfig {
 
     /// PR enhancement configuration (CVE, Repology, directory diff, rebuilds)
     pub pr_enhancements: PrEnhancementsConfig,
+
+    /// Records workflow phases to the database (disabled for standalone updates)
+    pub tracker: PhaseTracker,
 }
 
 impl Default for UpdateConfig {
@@ -54,6 +58,7 @@ impl Default for UpdateConfig {
                 directory_diff: true,
                 ..PrEnhancementsConfig::default()
             },
+            tracker: PhaseTracker::disabled(),
         }
     }
 }
@@ -242,6 +247,7 @@ impl UpdateParams {
                     directory_diff: !skip_directory_diff,
                     ..PrEnhancementsConfig::default()
                 },
+                tracker: PhaseTracker::disabled(),
             },
             version_config: VersionConfig {
                 strategy: semver,

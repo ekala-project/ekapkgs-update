@@ -16,7 +16,7 @@ use crate::pypi::fetch_pypi_releases;
 use crate::sourcehut::{fetch_sourcehut_tags, parse_sourcehut_url};
 
 /// Release information from a VCS source
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Release {
     pub tag_name: String,
     pub is_prerelease: bool,
@@ -607,7 +607,7 @@ impl UpstreamSource {
 ///
 /// # Errors
 /// Returns an error if no compatible releases are found
-fn find_best_release(
+pub fn find_best_release(
     releases: Vec<Release>,
     current_version: &str,
     strategy: SemverStrategy,
@@ -884,13 +884,13 @@ pub fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
         // Extract leading numeric portion for comparison
         let a_num: Option<u64> = a_part
             .chars()
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .collect::<String>()
             .parse()
             .ok();
         let b_num: Option<u64> = b_part
             .chars()
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .collect::<String>()
             .parse()
             .ok();

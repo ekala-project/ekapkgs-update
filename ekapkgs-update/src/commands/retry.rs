@@ -7,12 +7,13 @@ use tokio::fs;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::commands::run::preservation::list_preserved_failures;
+use crate::commands::run::preservation::{find_preserved, list_preserved_failures};
 
 /// Retry a failed update from preserved worktree
 pub async fn retry(
     database_path: String,
     attr_path: String,
+    repo: Option<String>,
     from_phase: Option<String>,
     apply_patch: Option<PathBuf>,
     _version: Option<String>,
@@ -23,10 +24,7 @@ pub async fn retry(
 
     // Find the most recent preserved failure for this package
     let artifacts_list = list_preserved_failures().await?;
-    let artifact = artifacts_list
-        .iter()
-        .find(|a| a.attr_path == attr_path)
-        .with_context(|| format!("No preserved artifacts found for {}", attr_path))?;
+    let artifact = find_preserved(&artifacts_list, &attr_path, repo.as_deref())?;
 
     info!(
         "Found preserved failure from session {} (phase: {})",
@@ -45,7 +43,7 @@ pub async fn retry(
     // Create a temporary working directory for the retry
     let retry_dir = std::env::temp_dir().join(format!(
         "ekapkgs-retry-{}-{}",
-        attr_path.replace('.', "_").replace('/', "_"),
+        attr_path.replace(['.', '/'], "_"),
         uuid::Uuid::new_v4()
     ));
     fs::create_dir_all(&retry_dir).await?;

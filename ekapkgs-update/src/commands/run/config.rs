@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::cli::CommitStrategy;
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
-use crate::database::Database;
+use crate::database::{Database, SessionCounter, SessionMode};
 use crate::git::PrConfig;
 
 /// Configuration for automated run mode
@@ -161,7 +161,7 @@ impl RunConfig {
         info!("Database initialized at: {}", expanded_db_path);
 
         // Create session for tracking this run
-        let session_id = db.create_session(config_json).await?;
+        let session_id = db.create_session(SessionMode::Run, config_json).await?;
         info!("Created session: {}", session_id);
 
         // Calculate concurrency: use provided value or default to CPU cores / 4 (minimum 1)
@@ -210,6 +210,7 @@ impl RunConfig {
         // Spawn release checker service
         let skip_repology = pr_enhancements.skip_repology;
         let checker_concurrency = concurrency;
+        let checker_session = session_id.clone();
         let checker_handle = tokio::spawn(async move {
             // Always limit checker concurrency to avoid OOM from unbounded
             // parallel nix-instantiate calls. Each checker task spawns up to
@@ -225,6 +226,7 @@ impl RunConfig {
                 skip_repology,
                 Some(max_checkers),
                 Some(max_eval_workers),
+                Some(checker_session),
             )
             .await
         });
@@ -254,10 +256,10 @@ impl RunConfig {
 
         // Unwrap task results
         let (checked_count, skipped_count, error_count) = checker_result?;
-        let (updated_count, failed_count) = updater_result?;
-
-        // Calculate total attempted updates
-        let packages_attempted = updated_count + failed_count;
+        let stats = updater_result?;
+        let updated_count = stats.updated + stats.dry_run;
+        let failed_count = stats.failed;
+        let packages_attempted = stats.attempted();
 
         // Update session status based on results
         let session_status = if failed_count > 0 {
@@ -266,16 +268,9 @@ impl RunConfig {
             crate::database::SessionStatus::Completed
         };
 
-        // Finalize session with complete statistics
+        // Finalize session (outcome counters were maintained live)
         if let Err(e) = db
-            .finalize_session(
-                &session_id,
-                session_status,
-                packages_attempted,
-                updated_count,
-                failed_count,
-                skipped_count,
-            )
+            .finalize_session(&session_id, session_status, checked_count, skipped_count)
             .await
         {
             tracing::warn!("Failed to finalize session: {}", e);
@@ -302,6 +297,9 @@ impl RunConfig {
         info!("    Attempted:             {:>6}", packages_attempted);
         info!("    Succeeded:             {:>6}", updated_count);
         info!("    Failed:                {:>6}", failed_count);
+        if stats.skipped > 0 {
+            info!("    Skipped (updater):     {:>6}", stats.skipped);
+        }
         info!("");
 
         if packages_attempted > 0 {
@@ -386,13 +384,86 @@ pub struct UpdaterServiceConfig {
     pub claude_fix_timeout: u64,
 }
 
+/// Outcome counts of an updater service run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpdaterStats {
+    /// Updates built and committed / proposed.
+    pub updated: usize,
+    /// Dry-run reports (not performed).
+    pub dry_run: usize,
+    /// Attempts that failed (including unexpected errors and panics).
+    pub failed: usize,
+    /// Requests that were not attempted (setup failures, rebuild threshold).
+    pub skipped: usize,
+}
+
+impl UpdaterStats {
+    /// Total requests processed.
+    pub fn attempted(&self) -> usize {
+        self.updated + self.dry_run + self.failed + self.skipped
+    }
+
+    /// Count a finished request and return the session counter to bump.
+    fn count(&mut self, result: &anyhow::Result<super::types::UpdateResult>) -> SessionCounter {
+        use super::types::UpdateResult;
+        match result {
+            Ok(UpdateResult::Updated { .. }) => {
+                self.updated += 1;
+                SessionCounter::Succeeded
+            },
+            Ok(UpdateResult::DryRun { .. }) => {
+                self.dry_run += 1;
+                SessionCounter::Skipped
+            },
+            Ok(UpdateResult::Skipped(_)) => {
+                self.skipped += 1;
+                SessionCounter::Skipped
+            },
+            Ok(UpdateResult::Failed(_)) | Err(_) => {
+                self.failed += 1;
+                SessionCounter::Failed
+            },
+        }
+    }
+}
+
+type TaskOutput = (anyhow::Result<super::types::UpdateResult>, String);
+
+/// Account for a finished update task: local stats, live session counter
+/// and logging.
+async fn finish_task(
+    db: &Database,
+    session_id: &str,
+    stats: &mut UpdaterStats,
+    task_result: Result<TaskOutput, tokio::task::JoinError>,
+) {
+    let counter = match task_result {
+        Ok((result, attr_path)) => {
+            let counter = stats.count(&result);
+            super::updater::handle_result(result, &attr_path);
+            counter
+        },
+        Err(e) => {
+            tracing::warn!("Task panicked: {}", e);
+            stats.failed += 1;
+            SessionCounter::Failed
+        },
+    };
+    if let Err(e) = db.increment_session_counter(session_id, counter).await {
+        tracing::warn!("Failed to update session counters: {}", e);
+    }
+}
+
 impl UpdaterServiceConfig {
-    /// Run the updater service that processes package update requests
+    /// Run the updater service that processes package update requests.
+    ///
+    /// Session counters (`packages_attempted` and the outcome counters) are
+    /// updated live as requests start and finish.
     pub async fn run_service(
         self,
         mut rx: mpsc::UnboundedReceiver<super::types::UpdateRequest>,
         db: Database,
-    ) -> (usize, usize) {
+    ) -> UpdaterStats {
         use tokio::task::JoinSet;
         use tracing::warn;
 
@@ -427,132 +498,142 @@ impl UpdaterServiceConfig {
         // modify different files, but git add/commit must not race)
         let git_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let mut join_set: JoinSet<(anyhow::Result<super::types::UpdateResult>, String)> =
-            JoinSet::new();
-        let mut updated_count = 0;
-        let mut failed_count = 0;
-
-        // Helper function to process a completed task result
-        let mut process_result = |result: anyhow::Result<super::types::UpdateResult>,
-                                  attr_path: &str| {
-            match result {
-                Ok(super::types::UpdateResult::Updated { .. })
-                | Ok(super::types::UpdateResult::DryRun { .. }) => updated_count += 1,
-                Err(_) => failed_count += 1,
-                _ => {},
-            }
-            super::updater::handle_result(result, attr_path);
-        };
+        let mut join_set: JoinSet<TaskOutput> = JoinSet::new();
+        let mut stats = UpdaterStats::default();
 
         loop {
             tokio::select! {
                 // Receive update requests from release checker
                 update_req = rx.recv() => {
-                    match update_req {
-                        Some(req) => {
-                            // Wait if we've reached the concurrency limit
-                            while join_set.len() >= concurrency {
-                                if let Some(task_result) = join_set.join_next().await {
-                                    match task_result {
-                                        Ok((result, task_attr_path)) => {
-                                            process_result(result, &task_attr_path);
-                                        },
-                                        Err(e) => {
-                                            warn!("Task panicked: {}", e);
-                                        },
-                                    }
-                                }
-                            }
+                    // `None`: channel closed - no more updates coming
+                    let Some(req) = update_req else { break };
 
-                            // Clone data needed for the async task
-                            let db_clone = db.clone();
-                            let session_id_clone = session_id.clone();
-                            let pr_enhancements_clone = pr_enhancements.clone();
-                            let attr_path_clone = req.attr_path.clone();
-                            let claude_fix_clone = claude_fix_config.clone();
-
-                            // Use per-request overrides when present (multi-repo routing),
-                            // falling back to the global config.
-                            let effective_entry_point: Arc<str> =
-                                match req.eval_entry_point.as_deref() {
-                                    Some(ep) => Arc::from(ep),
-                                    None => Arc::clone(&eval_entry_point),
-                                };
-                            let effective_pr_config =
-                                req.pr_config.clone().or_else(|| pr_config.clone());
-                            let effective_fork: Arc<str> = match req.fork.as_deref() {
-                                Some(f) => Arc::from(f),
-                                None => Arc::clone(&fork),
-                            };
-
-                            // Spawn the update task
-                            let is_branch_mode = commit_strategy == CommitStrategy::Branch;
-                            let git_mutex_clone = Arc::clone(&git_mutex);
-                            join_set.spawn(async move {
-                                let result = if is_branch_mode {
-                                    super::updater::perform_direct_update(
-                                        &db_clone,
-                                        &session_id_clone,
-                                        &effective_entry_point,
-                                        &req,
-                                        run_passthru_tests,
-                                        git_mutex_clone,
-                                        claude_fix_clone.as_deref(),
-                                    )
-                                    .await
-                                } else {
-                                    super::updater::perform_update(
-                                        &db_clone,
-                                        &session_id_clone,
-                                        &effective_entry_point,
-                                        &req,
-                                        effective_pr_config.as_ref(),
-                                        &effective_fork,
-                                        run_passthru_tests,
-                                        dry_run,
-                                        &pr_enhancements_clone,
-                                        interactive,
-                                        preserve_failures,
-                                        claude_fix_clone.as_deref(),
-                                    )
-                                    .await
-                                };
-                                (result, attr_path_clone)
-                            });
-                        },
-                        None => {
-                            // Channel closed - no more updates coming
-                            break;
+                    // Wait if we've reached the concurrency limit
+                    while join_set.len() >= concurrency {
+                        if let Some(task_result) = join_set.join_next().await {
+                            finish_task(&db, &session_id, &mut stats, task_result).await;
                         }
                     }
+
+                    if let Err(e) = db
+                        .increment_session_counter(&session_id, SessionCounter::Attempted)
+                        .await
+                    {
+                        warn!("Failed to update session counters: {}", e);
+                    }
+
+                    // Clone data needed for the async task
+                    let db_clone = db.clone();
+                    let session_id_clone = session_id.clone();
+                    let pr_enhancements_clone = pr_enhancements.clone();
+                    let attr_path_clone = req.attr_path.clone();
+                    let claude_fix_clone = claude_fix_config.clone();
+
+                    // Use per-request overrides when present (multi-repo routing),
+                    // falling back to the global config.
+                    let effective_entry_point: Arc<str> = match req.eval_entry_point.as_deref() {
+                        Some(ep) => Arc::from(ep),
+                        None => Arc::clone(&eval_entry_point),
+                    };
+                    let effective_pr_config = req.pr_config.clone().or_else(|| pr_config.clone());
+                    let effective_fork: Arc<str> = match req.fork.as_deref() {
+                        Some(f) => Arc::from(f),
+                        None => Arc::clone(&fork),
+                    };
+
+                    // Spawn the update task
+                    let is_branch_mode = commit_strategy == CommitStrategy::Branch;
+                    let git_mutex_clone = Arc::clone(&git_mutex);
+                    join_set.spawn(async move {
+                        let result = if is_branch_mode {
+                            super::updater::perform_direct_update(
+                                &db_clone,
+                                &session_id_clone,
+                                &effective_entry_point,
+                                &req,
+                                run_passthru_tests,
+                                git_mutex_clone,
+                                claude_fix_clone.as_deref(),
+                            )
+                            .await
+                        } else {
+                            super::updater::perform_update(
+                                &db_clone,
+                                &session_id_clone,
+                                &effective_entry_point,
+                                &req,
+                                effective_pr_config.as_ref(),
+                                &effective_fork,
+                                run_passthru_tests,
+                                dry_run,
+                                &pr_enhancements_clone,
+                                interactive,
+                                preserve_failures,
+                                claude_fix_clone.as_deref(),
+                            )
+                            .await
+                        };
+                        (result, attr_path_clone)
+                    });
                 },
                 // Also drain completed tasks while waiting for new requests
                 Some(task_result) = join_set.join_next(), if !join_set.is_empty() => {
-                    match task_result {
-                        Ok((result, attr_path)) => {
-                            process_result(result, &attr_path);
-                        },
-                        Err(e) => {
-                            warn!("Task panicked: {}", e);
-                        },
-                    }
+                    finish_task(&db, &session_id, &mut stats, task_result).await;
                 },
             }
         }
 
         // Wait for all remaining tasks to complete
         while let Some(task_result) = join_set.join_next().await {
-            match task_result {
-                Ok((result, attr_path)) => {
-                    process_result(result, &attr_path);
-                },
-                Err(e) => {
-                    warn!("Task panicked: {}", e);
-                },
-            }
+            finish_task(&db, &session_id, &mut stats, task_result).await;
         }
 
         info!("Updater service complete");
-        (updated_count, failed_count)
+        stats
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::UpdateResult;
+    use super::*;
+
+    #[test]
+    fn updater_stats_count_outcomes() {
+        let mut stats = UpdaterStats::default();
+        let results: Vec<anyhow::Result<UpdateResult>> = vec![
+            Ok(UpdateResult::Updated {
+                old_version: "1".into(),
+                new_version: "2".into(),
+            }),
+            Ok(UpdateResult::DryRun {
+                current_version: "1".into(),
+                new_version: "2".into(),
+            }),
+            Ok(UpdateResult::Skipped("x".into())),
+            Ok(UpdateResult::Failed("x".into())),
+            Err(anyhow::anyhow!("boom")),
+        ];
+        let counters: Vec<SessionCounter> = results.iter().map(|r| stats.count(r)).collect();
+        assert_eq!(
+            counters,
+            vec![
+                SessionCounter::Succeeded,
+                SessionCounter::Skipped,
+                SessionCounter::Skipped,
+                SessionCounter::Failed,
+                SessionCounter::Failed,
+            ]
+        );
+        assert_eq!(
+            stats,
+            UpdaterStats {
+                updated: 1,
+                dry_run: 1,
+                failed: 2,
+                skipped: 1,
+            }
+        );
+        assert_eq!(stats.attempted(), 5);
     }
 }

@@ -1,104 +1,51 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 
-{% block title %}Dashboard - ekapkgs-update Portal{% endblock %}
-{% block nav_dashboard %}active{% endblock %}
+{% block title %}Dashboard{% endblock %}
+{% block nav_dashboard %}aria-current="page"{% endblock %}
 
 {% block content %}
-<div class="dashboard">
-    <h2>Dashboard</h2>
-
-    <div class="stats-grid" hx-get="/api/stats" hx-trigger="every 5s" hx-swap="innerHTML">
-        <div class="stat-card">
-            <h3>Total Packages</h3>
-            <p class="stat-value">{{ stats.total_packages }}</p>
-        </div>
-        <div class="stat-card">
-            <h3>Success Rate</h3>
-            <p class="stat-value">{{ stats.success_rate }}%</p>
-        </div>
-        <div class="stat-card">
-            <h3>Active Updates</h3>
-            <p class="stat-value">{{ stats.active_updates }}</p>
-        </div>
-        <div class="stat-card">
-            <h3>Total Sessions</h3>
-            <p class="stat-value">{{ stats.total_sessions }}</p>
-        </div>
-    </div>
-
-    {% match active_session %}
-    {% when Some with (session) %}
-    <section class="active-session">
-        <h3>Currently Running Session</h3>
-        <div class="session-card">
-            <p><strong>Session ID:</strong> {{ session.id }}</p>
-            <p><strong>Started:</strong> {{ session.started_at }}</p>
-            <p><strong>Progress:</strong> {{ session.packages_succeeded + session.packages_failed + session.packages_skipped }} / {{ session.packages_attempted }}</p>
-            <div class="progress-bar">
-                <div class="progress-fill" style="width: {% if session.packages_attempted > 0 %}{{ (session.packages_succeeded + session.packages_failed + session.packages_skipped) * 100 / session.packages_attempted }}{% else %}0{% endif %}%"></div>
-            </div>
-            <p>
-                <span class="badge badge-success">{{ session.packages_succeeded }} succeeded</span>
-                <span class="badge badge-error">{{ session.packages_failed }} failed</span>
-                <span class="badge badge-warning">{{ session.packages_skipped }} skipped</span>
-            </p>
-            <a href="/sessions/{{ session.id }}" class="btn">View Details</a>
-        </div>
-    </section>
-    {% when None %}
-    {% endmatch %}
-
-    <section class="recent-sessions">
-        <h3>Recent Sessions</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Session ID</th>
-                    <th>Started</th>
-                    <th>Duration</th>
-                    <th>Status</th>
-                    <th>Success/Failed</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for session in recent_sessions %}
-                <tr>
-                    <td><code>{{ session.id }}</code></td>
-                    <td>{{ session.started_at }}</td>
-                    <td>
-                        {% match session.completed_at %}
-                            {% when Some with (completed) %}
-                                {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }}m
-                            {% when None %}
-                                Running...
-                        {% endmatch %}
-                    </td>
-                    <td><span class="badge badge-{{ session.status }}">{{ session.status }}</span></td>
-                    <td>{{ session.packages_succeeded }} / {{ session.packages_failed }}</td>
-                    <td><a href="/sessions/{{ session.id }}">View</a></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </section>
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <p class="muted">Package update status across every tracked repository.</p>
 </div>
-{% endblock %}
 
-{% block scripts %}
-<script>
-    // Connect to WebSocket for real-time updates
-    const ws = new WebSocket(`ws://${window.location.host}/ws/live`);
+<section aria-label="Package status" class="live-region"
+         hx-get="/fragments/stats" hx-trigger="live-update from:body, every 60s" hx-swap="innerHTML">
+  {% include "fragments/stats.html" %}
+</section>
 
-    ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        console.log('WebSocket update:', data);
-        // Trigger HTMX refresh on updates
-        htmx.trigger(document.body, 'wsUpdate');
-    };
+<div class="grid-2">
+  <div class="stack">
+    <section class="panel" aria-labelledby="h-active">
+      <header class="panel-head">
+        <h2 id="h-active">Running sessions</h2>
+        <a class="small" href="/sessions?status=running">All running</a>
+      </header>
+      <div class="live-region" hx-get="/fragments/active" hx-trigger="live-update from:body, every 60s" hx-swap="innerHTML">
+        {% include "fragments/active.html" %}
+      </div>
+    </section>
 
-    ws.onerror = function(error) {
-        console.error('WebSocket error:', error);
-    };
-</script>
+    <section class="panel" aria-labelledby="h-activity">
+      <header class="panel-head">
+        <h2 id="h-activity">Recent activity</h2>
+        <a class="small" href="/sessions">All sessions</a>
+      </header>
+      <div class="live-region" hx-get="/fragments/activity" hx-trigger="live-update from:body, every 60s" hx-swap="innerHTML">
+        {% include "fragments/activity.html" %}
+      </div>
+    </section>
+  </div>
+
+  <section class="panel" aria-labelledby="h-watch">
+    <header class="panel-head">
+      <h2 id="h-watch">Watch</h2>
+      <a class="small" href="/watch">Details</a>
+    </header>
+    <div class="live-region" hx-get="/fragments/watch" hx-trigger="live-update from:body, every 60s" hx-swap="innerHTML">
+      {% include "fragments/watch_panel.html" %}
+    </div>
+  </section>
+</div>
 {% endblock %}

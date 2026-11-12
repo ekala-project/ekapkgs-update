@@ -1,159 +1,52 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 
-{% block title %}Session {{ session.id }} - ekapkgs-update Portal{% endblock %}
-{% block nav_sessions %}active{% endblock %}
+{% block title %}Session {{ s.s.short_id }}{% endblock %}
+{% block nav_sessions %}aria-current="page"{% endblock %}
 
 {% block content %}
-<div class="session-detail">
-    <div class="breadcrumb">
-        <a href="/sessions">Sessions</a> / {{ session.id }}
-    </div>
-
-    <h2>Session Details</h2>
-
-    <div class="session-info">
-        <div class="info-grid">
-            <div class="info-item">
-                <label>Session ID:</label>
-                <code>{{ session.id }}</code>
-            </div>
-            <div class="info-item">
-                <label>Status:</label>
-                <span class="badge badge-{{ session.status }}">{{ session.status }}</span>
-            </div>
-            <div class="info-item">
-                <label>Started:</label>
-                <span>{{ session.started_at }}</span>
-            </div>
-            <div class="info-item">
-                <label>Completed:</label>
-                <span>
-                    {% match session.completed_at %}
-                        {% when Some with (completed) %}
-                            {{ completed }}
-                        {% when None %}
-                            Still running...
-                    {% endmatch %}
-                </span>
-            </div>
-            <div class="info-item">
-                <label>Duration:</label>
-                <span>
-                    {% match session.completed_at %}
-                        {% when Some with (completed) %}
-                            {{ (completed.timestamp() - session.started_at.timestamp()) / 60 }} minutes
-                        {% when None %}
-                            In progress...
-                    {% endmatch %}
-                </span>
-            </div>
-        </div>
-    </div>
-
-    <div class="stats-grid">
-        <div class="stat-card">
-            <h3>Attempted</h3>
-            <p class="stat-value">{{ session.packages_attempted }}</p>
-        </div>
-        <div class="stat-card success">
-            <h3>Succeeded</h3>
-            <p class="stat-value">{{ session.packages_succeeded }}</p>
-        </div>
-        <div class="stat-card error">
-            <h3>Failed</h3>
-            <p class="stat-value">{{ session.packages_failed }}</p>
-        </div>
-        <div class="stat-card warning">
-            <h3>Skipped</h3>
-            <p class="stat-value">{{ session.packages_skipped }}</p>
-        </div>
-    </div>
-
-    {% if !success_phases.is_empty() %}
-    <section class="phase-section">
-        <h3>Successful Updates ({{ success_phases.len() }})</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Package</th>
-                    <th>Phase</th>
-                    <th>Started</th>
-                    <th>Duration</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for phase in success_phases %}
-                <tr>
-                    <td><code>{{ phase.attr_path }}</code></td>
-                    <td>{{ phase.phase }}</td>
-                    <td>{{ phase.started_at }}</td>
-                    <td>
-                        {% match phase.duration_ms %}
-                            {% when Some with (duration) %}
-                                {{ duration / 1000 }}s
-                            {% when None %}
-                                —
-                        {% endmatch %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </section>
-    {% endif %}
-
-    {% if !failed_phases.is_empty() %}
-    <section class="phase-section">
-        <h3>Failed Updates ({{ failed_phases.len() }})</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Package</th>
-                    <th>Phase</th>
-                    <th>Error Type</th>
-                    <th>Started</th>
-                    <th>Duration</th>
-                    <th>Details</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for phase in failed_phases %}
-                <tr class="error-row">
-                    <td><code>{{ phase.attr_path }}</code></td>
-                    <td>{{ phase.phase }}</td>
-                    <td>
-                        {% match phase.error_type %}
-                            {% when Some with (error) %}
-                                <span class="error-badge">{{ error }}</span>
-                            {% when None %}
-                                —
-                        {% endmatch %}
-                    </td>
-                    <td>{{ phase.started_at }}</td>
-                    <td>
-                        {% match phase.duration_ms %}
-                            {% when Some with (duration) %}
-                                {{ duration / 1000 }}s
-                            {% when None %}
-                                —
-                        {% endmatch %}
-                    </td>
-                    <td>
-                        {% match phase.error_details %}
-                            {% when Some with (details) %}
-                                <details>
-                                    <summary>View Error</summary>
-                                    <pre><code>{{ details }}</code></pre>
-                                </details>
-                            {% when None %}
-                                —
-                        {% endmatch %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </section>
-    {% endif %}
+<nav class="breadcrumb small" aria-label="Breadcrumb"><a href="/sessions">Sessions</a> / <span class="mono">{{ s.s.short_id }}</span></nav>
+<div class="page-head">
+  <h1>Session <span class="mono">{{ s.s.short_id }}</span></h1>
+  <p class="muted small mono">{{ s.s.id }}</p>
 </div>
+
+{% include "fragments/session_live.html" %}
+
+{%- if let Some(c) = s.cycle %}
+<section class="panel" aria-labelledby="h-cycle">
+  <header class="panel-head">
+    <h2 id="h-cycle">Watch poll cycle #{{ c.id }}</h2>
+    <a class="small" href="/watch">Watch</a>
+  </header>
+  <dl class="facts facts-inline">
+    <div><dt>Status</dt><dd>{% call m::badge(c.badge) %}</dd></div>
+    <div><dt>Started</dt><dd>{% call m::ts(c.started) %}</dd></div>
+    <div><dt>Duration</dt><dd>{{ c.duration }}</dd></div>
+    <div><dt>Sources polled</dt><dd>{{ c.sources_polled }}{% if c.sources_failed > 0 %} <span class="tone-text-serious">({{ c.sources_failed }} failed)</span>{% endif %}</dd></div>
+    <div><dt>New releases</dt><dd>{{ c.new_releases }}</dd></div>
+    <div><dt>Dispatched</dt><dd>{{ c.dispatched }}</dd></div>
+  </dl>
+</section>
+{%- endif %}
+
+{%- if !s.logs.is_empty() %}
+<section class="panel" aria-labelledby="h-logs">
+  <header class="panel-head"><h2 id="h-logs">Failure logs</h2></header>
+  {%- for l in s.logs %}
+  {% call m::log_entry(l, true) %}
+  {%- endfor %}
+</section>
+{%- endif %}
+
+{%- if s.has_config %}
+<section class="panel">
+  <details>
+    <summary><h2 class="inline-h">Configuration</h2> <span class="small muted">as recorded when the session started</span></summary>
+    <pre class="code">{{ s.config }}</pre>
+  </details>
+</section>
+{%- endif %}
+
+<p class="small muted">Raw phases: <a href="{{ s.api_href }}">{{ s.api_href }}</a></p>
 {% endblock %}

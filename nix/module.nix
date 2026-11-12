@@ -567,6 +567,13 @@ in
           services.ekapkgs-update.watch.repos: repo names must be unique.
         '';
       }
+      {
+        assertion = lib.all (r: lib.toLower r.name != "default") cfg.watch.repos;
+        message = ''
+          services.ekapkgs-update.watch.repos: "default" is reserved (the
+          dashboard uses it for the single-repo / `run` scope).
+        '';
+      }
     ];
 
     nixpkgs.overlays = [

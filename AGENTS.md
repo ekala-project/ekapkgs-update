@@ -42,7 +42,12 @@ ekapkgs-update/                     # Main CLI crate
     init.rs                         # Process bootstrap (increase_fd_limit)
     paths.rs                        # Centralized XDG cache/data paths
     config.rs                       # TOML config file (LLM, autofix, nix, watch settings)
-    database/                       # SQLite via sqlx: updates, logs, sessions, caches
+    database/                       # SQLite via sqlx (shared with the web dashboard)
+      mod.rs                        #   Database pool, rebuild stats, upstream_index
+      types.rs                      #   UpdateStatus, UpdateRecord, PackageInfo, FailedUpdate, UpdateLog
+      updates.rs                    #   Repo-scoped `updates` state machine + backoff, update_logs
+      sessions.rs                   #   update_sessions (run/watch) + update_phases
+      watch.rs                      #   watched_repos, watch_cycles, upstream_sources
     commands/
       run/                          # Batch mode: checker + updater services
         config.rs                   #   RunConfig, UpdaterServiceConfig
@@ -56,7 +61,7 @@ ekapkgs-update/                     # Main CLI crate
         config.rs                   #   UpdateConfig, VersionConfig
         errors.rs                   #   UpdateError (structured, LLM-friendly)
         types.rs                    #   UpdatePhase enum
-        instrumentation.rs          #   Phase timing/tracking
+        instrumentation.rs          #   PhaseTracker: per-phase update_phases rows
         mod.rs                      #   update_from_file_path (9-step workflow)
         file_update.rs              #   Version/hash rewriting in .nix files
         build.rs                    #   nix-build invocation, extra args (OnceLock)
@@ -85,9 +90,10 @@ ekapkgs-update/                     # Main CLI crate
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
       watch/                          # RSS/event-driven passive update mode (multi-repo)
         mod.rs                      #   WatchConfig, ResolvedRepo, repo provisioning (clone/fork)
+        sync.rs                     #   Fast-forward-only checkout sync before each index
         index.rs                    #   Per-repo upstream index builder (nix-eval-jobs → upstream_index)
         feeds.rs                    #   Feed polling (RSS/Atom/API), UpstreamSource reconstruction
-        listener.rs                 #   Multi-repo event loop: poll feeds, route UpdateRequests per repo
+        listener.rs                 #   Event loop: poll cycles, observe-only bootstrap, dispatch decisions
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
@@ -106,19 +112,25 @@ ekapkgs-update/                     # Main CLI crate
     repology/                       # Repology cross-distro version check (72h cache)
     cachix/                         # Binary cache pushing
     directory_diff/                 # Compare build outputs for PR body
-    variant_strategy.rs             # mkManyVariants version strategy inference
+    variant_strategy.rs             # Semver strategy inference (effective_strategy, mkManyVariants)
   tests/
     migrate_tests.rs                # Integration tests with fixture files
+    watch_tests.rs                  # Watch index/feed/dispatch integration tests
 
-ekapkgs-update-web/                 # Web dashboard crate
+ekapkgs-update-web/                 # Web dashboard crate (read-only)
   Cargo.toml
   src/
-    main.rs                         # Axum server setup
-    routes/                         # dashboard, sessions, packages, analytics, ws
+    main.rs                         # CLI options, Database::new, router + CORS/trace layers
     state.rs                        # AppState (wraps Database)
-    templates.rs                    # Askama template structs
-  templates/                        # Askama HTML templates
-  static/                           # CSS + HTMX
+    error.rs                        # HTML or JSON 404/500 responses, fallback
+    assets.rs                       # Static files embedded via include_str!, ETag/Cache-Control
+    format.rs                       # Relative times, durations, badges/tones, pager, URLs
+    queries/                        # Raw sqlx SELECTs with local row structs; live.rs = WS fingerprint
+    views/                          # Row → display view models; charts.rs = CSS chart geometry
+    templates.rs                    # Askama page + fragment structs
+    routes/                         # dashboard, packages, sessions, failures, watch, analytics, api, ws; tests.rs
+  templates/                        # Pages, macros.html, error.html, fragments/ (HTMX partials)
+  static/                           # css/styles.css, js/htmx.min.js, js/live.js (compiled into the binary)
 ```
 
 ## Architecture: The `run` Command Pipeline
@@ -139,9 +151,12 @@ nix-eval-jobs (streaming JSON)
 2. For each package: checks database backoff, extracts `PackageMetadata`
 3. Reads passthru attributes (`skip`, `semver-strategy`, `include-prereleases`, `version-regex`)
 4. Determines `UpstreamSource` from `src.url` or pname
-5. Fetches upstream releases, filters by `SemverStrategy`
-6. Deduplicates by (pname, version) to avoid updating aliased packages twice
-7. Sends `UpdateRequest` on channel
+5. Resolves the strategy via `variant_strategy::effective_strategy` (explicit → attr-path suffix, pinned = skip → mkManyVariants = Minor → Latest) and registers the package (`upsert_package_info`)
+6. Fetches upstream releases, filters by `SemverStrategy`; records the outcome (`record_no_update` / `record_update_available`)
+7. Deduplicates by (pname, version) to avoid updating aliased packages twice
+8. Sends `UpdateRequest` on channel
+
+Progress (`packages_evaluated`, `packages_backoff`) is written to the session every 250 packages.
 
 **OOM guard:** Checker concurrency is capped at `max(4, concurrency * 2)` via a `Semaphore`. Each task can spawn nix-instantiate processes, so unbounded concurrency exhausts memory.
 
@@ -149,8 +164,10 @@ nix-eval-jobs (streaming JSON)
 
 1. Receives `UpdateRequest` from channel
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
-3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package, supports concurrency and PRs
+3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>-<attr>` in multi-repo watch), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update` — serializes git operations via `Arc<Mutex<()>>`, no PR support
+5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup failed or rebuild limit) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
+6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
 
 ### Update Workflow (`commands/update/mod.rs`)
 
@@ -163,7 +180,10 @@ The 9-phase workflow for each package:
 5. **DependencyHashUpdate** — Update dep hashes (cargoHash, vendorHash, npmDepsHash, etc.)
 6. **Build** — Build with patch recovery (detect and remove obsolete patches)
 7. **Testing** — Run passthru.tests (if configured)
-8. **PrCreation** — Commit + push + create PR via GitHub REST API
+8. **AgentFix** — *(run/watch with `--claude-fix`, on failure)* Claude Code fix attempt
+9. **PrCreation** — Commit + push + create PR via GitHub REST API
+
+Every phase is wrapped with `PhaseTracker::run` / `start` (`commands/update/instrumentation.rs`). The standalone `update` command uses `PhaseTracker::disabled()`. A phase failure is classified into an `UpdateError` (`UpdateError::classify`), and `tracker.last_failure()` gives the caller the structured cause.
 
 ## Architecture: The `watch` Command (Passive Mode)
 
@@ -194,13 +214,22 @@ Config: [[repos]] (name, upstream, entrypoint, path)
                                          eval_entry_point, pr_config, fork
 ```
 
-**Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist, fetches if present. Creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig`.
+**Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist and creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig` (`managed = true`; legacy single-repo mode is `managed = false`, name `''`). Then it closes out state left by a killed process (`recover_interrupted_watch_state`), registers repos in `watched_repos` and forgets repos removed from the config (`retain_watched_repos`).
 
-**Index builder** (`commands/watch/index.rs`): Scans packages via `nix-eval-jobs` per-repo, extracts `PackageMetadata`, determines `UpstreamSource`, stores mapping in the `upstream_index` table keyed by `(repo_name, attr_path, upstream_type, upstream_key)`.
+**Sync** (`commands/watch/sync.rs`): Before every index build, managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten. Worktrees are created from `HEAD`, so this is what keeps updates current.
 
-**Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub and PyPI (cheaper than API), falls back to existing `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing.
+**Index builder** (`commands/watch/index.rs`): Scans packages via `nix-eval-jobs` per-repo (tasks in a `JoinSet`, Semaphore(8)). It extracts `PackageMetadata`, determines `UpstreamSource` and the effective strategy, and stores them in `upstream_index` with `version_regex` / `include_prereleases`. It also registers the package in `updates`. Stale rows are pruned unless the evaluation looks incomplete.
 
-**Event loop** (`commands/watch/listener.rs`): Polls all indexed sources at configurable intervals, compares against known versions, dispatches `UpdateRequest`s with per-repo routing info. Deduplicates by (repo_name, upstream_key, version).
+**Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub and PyPI (cheaper than API), falls back to existing `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing. GitHub tags come from the `/releases/tag/<tag>` link, not the entry title (the title is the release name).
+
+**Event loop** (`commands/watch/listener.rs`):
+
+- The first poll runs immediately after the startup index. After that, polls run every `poll_interval`, and sync + re-index runs every `index_refresh`.
+- Each poll is a `watch_cycles` row. Each source's health is recorded in `upstream_sources`, and each package's observation in `updates` (`record_observation`).
+- **Observe-only bootstrap:** the first observation of a package records `baseline_version` and dispatches nothing. Only releases newer than the baseline are dispatched; the backlog is left to `run`.
+- `dispatch_decision` (pure, unit-tested) evaluates, in order: Baseline, UpToDate, Backlog, AlreadyProposed, Backoff (same failed version only), Dispatch.
+- `resolve_siblings` collapses aliases (same repo, current and target version) to the shortest attr path.
+- **Lazy sessions:** an update session (`SessionMode::Watch`) is created only when a cycle dispatches at least one update.
 
 **NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database, `Restart=always`. `watch.repos` option configures multi-repo mode.
 
@@ -251,9 +280,27 @@ Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system string
 
 When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can set `passthru.ekapkgs-update.github-repo = "owner/repo"` to explicitly specify the GitHub repository for release discovery. This takes priority over URL-based detection.
 
-### Database Backoff (`database/mod.rs`)
+### Database State and Backoff (`database/updates.rs`)
 
-Failed updates use stepped backoff: **2 days → 4 days → 6 days** (max). Successful updates reset to 2 days.
+`updates` is keyed by `(repo_name, attr_path)`. `repo_name = ''` is used by `run` and legacy watch; multi-repo watch uses the config name (`default` is reserved — the dashboard labels `''` with it; rejected by `ConfigFile::validate` and a NixOS module assertion). All `updates` methods take `repo_name` first. `autofix_queue` / `autofix_attempts` are repo-scoped the same way (via `FailureArtifacts.repo_name`; preserved failures live under `failed/<session>/[<repo>-]<attr>/`).
+
+`status` values:
+
+- `pending`: indexed, not yet compared
+- `up_to_date`
+- `outdated`: newer compatible release, not proposed
+- `proposed`: built and proposed; becomes `up_to_date` when `current_version` catches up
+- `failed`
+- `upstream_error`
+
+Two kinds of backoff:
+
+- **Check backoff** (`record_no_update`): 2 → 4 → 6 days, by time since the last check.
+- **Failure backoff** (`record_failed_update`): 2 → 4 → 6 days, by `failure_count`. Also sets `failed_version` and `last_error`, and writes `update_logs`; the key is the drv path, or `<repo>:<attr>@<version>` when there is none.
+
+Successful updates (`record_successful_update`) reset `failure_count` and back off 2 days. Watch ignores the check backoff and honours the failure backoff only for the same `failed_version`.
+
+The web dashboard (`ekapkgs-update-web`) reads these tables directly. Keep the migration comments in `migrations/20261111_dashboard_data.sql` in sync with the column semantics.
 
 ### CommitStrategy (`cli.rs`)
 
@@ -364,13 +411,20 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `UpstreamSource` | `vcs_sources/mod.rs` | Enum: GitHub, GitLab (multi-instance), SourceHut, PyPI, DirectoryListing |
 | `SemverStrategy` | `vcs_sources/mod.rs` | Enum: Latest, Major, Minor, Patch |
 | `Release` | `vcs_sources/mod.rs` | Upstream release with version extraction and matching |
-| `UpdatePhase` | `commands/update/types.rs` | 9 phases from MetadataExtraction through PrCreation |
+| `UpdatePhase` | `commands/update/types.rs` | Workflow phases (MetadataExtraction … PatchRecovery, Testing, AgentFix, PrCreation); snake_case `as_str()` stored in the DB |
 | `UpdateError` | `commands/update/errors.rs` | Structured errors with LLM-friendly serialization |
 | `RewriteError` | `rewrite/error.rs` | Parse, NotFound, InvalidResult, Regex, Structural |
 | `RunConfig` | `commands/run/config.rs` | Batch mode configuration |
 | `UpdateConfig` | `commands/update/config.rs` | Single-update configuration |
 | `UpdateRequest` | `commands/run/types.rs` | Message from checker → updater (attr_path, versions, per-repo routing) |
-| `UpdateResult` | `commands/run/types.rs` | Outcome: Updated, Skipped, DryRun |
+| `UpdateResult` | `commands/run/types.rs` | Outcome: Updated, Skipped (not attempted), Failed (attempted, recorded), DryRun |
+| `UpdaterStats` | `commands/run/config.rs` | Per-`run_service` outcome counts |
+| `PhaseTracker` | `commands/update/instrumentation.rs` | Records `update_phases` rows for one attempt (no-op when disabled) |
+| `UpdateStatus` / `UpdateRecord` | `database/types.rs` | `updates` row state (status, versions, failures, backoff) |
+| `PackageInfo` | `database/types.rs` | Cached pname/description/homepage/upstream/strategy for the dashboard |
+| `FailedUpdate` | `database/types.rs` | Input to `record_failed_update` (phase, error, session) |
+| `SessionMode` / `SessionCounter` | `database/sessions.rs` | Session kind (run/watch) and live counters |
+| `WatchCycleStats` / `IndexOutcome` | `database/watch.rs` | Poll/index cycle results |
 | `PrEnhancementsConfig` | `commands/pr_enhancements.rs` | CVE, Repology, rebuild, Cachix, dir diff flags |
 | `CommitStrategy` | `cli.rs` | Worktrees vs Branch |
 | `NixEvalDrv` | `nix/nix_eval_jobs.rs` | Deserialized nix-eval-jobs output per package |
@@ -386,7 +440,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `WatchConfig` | `commands/watch/mod.rs` | Watch (passive/RSS-driven) mode configuration |
 | `ResolvedRepo` | `commands/watch/mod.rs` | Runtime-resolved repo with paths, PrConfig, fork remote |
 | `RepoConfig` | `config.rs` | TOML config for a watched repo (name, upstream, entrypoint, path) |
-| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (repo_name + source → attr_path) |
+| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (repo_name + source → attr_path, strategy/regex/prereleases) |
 | `ReviewConfig` | `commands/review.rs` | PR review configuration (repo, PR#, tests, best-practices flags) |
 | `RepoCoords` | `commands/review.rs` | Parsed repository owner/repo coordinates |
 
@@ -419,7 +473,7 @@ API integrations (via reqwest):
 - **Unit tests**: `#[test]` with inline assertions. Located in same file or `tests_*.rs` siblings.
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
 - **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`.
-- **Web crate tests**: `routes/tests.rs` uses in-memory SQLite and `tower::ServiceExt::oneshot`.
+- **Web crate tests**: `routes/tests.rs` drives every page, fragment and API endpoint via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database).
 - **Run**: `cargo test --workspace`
 
 ## Concurrency and Resource Gotchas

@@ -1,18 +1,22 @@
+//! Read-only web dashboard for the ekapkgs-update SQLite database.
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use axum::Router;
-use axum::routing::get;
 use clap::Parser;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+mod assets;
+mod error;
+mod format;
+mod queries;
 mod routes;
 mod state;
 mod templates;
+mod views;
 
 use state::AppState;
 
@@ -20,8 +24,8 @@ use state::AppState;
 #[command(name = "ekapkgs-update-web")]
 #[command(about = "Web portal for monitoring ekapkgs-update package updates", long_about = None)]
 struct Args {
-    /// Path to SQLite database
-    #[arg(short, long, default_value = "~/.local/share/ekapkgs-update/db.sqlite")]
+    /// Path to SQLite database (the same default as the `ekapkgs-update` CLI)
+    #[arg(short, long, default_value = ekapkgs_update::paths::DEFAULT_DATABASE_PATH)]
     database: String,
 
     /// Port to listen on
@@ -39,86 +43,48 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ekapkgs_update_web=info,tower_http=debug".into()),
+                .unwrap_or_else(|_| "ekapkgs_update_web=info,tower_http=info".into()),
         )
         .init();
 
     let args = Args::parse();
 
-    // Expand shell variables in database path
     let db_path = shellexpand::tilde(&args.database).to_string();
-    let db_path_buf = PathBuf::from(&db_path);
-
-    // Initialize database connection (creates database and runs migrations if needed)
-    let db_exists = db_path_buf.exists();
-    if !db_exists {
-        info!(
-            "Database not found at {}, creating new database...",
-            db_path
-        );
+    if PathBuf::from(&db_path).exists() {
+        info!("Using database at {db_path}");
     } else {
-        info!("Using database at: {}", db_path);
+        info!("Database not found at {db_path}; creating an empty one");
     }
 
+    // `Database::new` creates the file if needed and applies migrations, so
+    // the dashboard can start before the CLI has ever run.
     let db = ekapkgs_update::database::Database::new(&db_path)
         .await
         .context("Failed to connect to database")?;
 
-    if !db_exists {
-        info!("✓ Database created successfully");
-        info!("📝 Note: Database is empty. Run 'ekapkgs-update run' to populate with update data.");
-    } else {
-        info!("✓ Database connection established");
-    }
+    let mut app = routes::router(AppState::new(db)).layer(TraceLayer::new_for_http());
 
-    // Create shared application state
-    let state = AppState::new(db);
-
-    // Build the router
-    let mut app = Router::new()
-        .route("/", get(routes::dashboard::index))
-        .route("/sessions", get(routes::sessions::list))
-        .route("/sessions/:id", get(routes::sessions::detail))
-        .route("/packages", get(routes::packages::list))
-        .route("/packages/:attr", get(routes::packages::detail))
-        .route("/analytics", get(routes::analytics::index))
-        // API endpoints for HTMX
-        .route("/api/stats", get(routes::dashboard::stats_json))
-        .route("/api/sessions", get(routes::sessions::list_json))
-        .route("/api/sessions/:id/phases", get(routes::sessions::phases_json))
-        // WebSocket for real-time updates
-        .route("/ws/live", get(routes::ws::websocket_handler))
-        // Serve static files
-        .nest_service("/static", ServeDir::new("ekapkgs-update-web/static"))
-        .with_state(state)
-        .layer(TraceLayer::new_for_http());
-
-    // Add CORS if requested
     if args.cors {
         info!("CORS enabled for public access");
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
-        app = app.layer(cors);
+        app = app.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
     }
 
-    // Bind and serve
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()
         .context("Invalid host or port")?;
-
-    info!("Starting server on http://{}", addr);
-    info!("Press Ctrl+C to stop");
+    info!("Listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .context("Failed to bind to address")?;
-
     axum::serve(listener, app).await.context("Server error")?;
 
     Ok(())

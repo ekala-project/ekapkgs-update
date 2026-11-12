@@ -44,46 +44,34 @@ ekapkgs-update worktrees list [OPTIONS]
 
 Path to SQLite database.
 
-**Default:** `~/.cache/ekapkgs-update/db.sqlite3`
+**Default:** `~/.cache/ekapkgs-update/updates.db`
 
 ```bash
 ekapkgs-update worktrees list --database /var/lib/ekapkgs-update/db.sqlite3
 ```
 
+**`--repo <NAME>`**
+
+Only list failures from this repository (a `[[repos]]` name, or `default` for `run` and single-repo watch). The listing has a `Repo` column.
+
+```bash
+ekapkgs-update worktrees list --repo core
+```
+
 #### Output
 
 ```
-Preserved Worktrees:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Preserved Failure Artifacts (3 total):
 
-Package: python312Packages.requests
-Path: /tmp/ekapkgs-update-worktrees/python312Packages.requests
-Created: 2024-05-19 10:30:15 (2 hours ago)
-Size: 45 MB
-Status: failed
-Phase: Build
-Error: BuildFailure
-
-Package: terraform
-Path: /tmp/ekapkgs-update-worktrees/terraform
-Created: 2024-05-19 09:15:42 (3 hours ago)
-Size: 128 MB
-Status: failed
-Phase: UpdateHash
-Error: HashMismatch
-
-Package: gcc
-Path: /tmp/ekapkgs-update-worktrees/gcc
-Created: 2024-05-18 15:22:10 (1 day ago)
-Size: 2.1 GB
-Status: failed
-Phase: Build
-Error: BuildFailure
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total preserved worktrees: 3
-Total disk usage: 2.3 GB
+Repo             Package                                  Failed Phase         Timestamp
+-------------------------------------------------------------------------------------------------
+core             python312Packages.requests               build                2026-11-11 10:30:15
+default          terraform                                source_hash_update   2026-11-11 09:15:42
+default          gcc                                      build                2026-11-10 15:22:10
 ```
+
+Most recent first. `default` is the unnamed scope used by `run` and
+single-repo watch.
 
 #### Examples
 
@@ -123,10 +111,18 @@ ekapkgs-update worktrees show python312Packages.requests
 
 Path to SQLite database.
 
-**Default:** `~/.cache/ekapkgs-update/db.sqlite3`
+**Default:** `~/.cache/ekapkgs-update/updates.db`
 
 ```bash
 ekapkgs-update worktrees show mypackage --database /var/lib/ekapkgs-update/db.sqlite3
+```
+
+**`--repo <NAME>`**
+
+Repository the failure belongs to: a `[[repos]]` name from multi-repo `watch`, or `default` for `run` and single-repo watch. Without it, the most recent failure of the attr is used, unless the attr has failed in several repos; then the command stops and lists them.
+
+```bash
+ekapkgs-update worktrees show mypackage --repo core
 ```
 
 #### Output

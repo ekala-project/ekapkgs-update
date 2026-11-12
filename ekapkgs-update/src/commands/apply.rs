@@ -7,12 +7,13 @@ use tokio::fs;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::commands::run::preservation::list_preserved_failures;
+use crate::commands::run::preservation::{find_preserved, list_preserved_failures};
 
 /// Apply LLM-generated fix to preserved worktree
 pub async fn apply(
     database_path: String,
     attr_path: String,
+    repo: Option<String>,
     patch: Option<PathBuf>,
     changes_json: Option<PathBuf>,
     validate: bool,
@@ -24,10 +25,7 @@ pub async fn apply(
 
     // Find the most recent preserved failure
     let artifacts_list = list_preserved_failures().await?;
-    let artifact = artifacts_list
-        .iter()
-        .find(|a| a.attr_path == attr_path)
-        .with_context(|| format!("No preserved artifacts found for {}", attr_path))?;
+    let artifact = find_preserved(&artifacts_list, &attr_path, repo.as_deref())?;
 
     info!(
         "Found preserved failure from session {} (phase: {})",

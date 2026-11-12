@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # Default values
-DATABASE="${EKAPKGS_DATABASE:-$HOME/.local/share/ekapkgs-update/db.sqlite}"
+DATABASE="${EKAPKGS_DATABASE:-$HOME/.cache/ekapkgs-update/updates.db}"
 PORT="${EKAPKGS_WEB_PORT:-3000}"
 HOST="${EKAPKGS_WEB_HOST:-127.0.0.1}"
 CORS="${EKAPKGS_WEB_CORS:-}"

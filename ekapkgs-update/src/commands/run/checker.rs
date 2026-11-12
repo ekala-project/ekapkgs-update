@@ -6,14 +6,22 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
 use super::types::UpdateRequest;
-use crate::database::Database;
+use crate::database::{Database, PackageInfo};
 use crate::nix;
 use crate::nix::nix_eval_jobs::NixEvalItem;
 use crate::package::PackageMetadata;
-use crate::vcs_sources::SemverStrategy;
+
+/// Repo scope of `run` rows in the database.
+const RUN_REPO: &str = "";
+
+/// How often (in checked packages) live progress is written to the session.
+const PROGRESS_INTERVAL: usize = 250;
 
 /// Service that monitors packages for new upstream releases, with optional
 /// concurrency and eval-worker limits.
+///
+/// Returns `(checked, skipped_by_backoff, eval_errors)`. When `session_id`
+/// is set, progress is written to the session periodically.
 pub async fn release_checker_service_with_limits(
     file: String,
     db: Database,
@@ -22,6 +30,7 @@ pub async fn release_checker_service_with_limits(
     skip_repology: bool,
     max_checker_concurrency: Option<usize>,
     max_eval_workers: Option<usize>,
+    session_id: Option<String>,
 ) -> (usize, usize, usize) {
     let stream = nix::run_eval::run_nix_eval_jobs_with_workers(file.clone(), max_eval_workers);
     pin_mut!(stream);
@@ -52,7 +61,7 @@ pub async fn release_checker_service_with_limits(
                 let attr_path = &drv.attr;
 
                 // Check backoff period
-                match db.should_check_update(attr_path).await {
+                match db.should_check_update(RUN_REPO, attr_path).await {
                     Ok(false) => {
                         debug!("{}: Skipping (in backoff period)", attr_path);
                         skipped_count += 1;
@@ -71,6 +80,16 @@ pub async fn release_checker_service_with_limits(
                 }
 
                 checked_count += 1;
+                if let Some(ref id) = session_id {
+                    if checked_count % PROGRESS_INTERVAL == 0 {
+                        if let Err(e) = db
+                            .set_session_progress(id, checked_count, skipped_count)
+                            .await
+                        {
+                            debug!("Failed to record session progress: {}", e);
+                        }
+                    }
+                }
 
                 // Clone data for async task
                 let db_clone = db.clone();
@@ -182,42 +201,36 @@ async fn check_for_update(
         },
     };
 
-    // Use semver strategy from passthru, or infer from attr_path suffix, or default to Latest.
-    // Packages like "flex_2_5_39" or "libffi_3_3" have version-pinned attr_paths that
-    // should constrain updates to their version series.
-    let semver_strategy = if let Some(strategy) = metadata.semver_strategy {
-        strategy
-    } else if let Some(inferred) = crate::variant_strategy::infer_strategy_from_attr_path(attr_path)
-    {
-        match inferred {
-            crate::variant_strategy::AttrPathStrategy::Pinned => {
-                debug!(
-                    "{}: Skipping - attr_path version suffix indicates pinned package",
-                    attr_path
-                );
-                return Ok(());
-            },
-            crate::variant_strategy::AttrPathStrategy::Strategy(s) => {
-                info!(
-                    "{}: Inferred {} strategy from attr_path version suffix",
-                    attr_path, s
-                );
-                s
-            },
-        }
-    } else if crate::nix::is_many_variants_package(eval_entry_point, attr_path)
-        .await
-        .unwrap_or(false)
-    {
-        info!(
-            "{}: Defaulting to minor strategy (mkManyVariants package)",
+    // Use semver strategy from passthru, or infer from attr_path suffix
+    // (e.g. "flex_2_5_39" is pinned, "libffi_3_3" tracks 3.3.x), or Minor for
+    // mkManyVariants packages, or Latest.
+    let Some(semver_strategy) = crate::variant_strategy::effective_strategy(
+        eval_entry_point,
+        attr_path,
+        metadata.semver_strategy,
+    )
+    .await
+    else {
+        debug!(
+            "{}: Skipping - attr_path version suffix indicates pinned package",
             attr_path
         );
-        SemverStrategy::Minor
-    } else {
-        SemverStrategy::Latest
+        return Ok(());
     };
     debug!("{}: Using semver strategy: {}", attr_path, semver_strategy);
+
+    // Register the package (and refresh its cached metadata) for the dashboard.
+    if let Err(e) = db
+        .upsert_package_info(
+            RUN_REPO,
+            attr_path,
+            current_version,
+            &PackageInfo::from_metadata(&metadata, Some(&upstream_source), Some(semver_strategy)),
+        )
+        .await
+    {
+        warn!("{}: Failed to record package info: {}", attr_path, e);
+    }
 
     // Use include-prereleases from passthru, or default to false
     let include_prereleases = metadata.include_prereleases.unwrap_or(false);
@@ -281,9 +294,15 @@ async fn check_for_update(
                 }
             }
 
-            // Record no update available
+            // Record the upstream error (keeps the last known latest version)
             if let Err(db_err) = db
-                .record_no_update(attr_path, current_version, "unknown")
+                .record_no_update(
+                    RUN_REPO,
+                    attr_path,
+                    current_version,
+                    None,
+                    Some(&format!("{e:#}")),
+                )
                 .await
             {
                 warn!("{}: Failed to record no update: {}", attr_path, db_err);
@@ -330,7 +349,13 @@ async fn check_for_update(
     if current_version == &latest_version {
         // No update needed - record in database
         if let Err(e) = db
-            .record_no_update(attr_path, current_version, &latest_version)
+            .record_no_update(
+                RUN_REPO,
+                attr_path,
+                current_version,
+                Some(&latest_version),
+                None,
+            )
             .await
         {
             warn!(
@@ -342,7 +367,7 @@ async fn check_for_update(
     }
 
     // Check if there's a proposed version that differs from latest
-    let record = db.get_update_record(attr_path).await?;
+    let record = db.get_update_record(RUN_REPO, attr_path).await?;
     if let Some(ref rec) = record {
         if let Some(ref proposed) = rec.proposed_version {
             if proposed == &latest_version {
@@ -352,7 +377,13 @@ async fn check_for_update(
                     attr_path, proposed
                 );
                 if let Err(e) = db
-                    .record_no_update(attr_path, current_version, &latest_version)
+                    .record_no_update(
+                        RUN_REPO,
+                        attr_path,
+                        current_version,
+                        Some(&latest_version),
+                        None,
+                    )
                     .await
                 {
                     warn!("{}: Failed to update database: {}", attr_path, e);
@@ -366,6 +397,13 @@ async fn check_for_update(
                 );
             }
         }
+    }
+
+    if let Err(e) = db
+        .record_update_available(RUN_REPO, attr_path, current_version, &latest_version)
+        .await
+    {
+        warn!("{}: Failed to record available update: {}", attr_path, e);
     }
 
     // Deduplicate by (pname, version): multiple attr_paths can alias the same

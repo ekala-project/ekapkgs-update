@@ -216,6 +216,10 @@ mod tests {
                 error_log: "Package build failed after update".to_owned(),
                 old_version: Some("1.0".to_owned()),
                 new_version: Some("2.0".to_owned()),
+                repo_name: String::new(),
+                session_id: None,
+                phase: None,
+                error_type: None,
             },
             UpdateLog {
                 drv_path: "/nix/store/def.drv".to_owned(),
@@ -225,6 +229,10 @@ mod tests {
                 error_log: "No compatible releases found".to_owned(),
                 old_version: Some("3.0".to_owned()),
                 new_version: Some("4.0".to_owned()),
+                repo_name: String::new(),
+                session_id: None,
+                phase: None,
+                error_type: None,
             },
         ];
 

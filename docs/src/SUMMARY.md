@@ -12,6 +12,7 @@
 
 - [Command-Line Interface](./cli/README.md)
   - [run - Automated Updates](./cli/run.md)
+  - [watch - Passive Updates](./cli/watch.md)
   - [update - Single Package](./cli/update.md)
   - [query - Search Failures](./cli/query.md)
   - [report - Failure Reports](./cli/report.md)

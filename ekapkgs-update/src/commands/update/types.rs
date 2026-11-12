@@ -34,6 +34,9 @@ pub enum UpdatePhase {
     /// Running passthru.tests
     Testing,
 
+    /// Agent-assisted fix of a build/test failure (`--claude-fix`)
+    AgentFix,
+
     /// Creating git commit and GitHub PR
     PrCreation,
 }
@@ -51,6 +54,7 @@ impl UpdatePhase {
             Self::Build => "Building package",
             Self::PatchRecovery => "Recovering from patch failures",
             Self::Testing => "Running tests",
+            Self::AgentFix => "Attempting agent-assisted fix",
             Self::PrCreation => "Creating pull request",
         }
     }
@@ -64,7 +68,7 @@ impl UpdatePhase {
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
-            Self::Build | Self::Testing | Self::PrCreation | Self::PatchRecovery
+            Self::Build | Self::Testing | Self::PrCreation | Self::PatchRecovery | Self::AgentFix
         )
     }
 
@@ -79,13 +83,14 @@ impl UpdatePhase {
             Self::Build => "build",
             Self::PatchRecovery => "patch_recovery",
             Self::Testing => "testing",
+            Self::AgentFix => "agent_fix",
             Self::PrCreation => "pr_creation",
         }
     }
 
-    /// Parse phase name from string (for database queries)
+    /// Parse a phase name as stored in the database (inverse of `as_str`)
     #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_name(s: &str) -> Option<Self> {
         match s {
             "metadata_extraction" => Some(Self::MetadataExtraction),
             "source_discovery" => Some(Self::SourceDiscovery),
@@ -95,6 +100,7 @@ impl UpdatePhase {
             "build" => Some(Self::Build),
             "patch_recovery" => Some(Self::PatchRecovery),
             "testing" => Some(Self::Testing),
+            "agent_fix" => Some(Self::AgentFix),
             "pr_creation" => Some(Self::PrCreation),
             _ => None,
         }

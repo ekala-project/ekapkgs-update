@@ -105,6 +105,56 @@ pub fn infer_strategy_from_attr_path(attr_path: &str) -> Option<AttrPathStrategy
     }
 }
 
+/// Determine the semver strategy used for automatic updates of a package.
+///
+/// Precedence:
+/// 1. `passthru.ekapkgs-update.semver-strategy` (`explicit`)
+/// 2. A version-like attr_path suffix (`libffi_3_3` → Patch, `flex_2_5_39` → pinned)
+/// 3. mkManyVariants packages default to Minor
+/// 4. Latest
+///
+/// Returns `None` when the package is pinned and must not be auto-updated.
+/// Shared by the `run` checker and the `watch` indexer so both pick the same
+/// release for a package.
+pub async fn effective_strategy(
+    eval_entry_point: &str,
+    attr_path: &str,
+    explicit: Option<SemverStrategy>,
+) -> Option<SemverStrategy> {
+    if let Some(strategy) = explicit {
+        return Some(strategy);
+    }
+    match infer_strategy_from_attr_path(attr_path) {
+        Some(AttrPathStrategy::Pinned) => {
+            tracing::debug!(
+                "{}: attr_path version suffix indicates pinned package",
+                attr_path
+            );
+            return None;
+        },
+        Some(AttrPathStrategy::Strategy(s)) => {
+            tracing::debug!(
+                "{}: Inferred {} strategy from attr_path version suffix",
+                attr_path,
+                s
+            );
+            return Some(s);
+        },
+        None => {},
+    }
+    if crate::nix::is_many_variants_package(eval_entry_point, attr_path)
+        .await
+        .unwrap_or(false)
+    {
+        tracing::debug!(
+            "{}: Defaulting to minor strategy (mkManyVariants package)",
+            attr_path
+        );
+        return Some(SemverStrategy::Minor);
+    }
+    Some(SemverStrategy::Latest)
+}
+
 /// Extract version constraint pattern from variant name for matching
 ///
 /// Examples:

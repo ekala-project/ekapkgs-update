@@ -81,19 +81,25 @@ pub fn parse_feed_bytes(data: &[u8]) -> anyhow::Result<Vec<Release>> {
         .entries
         .into_iter()
         .filter_map(|entry| {
-            // Use the entry title as the tag name. GitHub Atom feeds use the
-            // release tag as the title (e.g. "v1.2.3"). PyPI uses the version
-            // string directly (e.g. "1.2.3").
-            let tag_name = entry.title.map(|t| t.content).or_else(|| {
-                // Fall back to the last path segment of the entry link
-                entry.links.first().and_then(|link| {
-                    link.href
-                        .trim_end_matches('/')
-                        .rsplit('/')
-                        .next()
-                        .map(String::from)
-                })
-            })?;
+            // GitHub release feeds link to `/releases/tag/<tag>`; the entry
+            // title is the release *name*, which is often not the tag
+            // (e.g. "Release 1.2.3"). PyPI uses the version as the title.
+            let tag_from_link = entry
+                .links
+                .iter()
+                .find_map(|link| tag_from_release_link(&link.href));
+            let tag_name = tag_from_link
+                .or_else(|| entry.title.map(|t| t.content.trim().to_owned()))
+                .or_else(|| {
+                    // Fall back to the last path segment of the entry link
+                    entry.links.first().and_then(|link| {
+                        link.href
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .map(String::from)
+                    })
+                })?;
 
             if tag_name.is_empty() {
                 return None;
@@ -107,6 +113,39 @@ pub fn parse_feed_bytes(data: &[u8]) -> anyhow::Result<Vec<Release>> {
         .collect();
 
     Ok(releases)
+}
+
+/// Extract the tag from a GitHub release link
+/// (`https://github.com/o/r/releases/tag/v1.2.3`), percent-decoded.
+fn tag_from_release_link(href: &str) -> Option<String> {
+    let (_, tag) = href.split_once("/releases/tag/")?;
+    let tag = tag.split(['?', '#']).next()?.trim_end_matches('/');
+    if tag.is_empty() {
+        return None;
+    }
+    Some(percent_decode(tag))
+}
+
+/// Minimal `%XX` decoder (invalid escapes are kept verbatim).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let Some(byte) = s
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 /// Reconstruct an [`UpstreamSource`] from database index fields.
@@ -170,6 +209,37 @@ pub fn upstream_source_from_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_feed_uses_tag_from_link_not_release_name() {
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Release notes from foo</title>
+  <entry>
+    <id>tag:github.com,2008:Repository/1/v2.0.0</id>
+    <title>Foo 2.0: the big one</title>
+    <link rel="alternate" type="text/html" href="https://github.com/o/foo/releases/tag/v2.0.0"/>
+    <updated>2026-01-01T00:00:00Z</updated>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1/release%2B1.9</id>
+    <title>1.9</title>
+    <link rel="alternate" type="text/html" href="https://github.com/o/foo/releases/tag/release%2B1.9"/>
+    <updated>2025-01-01T00:00:00Z</updated>
+  </entry>
+</feed>"#;
+        let tags: Vec<String> = parse_feed_bytes(atom)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.tag_name)
+            .collect();
+        assert_eq!(tags, vec!["v2.0.0", "release+1.9"]);
+        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(
+            tag_from_release_link("https://pypi.org/project/x/1.0/"),
+            None
+        );
+    }
 
     #[test]
     fn roundtrip_github() {

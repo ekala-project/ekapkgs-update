@@ -1,36 +1,37 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}ekapkgs-update Portal{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
-    <script src="/static/js/htmx.min.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}ekapkgs-update{% endblock %} · ekapkgs-update</title>
+  <link rel="stylesheet" href="/static/css/styles.css?v={{ crate::assets::version() }}">
+  <script src="/static/js/htmx.min.js?v={{ crate::assets::version() }}" defer></script>
+  <script src="/static/js/live.js?v={{ crate::assets::version() }}" defer></script>
 </head>
 <body>
-    <header>
-        <nav>
-            <div class="nav-brand">
-                <h1>ekapkgs-update</h1>
-                <span class="tagline">Package Update Monitor</span>
-            </div>
-            <ul class="nav-links">
-                <li><a href="/" class="{% block nav_dashboard %}{% endblock %}">Dashboard</a></li>
-                <li><a href="/sessions" class="{% block nav_sessions %}{% endblock %}">Sessions</a></li>
-                <li><a href="/packages" class="{% block nav_packages %}{% endblock %}">Packages</a></li>
-                <li><a href="/analytics" class="{% block nav_analytics %}{% endblock %}">Analytics</a></li>
-            </ul>
-        </nav>
-    </header>
-
-    <main>
-        {% block content %}{% endblock %}
-    </main>
-
-    <footer>
-        <p>ekapkgs-update-web &copy; 2026 | Real-time package update monitoring</p>
-    </footer>
-
-    {% block scripts %}{% endblock %}
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="site-header-inner">
+      <a class="brand" href="/">ekapkgs-update</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="/" {% block nav_dashboard %}{% endblock %}>Dashboard</a>
+        <a href="/packages" {% block nav_packages %}{% endblock %}>Packages</a>
+        <a href="/sessions" {% block nav_sessions %}{% endblock %}>Sessions</a>
+        <a href="/failures" {% block nav_failures %}{% endblock %}>Failures</a>
+        <a href="/watch" {% block nav_watch %}{% endblock %}>Watch</a>
+        <a href="/analytics" {% block nav_analytics %}{% endblock %}>Analytics</a>
+      </nav>
+      <span id="live-status" class="live-status" data-state="connecting" role="status" title="Live updates: connecting">
+        <span class="dot" aria-hidden="true"></span><span class="live-label">connecting</span>
+      </span>
+    </div>
+  </header>
+  <main id="main" class="page">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer">
+    <p>Read-only view of the ekapkgs-update database. Times are relative; hover one for the exact UTC time.</p>
+  </footer>
 </body>
 </html>

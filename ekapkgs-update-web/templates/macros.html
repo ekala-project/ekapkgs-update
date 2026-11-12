@@ -1,0 +1,141 @@
+{# Shared rendering helpers. Every value is pre-formatted in Rust.
+
+   Parameter names are deliberately unique (askama 0.12 resolves macro
+   arguments by name, so a parameter that matches a template field or an
+   outer loop variable can shadow it), and loops call `.iter()` explicitly
+   because a field of a loop variable would otherwise be moved. #}
+
+{% macro ts(ts_val) -%}
+{%- if ts_val.is_set() -%}
+<time datetime="{{ ts_val.iso }}" title="{{ ts_val.abs }}">{{ ts_val.rel }}</time>
+{%- else -%}
+<span class="muted">—</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro badge(badge_val) -%}
+<span class="badge tone-{{ badge_val.tone }}"><span class="dot" aria-hidden="true"></span>{{ badge_val.label }}</span>
+{%- endmacro %}
+
+{% macro ver(ver_val) -%}
+{%- if ver_val.is_set() -%}
+<code class="ver" title="{{ ver_val.full }}">{{ ver_val.short }}</code>
+{%- else -%}
+<span class="muted">—</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro segbar(seg_bar) -%}
+{%- if seg_bar.is_empty() -%}
+<div class="segbar segbar-empty" role="img" aria-label="No data"></div>
+{%- else -%}
+<div class="segbar" role="img" aria-label="{{ seg_bar.label }}">
+  {%- for seg in seg_bar.segments.iter() -%}
+  <span class="seg {{ seg.class }}" style="flex-grow: {{ seg.value }}" data-tip="{{ seg.title }}" tabindex="0"></span>
+  {%- endfor -%}
+</div>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro chips(chip_list, chip_label) -%}
+<nav class="chips" aria-label="{{ chip_label }}">
+  {%- for chip_item in chip_list.iter() %}
+  <a class="chip tone-{{ chip_item.tone }}" href="{{ chip_item.href }}"{% if chip_item.active %} aria-current="true"{% endif %}>
+    {%- if chip_item.tone != "neutral" %}<span class="dot" aria-hidden="true"></span>{% endif -%}
+    {{ chip_item.label }}
+    {%- if let Some(chip_n) = chip_item.count %}<span class="chip-count">{{ chip_n }}</span>{% endif -%}
+  </a>
+  {%- endfor %}
+</nav>
+{%- endmacro %}
+
+{% macro pager(pg) -%}
+{%- if pg.is_multi() -%}
+<nav class="pager" aria-label="Pagination">
+  {%- if let Some(pg_prev) = pg.prev_href %}
+  <a class="button" href="{{ pg_prev }}" rel="prev">← Previous</a>
+  {%- else %}
+  <span class="button" aria-disabled="true">← Previous</span>
+  {%- endif %}
+  <span class="pager-info">Page {{ pg.page }} of {{ pg.pages }} · {{ pg.first_item }}–{{ pg.last_item }} of {{ pg.total_text }}</span>
+  {%- if let Some(pg_next) = pg.next_href %}
+  <a class="button" href="{{ pg_next }}" rel="next">Next →</a>
+  {%- else %}
+  <span class="button" aria-disabled="true">Next →</span>
+  {%- endif %}
+</nav>
+{%- else if pg.total > 0 -%}
+<p class="pager-info">{{ pg.total_text }} {% if pg.total == 1 %}result{% else %}results{% endif %}</p>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro phase_chips(pchip_list) -%}
+<span class="pchips">
+  {%- for pchip_item in pchip_list.iter() -%}
+  <span class="pchip tone-{{ pchip_item.tone }}" title="{{ pchip_item.title }}">{{ pchip_item.label }}{% if !pchip_item.duration.is_empty() %}<span class="pchip-time">{{ pchip_item.duration }}</span>{% endif %}</span>
+  {%- endfor -%}
+</span>
+{%- endmacro %}
+
+{% macro phase_error(perr, perr_pkg) -%}
+<details class="error-block">
+  <summary>
+    <span class="badge tone-critical"><span class="dot" aria-hidden="true"></span>{{ perr.error_type }}</span>
+    {% if perr_pkg %}<a href="{{ perr.href }}" class="attr">{{ perr.attr_path }}</a>{% if perr.repo != "default" %} <span class="muted">({{ perr.repo }})</span>{% endif %}{% endif %}
+    <span class="muted">in {{ perr.phase }} · {% call ts(perr.when) %}</span>
+  </summary>
+  {%- if perr.has_details %}
+  <pre class="code">{{ perr.details }}</pre>
+  {%- else %}
+  <p class="muted">No error details were recorded.</p>
+  {%- endif %}
+  {%- if !perr.artifacts_path.is_empty() %}
+  <p class="small">Preserved artifacts: <code>{{ perr.artifacts_path }}</code></p>
+  {%- endif %}
+</details>
+{%- endmacro %}
+
+{% macro log_entry(log_e, log_pkg) -%}
+<details class="log-entry">
+  <summary>
+    {% if log_pkg %}<a href="{{ log_e.href }}" class="attr">{{ log_e.attr_path }}</a>{% if log_e.repo != "default" %} <span class="muted">({{ log_e.repo }})</span>{% endif %}{% endif %}
+    {% if !log_e.error_type.is_empty() %}<span class="badge tone-critical"><span class="dot" aria-hidden="true"></span>{{ log_e.error_type }}</span>{% endif %}
+    {% if !log_e.phase.is_empty() %}<span class="tag">{{ log_e.phase }}</span>{% endif %}
+    <span class="muted">{% call ver(log_e.old) %} → {% call ver(log_e.new) %} · {% call ts(log_e.when) %}</span>
+    {% if !log_e.summary.is_empty() %}<span class="log-summary">{{ log_e.summary }}</span>{% endif %}
+  </summary>
+  <div class="log-meta small">
+    <span>Key <code>{{ log_e.drv_path }}</code></span>
+    {%- if let Some(log_sh) = log_e.session_href %} · <a href="{{ log_sh }}">session {{ log_e.session_short }}</a>{% endif %}
+    · {{ log_e.size }}{% if log_e.truncated %} · showing the last 6,000 characters{% endif %}
+  </div>
+  <pre class="code log">{{ log_e.log }}</pre>
+</details>
+{%- endmacro %}
+
+{% macro hbars(hbar_list, hbar_unit) -%}
+<ol class="hbars">
+  {%- for hb in hbar_list.iter() %}
+  <li class="hbar-row">
+    <span class="hbar-label">
+      {%- if let Some(hb_badge) = hb.badge %}{% call badge(hb_badge) %}
+      {%- else if let Some(hb_href) = hb.href %}<a href="{{ hb_href }}">{{ hb.label }}</a>
+      {%- else %}{{ hb.label }}{% endif -%}
+    </span>
+    <span class="hbar-track"><span class="hbar-fill" style="width: {{ hb.width }}" data-tip="{{ hb.tip }}" tabindex="0"></span></span>
+    <span class="hbar-value">{{ hb.value_text }}</span>
+  </li>
+  {%- endfor %}
+</ol>
+<details class="table-view">
+  <summary>Table view</summary>
+  <table class="table compact">
+    <thead><tr><th scope="col">{{ hbar_unit }}</th><th scope="col" class="num">Count</th><th scope="col" class="num">Share</th></tr></thead>
+    <tbody>
+      {%- for hb in hbar_list.iter() %}
+      <tr><td>{{ hb.label }}</td><td class="num">{{ hb.value_text }}</td><td class="num">{{ hb.share }}</td></tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+</details>
+{%- endmacro %}

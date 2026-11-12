@@ -10,11 +10,20 @@
 //!
 //! When `repos` is configured, the watch command maintains persistent checkouts
 //! of each repository, builds per-repo upstream indexes, and routes update PRs
-//! to the correct upstream repository.
+//! to the correct upstream repository. Before every (re-)index, managed
+//! checkouts are fast-forwarded to their upstream base branch (see [`sync`]).
+//!
+//! ## Bootstrap (observe-only)
+//!
+//! The first time a package is observed, the best compatible upstream release
+//! is recorded as its `baseline_version` and nothing is dispatched. Afterwards
+//! only releases newer than the baseline trigger updates; the pre-existing
+//! backlog is left to `ekapkgs-update run`.
 
 pub mod feeds;
 pub mod index;
 mod listener;
+mod sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,8 +36,9 @@ use tracing::{info, warn};
 use crate::cli::CommitStrategy;
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::config::RepoConfig;
+use crate::database::{Database, RepoSyncStatus, WatchedRepoInfo};
 use crate::git::PrConfig;
-use crate::github::parse_github_url;
+use crate::github::{GithubRepo, parse_github_url};
 
 /// A repository with all runtime information resolved.
 #[derive(Debug, Clone)]
@@ -43,6 +53,40 @@ pub struct ResolvedRepo {
     pub pr_config: Option<PrConfig>,
     /// Git remote to push update branches to.
     pub fork: String,
+    /// Upstream repository URL (multi-repo mode only).
+    pub upstream_url: Option<String>,
+    /// Whether watch owns the checkout and may fetch / fast-forward it.
+    /// `false` in legacy single-repo mode (the current directory).
+    pub managed: bool,
+}
+
+impl ResolvedRepo {
+    /// Name used in log messages (`default` for legacy mode).
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() {
+            "default"
+        } else {
+            &self.name
+        }
+    }
+
+    /// Record this repository's static configuration in `watched_repos`.
+    async fn register(&self, db: &Database) -> anyhow::Result<()> {
+        let path = std::fs::canonicalize(&self.repo_dir).unwrap_or_else(|_| self.repo_dir.clone());
+        let entrypoint = std::fs::canonicalize(&self.eval_entry_point).map_or_else(
+            |_| self.eval_entry_point.clone(),
+            |p| p.to_string_lossy().to_string(),
+        );
+        db.upsert_watched_repo(&WatchedRepoInfo {
+            name: &self.name,
+            upstream: self.upstream_url.as_deref(),
+            path: &path.to_string_lossy(),
+            entrypoint: &entrypoint,
+            base_branch: self.pr_config.as_ref().map(|c| c.base_branch.as_str()),
+            fork_remote: Some(&self.fork),
+        })
+        .await
+    }
 }
 
 /// Configuration for the watch (passive/event-driven) mode.
@@ -148,6 +192,8 @@ impl WatchConfig {
                 repo_dir: PathBuf::from("."),
                 pr_config,
                 fork: self.fork.clone(),
+                upstream_url: None,
+                managed: false,
             }]
         } else {
             // Multi-repo mode: provision checkouts and resolve each repo
@@ -165,6 +211,7 @@ impl WatchConfig {
                     },
                     Err(e) => {
                         warn!("[{}] Failed to provision repo: {:#}", repo_config.name, e);
+                        record_provision_failure(&db, repo_config, &e).await;
                     },
                 }
             }
@@ -173,6 +220,38 @@ impl WatchConfig {
             }
             resolved
         };
+
+        // Close out state left behind by a previous (killed) watch process
+        match db.recover_interrupted_watch_state().await {
+            Ok(0) => {},
+            Ok(n) => info!("Closed {} interrupted watch cycle(s)", n),
+            Err(e) => warn!("Failed to recover interrupted watch state: {:#}", e),
+        }
+
+        // Register repos for the dashboard and forget repos removed from the
+        // config (repos that merely failed to provision are kept).
+        let configured: Vec<&str> = if self.repos.is_empty() {
+            vec![""]
+        } else {
+            self.repos.iter().map(|r| r.name.as_str()).collect()
+        };
+        if let Err(e) = db.retain_watched_repos(&configured).await {
+            warn!("Failed to prune watched repos: {:#}", e);
+        }
+        let names: Vec<&str> = resolved_repos.iter().map(|r| r.name.as_str()).collect();
+        for repo in &resolved_repos {
+            if let Err(e) = repo.register(&db).await {
+                warn!("[{}] Failed to register repo: {:#}", repo.label(), e);
+            }
+        }
+        let session_config = serde_json::json!({
+            "mode": "watch",
+            "repos": names,
+            "dry_run": self.dry_run,
+            "commit_strategy": self.commit_strategy,
+            "poll_interval_minutes": self.poll_interval_minutes,
+            "index_refresh_hours": self.index_refresh_hours,
+        });
 
         // Concurrency
         let is_branch_mode = self.commit_strategy == CommitStrategy::Branch;
@@ -212,21 +291,87 @@ impl WatchConfig {
             updater_config,
             poll_interval,
             index_refresh,
-            self.dry_run,
+            session_config,
         )
         .await
     }
 }
 
-/// Provision a repository: clone if missing, fetch if present, set up fork remote.
+/// Show a repository that could not be provisioned on the dashboard.
+async fn record_provision_failure(db: &Database, config: &RepoConfig, error: &anyhow::Error) {
+    let path = config
+        .path
+        .as_deref()
+        .map(|p| shellexpand::tilde(p).to_string())
+        .unwrap_or_default();
+    let entrypoint = Path::new(&path)
+        .join(&config.entrypoint)
+        .to_string_lossy()
+        .to_string();
+    let info = WatchedRepoInfo {
+        name: &config.name,
+        upstream: Some(&config.upstream),
+        path: &path,
+        entrypoint: &entrypoint,
+        base_branch: None,
+        fork_remote: Some(&config.fork),
+    };
+    let message = format!("provisioning failed: {error:#}");
+    let result = async {
+        db.upsert_watched_repo(&info).await?;
+        db.record_repo_sync(
+            &config.name,
+            RepoSyncStatus::Error,
+            Some(&message),
+            None,
+            None,
+        )
+        .await
+    }
+    .await;
+    if let Err(e) = result {
+        warn!(
+            "[{}] Failed to record provisioning failure: {:#}",
+            config.name, e
+        );
+    }
+}
+
+/// Parse a repo `upstream` setting: a GitHub URL (`github.com/owner/repo`,
+/// `https://…`, `git@github.com:…`) or the `owner/repo` shorthand.
+fn parse_upstream(upstream: &str) -> Option<GithubRepo> {
+    if let Some(repo) = parse_github_url(upstream) {
+        return Some(repo);
+    }
+    let (owner, repo) = upstream.trim().trim_end_matches('/').split_once('/')?;
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(repo) && !owner.contains('.')).then(|| GithubRepo {
+        owner: owner.to_owned(),
+        repo: repo.trim_end_matches(".git").to_owned(),
+    })
+}
+
+/// Provision a repository: clone if missing, set up fork remote.
+///
+/// Existing checkouts are fetched and fast-forwarded by [`sync`] before
+/// each index build.
 async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
     // Parse upstream URL to get owner/repo
-    let github_repo = parse_github_url(&config.upstream).ok_or_else(|| {
+    let github_repo = parse_upstream(&config.upstream).ok_or_else(|| {
         anyhow::anyhow!(
-            "Cannot parse upstream '{}' as a GitHub URL. Expected format: github.com/owner/repo",
+            "Cannot parse upstream '{}' as a GitHub repository. Expected owner/repo or \
+             github.com/owner/repo",
             config.upstream
         )
     })?;
+    let upstream_url = format!(
+        "https://github.com/{}/{}",
+        github_repo.owner, github_repo.repo
+    );
 
     // Determine checkout path
     let repo_path = match &config.path {
@@ -237,19 +382,15 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
         ),
     };
 
-    // Clone or fetch
+    // Clone if missing
     if repo_path.join(".git").exists() {
         info!(
-            "[{}] Repository exists at {}, fetching...",
+            "[{}] Repository exists at {}",
             config.name,
             repo_path.display()
         );
-        run_git_in(&repo_path, &["fetch", "--all", "--prune"]).await?;
     } else {
-        let clone_url = format!(
-            "https://github.com/{}/{}.git",
-            github_repo.owner, github_repo.repo
-        );
+        let clone_url = format!("{upstream_url}.git");
         info!(
             "[{}] Cloning {} to {}",
             config.name,
@@ -341,6 +482,8 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
         repo_dir: repo_path,
         pr_config,
         fork: config.fork.clone(),
+        upstream_url: Some(upstream_url),
+        managed: true,
     })
 }
 
@@ -389,4 +532,31 @@ async fn get_default_branch_local(repo_dir: &Path) -> anyhow::Result<String> {
     }
 
     anyhow::bail!("Could not determine default branch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_upstream_forms() {
+        let cases = [
+            ("ekala-project/ekapkgs", Some(("ekala-project", "ekapkgs"))),
+            ("github.com/o/r", Some(("o", "r"))),
+            ("https://github.com/o/r.git", Some(("o", "r"))),
+            ("git@github.com:o/r.git", Some(("o", "r"))),
+            ("o/r.git", Some(("o", "r"))),
+            ("gitlab.com/o/r", None),
+            ("just-a-name", None),
+            ("/abs/path", None),
+        ];
+        for (input, expected) in cases {
+            let got = parse_upstream(input);
+            assert_eq!(
+                got.as_ref().map(|r| (r.owner.as_str(), r.repo.as_str())),
+                expected,
+                "{input}"
+            );
+        }
+    }
 }

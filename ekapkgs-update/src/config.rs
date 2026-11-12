@@ -45,6 +45,10 @@ use tracing::{debug, info};
 const CONFIG_FILENAME: &str = "config.toml";
 /// Application name for XDG directory lookup.
 const APP_NAME: &str = "ekapkgs-update";
+/// Repo name reserved for the unnamed (`''`) scope used by `run` and
+/// single-repo watch; the dashboard displays and links that scope as
+/// `default`, so a real repo with this name would be indistinguishable.
+pub const RESERVED_REPO_NAME: &str = "default";
 
 /// Configuration for a single watched repository.
 ///
@@ -240,6 +244,12 @@ impl ConfigFile {
         for repo in &self.repos {
             if repo.name.is_empty() {
                 bail!("repos: each repo must have a non-empty name");
+            }
+            if repo.name.eq_ignore_ascii_case(RESERVED_REPO_NAME) {
+                bail!(
+                    "repos: '{}' is reserved (it labels the single-repo / `run` scope)",
+                    repo.name
+                );
             }
             if !seen_names.insert(&repo.name) {
                 bail!("repos: duplicate repo name '{}'", repo.name);
@@ -470,6 +480,16 @@ upstream = "github.com/ekala-project/ekapkgs"
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_repos_reserved_name_rejected() {
+        for name in ["default", "Default"] {
+            let toml_str =
+                format!("[[repos]]\nname = \"{name}\"\nupstream = \"ekala-project/core-pkgs\"\n");
+            let config: ConfigFile = toml::from_str(&toml_str).unwrap();
+            assert!(config.validate().is_err(), "{name} should be rejected");
+        }
     }
 
     #[test]

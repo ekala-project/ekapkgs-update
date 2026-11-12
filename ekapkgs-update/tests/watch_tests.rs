@@ -210,10 +210,10 @@ async fn upstream_index_clear() {
     db.upsert_upstream_index("", "jq", "github", "jqlang/jq", None, "1.7", None)
         .await
         .unwrap();
-    assert_eq!(db.upstream_index_count().await.unwrap(), 1);
+    assert_eq!(db.upstream_index_count(None).await.unwrap(), 1);
 
     db.clear_upstream_index(None).await.unwrap();
-    assert_eq!(db.upstream_index_count().await.unwrap(), 0);
+    assert_eq!(db.upstream_index_count(None).await.unwrap(), 0);
 }
 
 // ── Feed Parsing Tests ────────────────────────────────────────────
@@ -306,8 +306,9 @@ fn parse_feed_invalid_xml_returns_error() {
 // ── Dispatch Logic Tests ──────────────────────────────────────────
 
 /// Test that the dispatch logic produces a correct UpdateRequest when a newer
-/// version is detected.  Exercises the same steps as `poll_single_source` but
-/// without network I/O.
+/// version is detected. Exercises the same steps as the watch poller but
+/// without network I/O (the dispatch decision itself is unit-tested in
+/// `commands/watch/listener.rs`).
 #[tokio::test]
 async fn dispatch_sends_update_for_newer_version() {
     let db = setup_db().await;
@@ -319,7 +320,7 @@ async fn dispatch_sends_update_for_newer_version() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    // Look up entries (same as poll_single_source does after fetching releases)
+    // Look up entries (same as the poller does after fetching releases)
     let entries = db
         .get_attr_paths_for_source("github", "owner/repo", None)
         .await
@@ -340,9 +341,9 @@ async fn dispatch_sends_update_for_newer_version() {
     );
 
     // Backoff check
-    assert!(db.should_check_update(&entry.attr_path).await.unwrap());
+    assert!(db.should_check_update("", &entry.attr_path).await.unwrap());
 
-    // Construct and send the request (same as poll_single_source does)
+    // Construct and send the request (same as the poller does)
     let req = UpdateRequest {
         attr_path: entry.attr_path.clone(),
         drv_path: None,
@@ -417,12 +418,12 @@ async fn dispatch_respects_backoff() {
         .unwrap();
 
     // Record a "no update" which sets the backoff timer
-    db.record_no_update("my-pkg", "1.0.0", "1.0.0")
+    db.record_no_update("", "my-pkg", "1.0.0", Some("1.0.0"), None)
         .await
         .unwrap();
 
     // Now the package should be in backoff
-    assert!(!db.should_check_update("my-pkg").await.unwrap());
+    assert!(!db.should_check_update("", "my-pkg").await.unwrap());
 }
 
 /// Test the deduplication logic: two attr_paths sharing the same upstream
@@ -473,7 +474,7 @@ async fn dispatch_deduplicates_aliases() {
             continue;
         }
 
-        // Dedup check — same logic as poll_single_source
+        // Dedup check — aliases share source, current and target version
         let dedup_key = (entry.upstream_key.clone(), latest_version.to_owned());
         if !seen.insert(dedup_key) {
             continue; // Already queued
