@@ -51,7 +51,7 @@ pub async fn inspect(database_path: String, identifier: String) -> anyhow::Resul
     let status_str = if let Some(failed) = failed_phase {
         format!("Failed at {} phase", failed.phase)
     } else {
-        "Completed successfully".to_string()
+        "Completed successfully".to_owned()
     };
     println!("Status:     {}", status_str);
 
@@ -78,7 +78,7 @@ pub async fn inspect(database_path: String, identifier: String) -> anyhow::Resul
         let duration_str = if let Some(ms) = phase.duration_ms {
             format!("{:.1}s", ms as f64 / 1000.0)
         } else {
-            "---".to_string()
+            "---".to_owned()
         };
 
         println!(
@@ -196,7 +196,7 @@ async fn list_artifacts(base_path: &PathBuf) -> anyhow::Result<()> {
         let metadata = entry.metadata().await?;
 
         let size_str = if file_type.is_dir() {
-            "DIR".to_string()
+            "DIR".to_owned()
         } else {
             format_size(metadata.len())
         };

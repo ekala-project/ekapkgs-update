@@ -330,7 +330,7 @@ pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<S
         if variant_path.exists()
             && variant_path
                 .file_name()
-                .map_or(false, |f| f == "variants.nix")
+                .is_some_and(|f| f == "variants.nix")
         {
             info!(
                 "Found variants.nix via variantArgs fallback: {}",
@@ -369,16 +369,13 @@ pub async fn discover_new_variants(
     existing_variants: &[String],
 ) -> anyhow::Result<Vec<(String, String)>> {
     // Step 1: Determine the component count from existing variant names
-    let component_count = match infer_variant_component_count(existing_variants) {
-        Some(count) => count,
-        None => {
-            debug!(
-                "{}: Cannot infer variant component count (mixed or no versioned variants), \
-                 skipping new variant discovery",
-                attr_path
-            );
-            return Ok(vec![]);
-        },
+    let Some(component_count) = infer_variant_component_count(existing_variants) else {
+        debug!(
+            "{}: Cannot infer variant component count (mixed or no versioned variants), \
+             skipping new variant discovery",
+            attr_path
+        );
+        return Ok(vec![]);
     };
     debug!(
         "{}: Variant component count: {} (e.g., {} → {})",

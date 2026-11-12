@@ -93,18 +93,18 @@ mod tests {
     #[test]
     fn test_function_error_detection() {
         let function_error = NixEvalError {
-            attr: "myHelper".to_string(),
-            attr_path: vec!["myHelper".to_string()],
+            attr: "myHelper".to_owned(),
+            attr_path: vec!["myHelper".to_owned()],
             error: "error: cannot evaluate a function that has an argument without a value \
                     ('name')"
-                .to_string(),
+                .to_owned(),
         };
         assert!(function_error.is_function_error());
 
         let real_error = NixEvalError {
-            attr: "brokenPkg".to_string(),
-            attr_path: vec!["brokenPkg".to_string()],
-            error: "error: attribute 'src' missing".to_string(),
+            attr: "brokenPkg".to_owned(),
+            attr_path: vec!["brokenPkg".to_owned()],
+            error: "error: attribute 'src' missing".to_owned(),
         };
         assert!(!real_error.is_function_error());
     }

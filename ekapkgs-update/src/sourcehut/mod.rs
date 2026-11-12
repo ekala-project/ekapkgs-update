@@ -126,7 +126,7 @@ pub async fn fetch_sourcehut_tags(
             }
         }
     "#
-    .to_string();
+    .to_owned();
 
     let graphql_query = GraphqlQuery {
         query,
@@ -177,13 +177,12 @@ pub async fn fetch_sourcehut_tags(
         .results
         .into_iter()
         .filter_map(|reference| {
-            if let Some(tag_name) = reference.name.strip_prefix("refs/tags/") {
-                Some(SourcehutReference {
+            reference
+                .name
+                .strip_prefix("refs/tags/")
+                .map(|tag_name| SourcehutReference {
                     name: tag_name.to_owned(),
                 })
-            } else {
-                None
-            }
         })
         .collect();
 

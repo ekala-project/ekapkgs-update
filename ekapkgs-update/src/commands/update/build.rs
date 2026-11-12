@@ -53,6 +53,7 @@ pub async fn build_nix_expr(
 ///
 /// Like [`build_nix_expr`] but passes `--system <system>` so that
 /// `builtins.currentSystem` resolves to the requested platform.
+#[allow(dead_code)] // public API, not called yet
 pub async fn build_nix_expr_for_system(
     eval_entry_point: &str,
     attr_path: &str,

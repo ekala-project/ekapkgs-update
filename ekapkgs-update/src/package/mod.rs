@@ -300,7 +300,7 @@ mod tests {
         // We can't easily test the Nix evaluation without a full Nix setup,
         // but we can at least verify the struct has the field
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(metadata.skip, Some(true));
 
         let metadata_false = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(metadata_false.skip, Some(false));
 
         let metadata_none = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -380,7 +380,7 @@ mod tests {
         use crate::vcs_sources::SemverStrategy;
 
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -395,7 +395,7 @@ mod tests {
             skip: None,
             semver_strategy: Some(SemverStrategy::Minor),
             include_prereleases: Some(true),
-            version_regex: Some("v(.*)".to_string()),
+            version_regex: Some("v(.*)".to_owned()),
             platform_hashes: None,
             github_repo: None,
             keep: None,
@@ -404,22 +404,22 @@ mod tests {
 
         assert_eq!(metadata.semver_strategy, Some(SemverStrategy::Minor));
         assert_eq!(metadata.include_prereleases, Some(true));
-        assert_eq!(metadata.version_regex, Some("v(.*)".to_string()));
+        assert_eq!(metadata.version_regex, Some("v(.*)".to_owned()));
     }
 
     #[test]
     fn test_resolve_upstream_source_update_script_highest_priority() {
         // update-script takes priority over github-repo and src_url
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
-            src_url: Some("https://github.com/owner/repo/archive/v1.0.0.tar.gz".to_string()),
+            version: "1.0.0".to_owned(),
+            src_url: Some("https://github.com/owner/repo/archive/v1.0.0.tar.gz".to_owned()),
             output_hash: None,
             cargo_hash: None,
             vendor_hash: None,
             npm_deps_hash: None,
             nuget_deps_hash: None,
             composer_deps_hash: None,
-            pname: Some("test-pkg".to_string()),
+            pname: Some("test-pkg".to_owned()),
             description: None,
             homepage: None,
             changelog: None,
@@ -428,9 +428,9 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
-            github_repo: Some("owner/repo".to_string()),
+            github_repo: Some("owner/repo".to_owned()),
             keep: None,
-            update_script: Some("/nix/store/abc-update-script".to_string()),
+            update_script: Some("/nix/store/abc-update-script".to_owned()),
         };
 
         let source = metadata.resolve_upstream_source().unwrap();
@@ -441,15 +441,15 @@ mod tests {
     #[test]
     fn test_resolve_upstream_source_github_repo() {
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
-            src_url: Some("https://go.dev/dl/go1.25.1.src.tar.gz".to_string()),
+            version: "1.0.0".to_owned(),
+            src_url: Some("https://go.dev/dl/go1.25.1.src.tar.gz".to_owned()),
             output_hash: None,
             cargo_hash: None,
             vendor_hash: None,
             npm_deps_hash: None,
             nuget_deps_hash: None,
             composer_deps_hash: None,
-            pname: Some("go".to_string()),
+            pname: Some("go".to_owned()),
             description: None,
             homepage: None,
             changelog: None,
@@ -458,7 +458,7 @@ mod tests {
             include_prereleases: None,
             version_regex: None,
             platform_hashes: None,
-            github_repo: Some("golang/go".to_string()),
+            github_repo: Some("golang/go".to_owned()),
             keep: None,
             update_script: None,
         };
@@ -471,15 +471,15 @@ mod tests {
     #[test]
     fn test_resolve_upstream_source_src_url() {
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
-            src_url: Some("https://github.com/example/repo/archive/v1.0.0.tar.gz".to_string()),
+            version: "1.0.0".to_owned(),
+            src_url: Some("https://github.com/example/repo/archive/v1.0.0.tar.gz".to_owned()),
             output_hash: None,
             cargo_hash: None,
             vendor_hash: None,
             npm_deps_hash: None,
             nuget_deps_hash: None,
             composer_deps_hash: None,
-            pname: Some("example".to_string()),
+            pname: Some("example".to_owned()),
             description: None,
             homepage: None,
             changelog: None,
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn test_resolve_upstream_source_pname_fallback() {
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,
@@ -509,7 +509,7 @@ mod tests {
             npm_deps_hash: None,
             nuget_deps_hash: None,
             composer_deps_hash: None,
-            pname: Some("requests".to_string()),
+            pname: Some("requests".to_owned()),
             description: None,
             homepage: None,
             changelog: None,
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn test_resolve_upstream_source_nothing_available() {
         let metadata = PackageMetadata {
-            version: "1.0.0".to_string(),
+            version: "1.0.0".to_owned(),
             src_url: None,
             output_hash: None,
             cargo_hash: None,

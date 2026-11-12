@@ -572,7 +572,7 @@ fn check_fhs_references(output_name: &str, output_path: &Path) -> Vec<AuditFindi
             let has_shebang = std::fs::File::open(path)
                 .and_then(|mut f| f.read_exact(&mut magic))
                 .is_ok()
-                && magic == [b'#', b'!'];
+                && magic == *b"#!";
             if !has_shebang {
                 continue;
             }
@@ -1077,7 +1077,7 @@ fn check_security_issues(output_name: &str, output_path: &Path) -> Vec<AuditFind
                 .and_then(|mut f| {
                     let mut magic = [0u8; 2];
                     f.read_exact(&mut magic)?;
-                    Ok(magic == [b'#', b'!'])
+                    Ok(magic == *b"#!")
                 })
                 .unwrap_or(false);
 
@@ -1375,7 +1375,7 @@ pub async fn run_audit(
     findings.retain(|f| f.severity >= config.min_severity);
 
     // Sort: errors first, then warnings, then info
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+    findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
