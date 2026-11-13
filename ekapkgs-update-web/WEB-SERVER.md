@@ -237,8 +237,9 @@ other packages.
 - A repository may not be named `default`, because the dashboard uses that
   name for the `''` repository in URLs. The CLI config and the NixOS module
   reject it.
-- ekapkgs packages `elm` only for x86_64-linux. On aarch64-linux the dev
-  shell has no `elm`, so `cargo` builds embed the stub frontend, and the
-  Nix web package cannot be built there.
+- ekapkgs pins `elm` only for x86_64-linux. On aarch64-linux,
+  `nix/overlay.nix` uses the official upstream aarch64 binary instead. That
+  path has been evaluated and exercised under qemu, but not yet built on
+  aarch64 hardware.
 - The portal and the CLI must be built from the same migration set: an
   older portal refuses to start against a database migrated by a newer CLI.
