@@ -96,7 +96,17 @@ group phases =
             in
             case lookup key groups of
                 Just _ ->
-                    ( order, List.map (\( k, ps ) -> if k == key then ( k, p :: ps ) else ( k, ps )) groups )
+                    ( order
+                    , List.map
+                        (\( k, ps ) ->
+                            if k == key then
+                                ( k, p :: ps )
+
+                            else
+                                ( k, ps )
+                        )
+                        groups
+                    )
 
                 Nothing ->
                     ( key :: order, ( key, [ p ] ) :: groups )

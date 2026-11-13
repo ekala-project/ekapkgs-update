@@ -6,8 +6,8 @@ module View exposing
     , chip
     , chips
     , emptyState
-    , filters
     , filterActions
+    , filters
     , hbars
     , logEntry
     , packageLink
