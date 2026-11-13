@@ -256,7 +256,13 @@ impl WatchConfig {
         // Concurrency
         let is_branch_mode = self.commit_strategy == CommitStrategy::Branch;
         let concurrency = if is_branch_mode {
-            self.concurrent_updates.unwrap_or(1)
+            // `run_service` clamps this to 1 (see `updater_concurrency`).
+            let requested = self.concurrent_updates.unwrap_or(1);
+            crate::commands::run::warn_if_branch_concurrency_ignored(
+                self.commit_strategy,
+                requested,
+            );
+            requested
         } else {
             self.concurrent_updates.unwrap_or_else(|| {
                 let cpus = num_cpus::get();

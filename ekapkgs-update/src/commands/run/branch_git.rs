@@ -15,9 +15,10 @@
 //! The package directory itself is always included, preserving the previous
 //! behaviour for files that were dirty before the update.
 //!
-//! Attribution is exact only with concurrency 1 (the branch-mode default);
-//! with concurrent updates, paths dirtied by another in-flight update may be
-//! attributed to whichever update finishes first.
+//! Attribution is exact only because branch mode never runs two updates at
+//! once (`config::updater_concurrency` clamps it to 1). Otherwise a concurrent
+//! update's paths would be committed or reverted by whichever update finished
+//! first.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
