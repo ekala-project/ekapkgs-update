@@ -193,16 +193,24 @@ queryHref ctx overrides =
     Route.withQuery ctx.path params
 
 
-{-| Previous/next links for the current page (`?page=`).
+{-| Previous/next links around `page`: the effective page the server
+reported (it clamps `?page=` to the last page), or the client's own
+clamped page for lists paginated in the browser.
 -}
-pager : Ctx -> { perPage : Int, total : Int } -> Html msg
-pager ctx { perPage, total } =
+pager : Ctx -> { page : Int, perPage : Int, total : Int } -> Html msg
+pager ctx args =
     let
+        perPage =
+            args.perPage
+
+        total =
+            args.total
+
         pages =
             Basics.max 1 ((total + perPage - 1) // perPage)
 
         page =
-            clamp 1 pages (Ctx.queryInt ctx "page" 1)
+            clamp 1 pages args.page
 
         link p =
             Route.withQuery ctx.path (Dict.insert "page" (String.fromInt p) ctx.query)

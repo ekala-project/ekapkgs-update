@@ -24,6 +24,7 @@ type alias Facet =
 type alias Data =
     { sessions : List Api.Session
     , total : Int
+    , page : Int
     , perPage : Int
     , hiddenEmpty : Int
     , facets : List Facet
@@ -32,9 +33,10 @@ type alias Data =
 
 decoder : D.Decoder Data
 decoder =
-    D.map5 Data
+    D.map6 Data
         (D.field "sessions" (D.list Api.session))
         (D.field "total" D.int)
+        (D.field "page" D.int)
         (D.field "per_page" D.int)
         (D.field "hidden_empty" D.int)
         (D.field "facets"
@@ -95,7 +97,7 @@ view ctx data =
 
                             else
                                 [ table ctx data
-                                , View.pager ctx { perPage = data.perPage, total = data.total }
+                                , View.pager ctx { page = data.page, perPage = data.perPage, total = data.total }
                                 ]
                            )
                )

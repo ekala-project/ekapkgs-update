@@ -21,9 +21,10 @@ summary of routes, options and the API.
   everything its page shows, including filter facets and counts.
 - **Lenient input.** Query strings are parsed into a `HashMap` and each
   parameter is validated by hand. An unknown `status`, `sort`, `kind` or
-  `range` falls back to the default, and an out-of-range `page` returns an
-  empty list (the frontend's pager clamps), so a stale bookmark never
-  produces an error.
+  `range` falls back to the default, and an out-of-range `page` is clamped
+  to the last page (`params::clamp_page`; the response's `page` is the
+  effective one, which the frontend displays), so a stale bookmark never
+  produces an error or an empty page.
 
 ## Request flow
 

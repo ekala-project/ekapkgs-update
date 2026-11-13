@@ -402,7 +402,7 @@ packagesPanel ctx i phases =
                             , tbody [] (List.map (packageRow ctx) visible)
                             ]
                         ]
-                    , View.pager ctx { perPage = rollupPerPage, total = total }
+                    , View.pager ctx { page = page, perPage = rollupPerPage, total = total }
                     ]
                )
         )

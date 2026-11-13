@@ -22,6 +22,15 @@ pub fn parse_page(raw: Option<&str>) -> i64 {
         .unwrap_or(1)
 }
 
+/// Clamp a requested page to the last page of `total` rows at `limit` per
+/// page (`max(1, ceil(total / limit))`), so a stale `?page=` lands on the
+/// last page instead of an empty one. An empty result set has one page.
+pub fn clamp_page(page: i64, total: i64, limit: i64) -> i64 {
+    let limit = limit.max(1);
+    let last = ((total.max(0) + limit - 1) / limit).max(1);
+    page.clamp(1, last)
+}
+
 /// Treat empty/whitespace query values as absent.
 pub fn non_empty(raw: Option<&String>) -> Option<String> {
     raw.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
@@ -45,6 +54,19 @@ mod tests {
         assert_eq!(parse_page(Some("0")), 1);
         assert_eq!(parse_page(Some("-4")), 1);
         assert_eq!(parse_page(Some("x")), 1);
+    }
+
+    #[test]
+    fn pages_clamp_to_the_last_page() {
+        assert_eq!(clamp_page(1, 0, 50), 1);
+        assert_eq!(clamp_page(99, 0, 50), 1);
+        assert_eq!(clamp_page(2, 50, 50), 1);
+        assert_eq!(clamp_page(2, 51, 50), 2);
+        assert_eq!(clamp_page(2, 120, 50), 2);
+        assert_eq!(clamp_page(3, 120, 50), 3);
+        assert_eq!(clamp_page(99, 120, 50), 3);
+        assert_eq!(clamp_page(0, 120, 50), 1);
+        assert_eq!(clamp_page(5, 10, 0), 5);
     }
 
     #[test]
