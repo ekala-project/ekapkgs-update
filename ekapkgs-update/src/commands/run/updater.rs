@@ -128,6 +128,48 @@ impl<'a> Attempt<'a> {
         UpdateResult::Failed(error.summary())
     }
 
+    /// Record the outcome of the `pr_creation` phase of a built update.
+    ///
+    /// A PR is only `proposed` once it exists: on success the update is
+    /// recorded together with its PR details. A failed push / PR is recorded
+    /// as a failed update (failure backoff, `failed_version`) so the version
+    /// is retried instead of staying `proposed` without a PR. Returns the
+    /// PR on success, or the [`UpdateResult::Failed`] to report.
+    async fn record_pr_outcome(
+        &self,
+        rebuild_count: Option<usize>,
+        pr: anyhow::Result<(String, i64)>,
+    ) -> Result<(String, i64), UpdateResult> {
+        let attr_path = &self.req.attr_path;
+        match pr {
+            Ok((pr_url, pr_number)) => {
+                self.record_success(rebuild_count).await;
+                if let Err(e) = self
+                    .db
+                    .record_pr_info(self.req.repo(), attr_path, &pr_url, pr_number)
+                    .await
+                {
+                    warn!("{}: Failed to record PR info: {}", attr_path, e);
+                }
+                Ok((pr_url, pr_number))
+            },
+            Err(e) => {
+                let message = format!("{e:#}");
+                warn!("{}: Failed to create PR: {}", attr_path, message);
+                let error = self
+                    .tracker
+                    .last_failure()
+                    .filter(|f| f.phase() == UpdatePhase::PrCreation)
+                    .unwrap_or_else(|| UpdateError::InfrastructureError {
+                        phase: UpdatePhase::PrCreation,
+                        component: "pr".to_owned(),
+                        details: message.clone(),
+                    });
+                Err(self.record_failure(&error, &message).await)
+            },
+        }
+    }
+
     /// Fail the attempt before the update workflow ran (e.g. the package's
     /// file could not be located).
     async fn fail_setup(
@@ -367,12 +409,11 @@ pub(super) async fn perform_update(
                 None
             };
 
-            // Record successful update first (with rebuild count if available)
-            attempt
-                .record_success(rebuild_analysis.as_ref().map(|a| a.rebuild_count))
-                .await;
+            let rebuild_count = rebuild_analysis.as_ref().map(|a| a.rebuild_count);
 
-            // Create PR if configured
+            // Create PR if configured. The update is recorded as successful
+            // once the PR exists; without a PR it is recorded right away.
+            let mut pr_failure = None;
             if let Some(config) = pr_config {
                 // In interactive mode, show PR details and prompt for confirmation
                 let should_create_pr = if interactive {
@@ -419,7 +460,7 @@ pub(super) async fn perform_update(
                             ),
                         )
                         .await;
-                    match pr {
+                    match attempt.record_pr_outcome(rebuild_count, pr).await {
                         Ok((pr_url, pr_number)) => {
                             if tests_failed {
                                 info!(
@@ -430,19 +471,24 @@ pub(super) async fn perform_update(
                                 info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
                             }
                         },
-                        Err(e) => {
-                            warn!("{}: Failed to create PR: {}", attr_path, e);
-                            // Don't fail the update if PR creation fails
-                        },
+                        Err(failed) => pr_failure = Some(failed),
                     }
                 } else {
                     info!("{}: Skipping PR creation (user declined)", attr_path);
+                    attempt.record_success(rebuild_count).await;
                 }
+            } else {
+                attempt.record_success(rebuild_count).await;
             }
 
-            // Clean up the worktree
+            // Clean up the worktree. A PR failure is not preserved: the
+            // build succeeded, so there is nothing for a fix to work on.
             if let Err(e) = cleanup_worktree(&repo_dir, &worktree_path).await {
                 warn!("{}: Failed to clean up worktree: {}", attr_path, e);
+            }
+
+            if let Some(failed) = pr_failure {
+                return Ok(failed);
             }
 
             Ok(UpdateResult::Updated {
@@ -492,9 +538,9 @@ pub(super) async fn perform_update(
                             attr_path
                         );
 
-                        attempt.record_success(None).await;
-
-                        // Create PR if configured
+                        // Create PR if configured (recording success once it
+                        // exists), else record the success right away.
+                        let mut pr_failure = None;
                         if let Some(config) = pr_config {
                             let pr = attempt
                                 .tracker
@@ -516,17 +562,17 @@ pub(super) async fn perform_update(
                                     ),
                                 )
                                 .await;
-                            match pr {
+                            match attempt.record_pr_outcome(None, pr).await {
                                 Ok((pr_url, pr_number)) => {
                                     info!(
                                         "{}: Created PR #{} (Claude-fixed): {}",
                                         attr_path, pr_number, pr_url
                                     );
                                 },
-                                Err(pr_err) => {
-                                    warn!("{}: Failed to create PR: {}", attr_path, pr_err);
-                                },
+                                Err(failed) => pr_failure = Some(failed),
                             }
+                        } else {
+                            attempt.record_success(None).await;
                         }
 
                         // Clean up the worktree
@@ -536,6 +582,10 @@ pub(super) async fn perform_update(
                                 "{}: Failed to clean up worktree: {}",
                                 attr_path, cleanup_err
                             );
+                        }
+
+                        if let Some(failed) = pr_failure {
+                            return Ok(failed);
                         }
 
                         return Ok(UpdateResult::Updated {
@@ -954,6 +1004,7 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
 /// Create a pull request for a successful update
 ///
 /// `eval_entry_point` is the worktree's entry point (the updated tree).
+/// Returns the PR URL and number; recording them is up to the caller.
 async fn create_pr_for_update(
     db: &Database,
     repo_name: &str,
@@ -1178,10 +1229,7 @@ async fn create_pr_for_update(
     )
     .await?;
 
-    // Record PR info in database
-    db.record_pr_info(repo_name, attr_path, &pr.html_url, pr.number)
-        .await?;
-
+    // The caller records the PR (`Attempt::record_pr_outcome`).
     Ok((pr.html_url, pr.number))
 }
 
@@ -1272,6 +1320,7 @@ async fn prompt_for_pr_confirmation(
 mod tests {
     use super::*;
     use crate::commands::run::branch_git::DirtySnapshot;
+    use crate::database::{SessionMode, UpdateStatus};
 
     fn git(root: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
@@ -1384,5 +1433,88 @@ mod tests {
             },
             other => panic!("expected Skipped, got {other:?}"),
         }
+    }
+
+    async fn setup_db() -> Database {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        Database::from(pool)
+    }
+
+    fn request() -> UpdateRequest {
+        UpdateRequest {
+            attr_path: "hello".to_owned(),
+            drv_path: None,
+            current_version: "1.2".to_owned(),
+            new_version: "1.3".to_owned(),
+            repo_name: None,
+            eval_entry_point: None,
+            pr_config: None,
+            fork: None,
+        }
+    }
+
+    async fn pr_columns(db: &Database) -> (Option<String>, Option<i64>) {
+        sqlx::query_as("SELECT pr_url, pr_number FROM updates WHERE attr_path = 'hello'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn created_pr_is_recorded_as_proposed() {
+        let db = setup_db().await;
+        let session = db.create_session(SessionMode::Run, None).await.unwrap();
+        let req = request();
+        let attempt = Attempt::new(&db, &session, &req);
+
+        let pr = attempt
+            .record_pr_outcome(Some(3), Ok(("https://pr/7".to_owned(), 7)))
+            .await;
+        assert!(pr.is_ok());
+
+        let record = db.get_update_record("", "hello").await.unwrap().unwrap();
+        assert_eq!(record.status, UpdateStatus::Proposed);
+        assert_eq!(record.proposed_version.as_deref(), Some("1.3"));
+        assert_eq!(
+            pr_columns(&db).await,
+            (Some("https://pr/7".to_owned()), Some(7))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_pr_is_recorded_as_failed_update() {
+        let db = setup_db().await;
+        let session = db.create_session(SessionMode::Run, None).await.unwrap();
+        let req = request();
+        let attempt = Attempt::new(&db, &session, &req);
+
+        for expected_failures in 1..=2 {
+            let pr = attempt
+                .tracker
+                .run(UpdatePhase::PrCreation, async {
+                    Err::<(String, i64), _>(anyhow::anyhow!("git push failed: rate limited"))
+                })
+                .await;
+            let result = attempt.record_pr_outcome(None, pr).await;
+            assert!(matches!(result, Err(UpdateResult::Failed(_))));
+
+            let record = db.get_update_record("", "hello").await.unwrap().unwrap();
+            assert_eq!(record.status, UpdateStatus::Failed);
+            assert_eq!(record.failed_version.as_deref(), Some("1.3"));
+            assert_eq!(record.proposed_version, None);
+            // Repeated PR failures escalate the failure backoff.
+            assert_eq!(record.failure_count, expected_failures);
+            assert!(record.in_backoff(chrono::Utc::now()));
+            assert!(
+                record
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("pr_creation")),
+                "{:?}",
+                record.last_error
+            );
+        }
+        assert_eq!(pr_columns(&db).await, (None, None));
     }
 }

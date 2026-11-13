@@ -303,7 +303,7 @@ When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can
 - `pending`: indexed, not yet compared
 - `up_to_date`
 - `outdated`: newer compatible release, not proposed
-- `proposed`: built and proposed; becomes `up_to_date` when `current_version` catches up
+- `proposed`: built and proposed (with PRs requested: only once the PR exists — a push/PR failure is recorded via `record_failed_update` with phase `pr_creation`); becomes `up_to_date` when `current_version` catches up
 - `failed`
 - `upstream_error`
 
