@@ -32,7 +32,8 @@ day =
 suite : Test
 suite =
     describe "Format"
-        [ cases "parseTs" (Format.parseTs >> Maybe.map Time.posixToMillis)
+        [ cases "parseTs"
+            (Format.parseTs >> Maybe.map Time.posixToMillis)
             [ ( "1970-01-01T00:00:00Z", Just 0 )
             , ( "1969-12-31T23:59:59Z", Just -1000 )
             , ( "1900-01-01T00:00:00Z", Just -2208988800000 )
@@ -62,7 +63,8 @@ suite =
             , ( "2026-11-11T08:40:12 UTC", Nothing )
             , ( "2026-11-11T08:40:1xZ", Nothing )
             ]
-        , cases "relative (seconds ago)" (\s -> Format.relative (at base) (secondsBefore s))
+        , cases "relative (seconds ago)"
+            (\s -> Format.relative (at base) (secondsBefore s))
             [ ( 0, "just now" )
             , ( 44, "just now" )
             , ( 45, "1m ago" )
@@ -83,25 +85,29 @@ suite =
             , ( -120, "in 2m" )
             , ( -3 * day, "in 3d" )
             ]
-        , cases "dayKey" (Format.parseTs >> Maybe.map Format.dayKey)
+        , cases "dayKey"
+            (Format.parseTs >> Maybe.map Format.dayKey)
             [ ( "2026-11-03T08:40:12Z", Just "2026-11-03" )
             , ( "2026-11-03T23:30:00-02:00", Just "2026-11-04" )
             , ( "2026-01-01T00:30:00+01:00", Just "2025-12-31" )
             ]
-        , cases "monthDay" (Format.parseTs >> Maybe.map Format.monthDay)
+        , cases "monthDay"
+            (Format.parseTs >> Maybe.map Format.monthDay)
             [ ( "2026-11-03T08:40:12Z", Just "Nov 3" )
             , ( "2024-02-29T00:00:00Z", Just "Feb 29" )
             , ( "2026-12-31T23:59:59Z", Just "Dec 31" )
             ]
         , test "absolute" <|
             \_ -> Expect.equal "2026-11-11 08:40:12 UTC" (Format.absolute (at base))
-        , cases "addDays" (\n -> Format.dayKey (Format.addDays n (at base)))
+        , cases "addDays"
+            (\n -> Format.dayKey (Format.addDays n (at base)))
             [ ( 0, "2026-11-11" )
             , ( 1, "2026-11-12" )
             , ( -11, "2026-10-31" )
             , ( 51, "2027-01-01" )
             ]
-        , cases "durationMs" Format.durationMs
+        , cases "durationMs"
+            Format.durationMs
             [ ( -1, "—" )
             , ( 0, "0ms" )
             , ( 850, "850ms" )
@@ -120,11 +126,13 @@ suite =
             , ( 86400000, "1d 0h" )
             , ( (3 * 24 + 4) * 3600000, "3d 4h" )
             ]
-        , cases "durationOpt" Format.durationOpt
+        , cases "durationOpt"
+            Format.durationOpt
             [ ( Nothing, "—" )
             , ( Just 850, "850ms" )
             ]
-        , cases "elapsedMs (start, end)" (\( start, end ) -> Format.elapsedMs (at (base + 7000)) start end)
+        , cases "elapsedMs (start, end)"
+            (\( start, end ) -> Format.elapsedMs (at (base + 7000)) start end)
             [ ( ( "2026-11-11T08:40:12Z", Just "2026-11-11T08:40:17Z" ), Just 5000 )
             , ( ( "2026-11-11T08:40:12Z", Nothing ), Just 7000 )
             , ( ( "2026-11-11T08:40:12Z", Just "2026-11-11T08:40:10Z" ), Just 0 )
@@ -132,7 +140,8 @@ suite =
             , ( ( "garbage", Nothing ), Nothing )
             , ( ( "2026-11-11T08:40:12Z", Just "garbage" ), Nothing )
             ]
-        , cases "thousands" Format.thousands
+        , cases "thousands"
+            Format.thousands
             [ ( 0, "0" )
             , ( 7, "7" )
             , ( 999, "999" )
@@ -144,7 +153,8 @@ suite =
             , ( -1234, "-1,234" )
             , ( -1234567, "-1,234,567" )
             ]
-        , cases "compact" Format.compact
+        , cases "compact"
+            Format.compact
             [ ( 0, "0" )
             , ( 9999, "9,999" )
             , ( 10000, "10.0K" )
@@ -159,7 +169,8 @@ suite =
             , ( -15000, "-15.0K" )
             , ( -999950, "-1.0M" )
             ]
-        , cases "bytes" Format.bytes
+        , cases "bytes"
+            Format.bytes
             [ ( 0, "0 B" )
             , ( 812, "812 B" )
             , ( 1023, "1023 B" )
@@ -172,7 +183,8 @@ suite =
             , ( 1363149, "1.3 MB" )
             , ( 5 * 1024 * 1024 * 1024, "5120.0 MB" )
             ]
-        , cases "fixed1" Format.fixed1
+        , cases "fixed1"
+            Format.fixed1
             [ ( 0, "0.0" )
             , ( 4.25, "4.3" )
             , ( 4.24, "4.2" )
@@ -181,19 +193,22 @@ suite =
             , ( -0.04, "0.0" )
             , ( -1.25, "-1.3" )
             ]
-        , cases "ratioPct" (\( num, den ) -> Format.ratioPct num den)
+        , cases "ratioPct"
+            (\( num, den ) -> Format.ratioPct num den)
             [ ( ( 1, 4 ), Just 25 )
             , ( ( 0, 5 ), Just 0 )
             , ( ( 3, 3 ), Just 100 )
             , ( ( 1, 0 ), Nothing )
             , ( ( 1, -1 ), Nothing )
             ]
-        , cases "pct" Format.pct
+        , cases "pct"
+            Format.pct
             [ ( Just 42, "42.0%" )
             , ( Just 66.666, "66.7%" )
             , ( Nothing, "—" )
             ]
-        , cases "cssPct" (\( num, den ) -> Format.cssPct num den)
+        , cases "cssPct"
+            (\( num, den ) -> Format.cssPct num den)
             [ ( ( 1, 3 ), "33.33%" )
             , ( ( 1, 8 ), "12.50%" )
             , ( ( 0, 10 ), "0.00%" )
@@ -203,7 +218,8 @@ suite =
             , ( ( 5, 0 ), "0%" )
             , ( ( 5, -1 ), "0%" )
             ]
-        , cases "safeUrl" Format.safeUrl
+        , cases "safeUrl"
+            Format.safeUrl
             [ ( Just "https://example.com/a?b=c", Just "https://example.com/a?b=c" )
             , ( Just "http://example.com", Just "http://example.com" )
             , ( Just "  https://example.com  ", Just "https://example.com" )
@@ -220,7 +236,8 @@ suite =
             , ( Just "", Nothing )
             , ( Nothing, Nothing )
             ]
-        , cases "upstreamUrl (kind, key, instance)" (\( kind, key, instance ) -> Format.upstreamUrl kind key instance)
+        , cases "upstreamUrl (kind, key, instance)"
+            (\( kind, key, instance ) -> Format.upstreamUrl kind key instance)
             [ ( ( "github", "NixOS/nix", Nothing ), Just "https://github.com/NixOS/nix/releases" )
             , ( ( "gitlab", "inkscape/inkscape", Nothing ), Just "https://gitlab.com/inkscape/inkscape/-/tags" )
             , ( ( "gitlab", "group/project", Just "" ), Just "https://gitlab.com/group/project/-/tags" )
@@ -232,14 +249,16 @@ suite =
             , ( ( "directory", "javascript:alert(1)", Nothing ), Nothing )
             , ( ( "cpan", "Foo-Bar", Nothing ), Nothing )
             ]
-        , cases "humanize" Format.humanize
+        , cases "humanize"
+            Format.humanize
             [ ( "up_to_date", "up to date" )
             , ( "upstream_error", "upstream error" )
             , ( "build", "build" )
             , ( "", "" )
             , ( "_x_", " x " )
             ]
-        , cases "truncate (max, s)" (\( max, s ) -> Format.truncate max s)
+        , cases "truncate (max, s)"
+            (\( max, s ) -> Format.truncate max s)
             [ ( ( 5, "hello" ), "hello" )
             , ( ( 10, "hello" ), "hello" )
             , ( ( 4, "hello" ), "hel…" )
@@ -247,7 +266,8 @@ suite =
             , ( ( 3, "" ), "" )
             , ( ( 3, "héllo" ), "hé…" )
             ]
-        , cases "shortVersion" Format.shortVersion
+        , cases "shortVersion"
+            Format.shortVersion
             [ ( "1.2.3", "1.2.3" )
             , ( "deadbeef", "deadbeef" )
             , ( "0123456789abcdef", "0123456789" )
@@ -257,27 +277,32 @@ suite =
             ]
         , test "shortId" <| \_ -> Expect.equal "1b9d6bcd" (Format.shortId "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed")
         , test "shortSha" <| \_ -> Expect.equal "0123456789" (Format.shortSha "0123456789abcdef")
-        , cases "prettyJson" Format.prettyJson
+        , cases "prettyJson"
+            Format.prettyJson
             [ ( "{\"a\":1,\"b\":[true,null]}", "{\n  \"a\": 1,\n  \"b\": [\n    true,\n    null\n  ]\n}" )
             , ( "not json", "not json" )
             , ( "", "" )
             ]
-        , cases "href (path, pairs)" (\( path, pairs ) -> Format.href path pairs)
+        , cases "href (path, pairs)"
+            (\( path, pairs ) -> Format.href path pairs)
             [ ( ( "/packages", [] ), "/packages" )
             , ( ( "/packages", [ ( "status", "" ) ] ), "/packages" )
             , ( ( "/packages", [ ( "q", "a b&c" ), ( "status", "" ), ( "page", "2" ) ] ), "/packages?q=a%20b%26c&page=2" )
             ]
-        , cases "packageHref (repo, attr)" (\( repo, attr ) -> Format.packageHref repo attr)
+        , cases "packageHref (repo, attr)"
+            (\( repo, attr ) -> Format.packageHref repo attr)
             [ ( ( "", "python3Packages.requests" ), "/packages/python3Packages.requests?repo=default" )
             , ( ( "corepkgs", "foo bar" ), "/packages/foo%20bar?repo=corepkgs" )
             , ( ( "corepkgs", "a/b#c" ), "/packages/a%2Fb%23c?repo=corepkgs" )
             ]
         , test "sessionHref" <| \_ -> Expect.equal "/sessions/abc-123" (Format.sessionHref "abc-123")
-        , cases "repoLabel" Format.repoLabel
+        , cases "repoLabel"
+            Format.repoLabel
             [ ( "", "default" )
             , ( "corepkgs", "corepkgs" )
             ]
-        , cases "repoParam" Format.repoParam
+        , cases "repoParam"
+            Format.repoParam
             [ ( "", "default" )
             , ( "corepkgs", "corepkgs" )
             ]
@@ -309,12 +334,14 @@ suite =
             , ( "pending", "neutral" )
             , ( "something_new", "neutral" )
             ]
-        , cases "statusBadge" Format.statusBadge
+        , cases "statusBadge"
+            Format.statusBadge
             [ ( "up_to_date", { label = "up to date", tone = "good" } )
             , ( "build_failed", { label = "build failed", tone = "critical" } )
             , ( "pending", { label = "pending", tone = "neutral" } )
             ]
-        , cases "packageBadge (status, backlog)" (\( status, backlog ) -> Format.packageBadge status backlog)
+        , cases "packageBadge (status, backlog)"
+            (\( status, backlog ) -> Format.packageBadge status backlog)
             [ ( ( "outdated", True ), { label = "outdated · backlog", tone = "warn" } )
             , ( ( "outdated", False ), { label = "outdated", tone = "warn" } )
             , ( ( "failed", False ), { label = "failed", tone = "critical" } )
@@ -322,13 +349,15 @@ suite =
         , test "phaseRank follows the workflow order" <|
             \_ ->
                 Expect.equal (List.range 0 (List.length Format.phases - 1)) (List.map Format.phaseRank Format.phases)
-        , cases "phaseRank" Format.phaseRank
+        , cases "phaseRank"
+            Format.phaseRank
             [ ( "metadata_extraction", 0 )
             , ( "build", 5 )
             , ( "pr_creation", 9 )
             , ( "unknown_phase", 10 )
             ]
-        , cases "phaseShort" Format.phaseShort
+        , cases "phaseShort"
+            Format.phaseShort
             [ ( "metadata_extraction", "metadata" )
             , ( "source_discovery", "discovery" )
             , ( "version_selection", "version" )

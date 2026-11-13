@@ -16,7 +16,8 @@ routeOf path =
 suite : Test
 suite =
     describe "Route"
-        [ cases "fromUrl" routeOf
+        [ cases "fromUrl"
+            routeOf
             [ ( "/", Just Dashboard )
             , ( "", Just Dashboard )
             , ( "/?repo=corepkgs", Just Dashboard )
@@ -44,7 +45,8 @@ suite =
             , ( "/static/css/styles.css", Just NotFound )
             , ( "/Packages", Just NotFound )
             ]
-        , cases "apiUrl (route, query)" (\( route, query ) -> Route.apiUrl route query)
+        , cases "apiUrl (route, query)"
+            (\( route, query ) -> Route.apiUrl route query)
             [ ( ( Dashboard, Nothing ), Just "/api/dashboard" )
             , ( ( Dashboard, Just "repo=corepkgs" ), Just "/api/dashboard?repo=corepkgs" )
             , ( ( Packages, Just "" ), Just "/api/packages" )
@@ -64,7 +66,8 @@ suite =
             \_ ->
                 Expect.equal (Just (Just "/api/packages/a%2Fb%20c"))
                     (routeOf "/packages/a%2Fb%20c" |> Maybe.map (\r -> Route.apiUrl r Nothing))
-        , cases "samePage" (\( a, b ) -> Route.samePage a b)
+        , cases "samePage"
+            (\( a, b ) -> Route.samePage a b)
             [ ( ( Dashboard, Dashboard ), True )
             , ( ( Dashboard, Packages ), False )
             , ( ( Package "a", Package "a" ), True )
@@ -74,7 +77,8 @@ suite =
             , ( ( Package "x", Session "x" ), False )
             , ( ( NotFound, NotFound ), True )
             ]
-        , cases "parseQuery" (Route.parseQuery >> Dict.toList)
+        , cases "parseQuery"
+            (Route.parseQuery >> Dict.toList)
             [ ( Nothing, [] )
             , ( Just "", [] )
             , ( Just "a=1&b=x+y", [ ( "a", "1" ), ( "b", "x y" ) ] )
@@ -89,7 +93,8 @@ suite =
             , ( Just "q=50%", [ ( "q", "50%" ) ] )
             , ( Just "q=a+100%", [ ( "q", "a 100%" ) ] )
             ]
-        , cases "withQuery (path, pairs)" (\( path, pairs ) -> Route.withQuery path (Dict.fromList pairs))
+        , cases "withQuery (path, pairs)"
+            (\( path, pairs ) -> Route.withQuery path (Dict.fromList pairs))
             [ ( ( "/packages", [] ), "/packages" )
             , ( ( "/packages", [ ( "status", "" ) ] ), "/packages" )
             , ( ( "/packages", [ ( "q", "a b" ), ( "page", "2" ), ( "status", "" ) ] ), "/packages?page=2&q=a%20b" )
