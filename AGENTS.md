@@ -180,7 +180,7 @@ Progress (`packages_evaluated`, `packages_backoff`) is written to the session ev
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
 3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update`. It always runs one update at a time (`updater_concurrency`, with a warning if `--concurrent-updates` asked for more), serializes git operations via `Arc<Mutex<()>>`, and has no PR support
-5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup failed or rebuild limit) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
+5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup or branch-mode working-tree snapshot failed, or rebuild limit; the `updates` row is left untouched so the next poll/run retries) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
 6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
 
 ### Update Workflow (`commands/update/mod.rs`)
