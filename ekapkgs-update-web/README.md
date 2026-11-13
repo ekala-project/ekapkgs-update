@@ -11,7 +11,9 @@ trends over time. Pages update live while the CLI works.
 - **Live updates:** one WebSocket per tab that signals "something changed";
   the app re-fetches the current page's JSON
 - **Assets:** CSS, the compiled `elm.js` and `app.js` embedded with
-  `include_str!`, so the binary is self-contained
+  `include_str!`, so the binary is self-contained. The Nix build minifies
+  `elm.js` with uglify-js, and every response (assets and JSON) is
+  gzip-compressed when the client accepts it
 
 The dashboard never writes update state. On startup, `Database::new` creates
 the database file if it is missing and applies the CLI's migrations, so the
@@ -116,9 +118,9 @@ ekapkgs-update-web/
 │   ├── state.rs         # AppState (wraps Database)
 │   ├── error.rs         # AppError → JSON 404/500
 │   ├── params.rs        # Query-parameter helpers (repo labels, pages, ratios)
-│   ├── assets.rs        # App shell, embedded static files, ETag + Cache-Control
+│   ├── assets.rs        # App shell, embedded static files, weak ETag + Cache-Control
 │   ├── queries/         # Raw sqlx reads, one module per area (+ live fingerprint)
-│   └── routes/          # Page routes (shell), JSON API, WebSocket; tests.rs
+│   └── routes/          # Page routes (shell), JSON API, WebSocket, compression; tests.rs
 └── static/              # css/styles.css, js/app.js (elm.js comes from build.rs)
 ```
 

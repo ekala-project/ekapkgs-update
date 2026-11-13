@@ -5,6 +5,12 @@
 //! from the JSON API under `/api`. Unknown `/api` paths are JSON 404s;
 //! any other unknown path returns the shell with status 404, which the app
 //! renders as its "not found" page.
+//!
+//! Responses are gzip-compressed (when `Accept-Encoding` allows) by a
+//! [`CompressionLayer`] that is part of [`router`], so the tests exercise
+//! it too. Brotli is not enabled: at tower-http's default quality it came
+//! out larger than gzip for `elm.js`, and browsers prefer it when offered. Bodies under 32 bytes, 304s and the `/ws/live` upgrade (empty
+//! bodies) pass through unchanged.
 
 pub mod api;
 pub mod ws;
@@ -18,6 +24,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
+use tower_http::compression::CompressionLayer;
 
 use crate::assets;
 use crate::params::non_empty;
@@ -86,4 +93,5 @@ pub fn router(state: AppState) -> Router {
         .route("/static/*path", get(assets::serve))
         .fallback(fallback)
         .with_state(state)
+        .layer(CompressionLayer::new())
 }

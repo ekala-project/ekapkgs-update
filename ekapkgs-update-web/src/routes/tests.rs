@@ -856,6 +856,92 @@ async fn static_assets_are_embedded_and_cacheable() {
     }
 }
 
+/// GET `uri` with `Accept-Encoding: <encoding>`, returning the status,
+/// headers and raw (still encoded) body.
+async fn get_encoded(app: &Router, uri: &str, encoding: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::ACCEPT_ENCODING, encoding)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn responses_are_compressed_when_accepted() {
+    let app = seeded_app().await;
+    for uri in ["/static/js/elm.js", "/api/dashboard", "/packages"] {
+        let plain = get(&app, uri).await;
+        assert!(
+            !plain.headers.contains_key(header::CONTENT_ENCODING),
+            "{uri}"
+        );
+
+        for encoding in ["gzip", "br, gzip"] {
+            let (status, headers, body) = get_encoded(&app, uri, encoding).await;
+            assert_eq!(status, StatusCode::OK, "{uri} {encoding}");
+            assert_eq!(headers[header::CONTENT_ENCODING], "gzip", "{uri}");
+            assert!(
+                headers[header::VARY]
+                    .to_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("accept-encoding"),
+                "{uri}"
+            );
+            assert!(!body.is_empty(), "{uri} {encoding}");
+            if uri == "/static/js/elm.js" {
+                assert!(
+                    body.len() * 2 < plain.body.len(),
+                    "{uri} {encoding}: {} of {} bytes",
+                    body.len(),
+                    plain.body.len()
+                );
+            }
+        }
+    }
+
+    // A gzipped elm.js has the gzip magic number, and revalidating it with
+    // its (weak) ETag still yields an empty 304.
+    let (_, headers, body) = get_encoded(&app, "/static/js/elm.js", "gzip").await;
+    assert_eq!(&body[..2], &[0x1f, 0x8b]);
+    let etag = headers[header::ETAG].to_str().unwrap().to_owned();
+    assert!(etag.starts_with("W/\""), "{etag}");
+    let revalidated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/static/js/elm.js")
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert!(!revalidated.headers().contains_key(header::CONTENT_ENCODING));
+    let strong = send(
+        &app,
+        Request::builder()
+            .uri("/static/js/elm.js")
+            .header(header::IF_NONE_MATCH, etag.trim_start_matches("W/"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(strong.status, StatusCode::NOT_MODIFIED);
+}
+
 // ── Live channel ────────────────────────────────────────────────────────
 
 #[tokio::test]
