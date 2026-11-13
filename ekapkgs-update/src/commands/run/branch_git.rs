@@ -12,15 +12,20 @@
 //! commit on success, restored or deleted on failure. Paths that were already
 //! dirty beforehand (e.g. the user's own uncommitted work) are left alone.
 //!
-//! The package directory itself is always included, preserving the previous
-//! behaviour for files that were dirty before the update.
+//! Staging always includes the package directory, preserving the previous
+//! behaviour for files there that were dirty before the update. Reverting
+//! never touches a path that was dirty before the update, inside the package
+//! directory or not: its index and worktree state are left exactly as the
+//! update left them. If the update also modified such a path, its changes
+//! cannot be separated from the user's, so the path is left as is and a
+//! warning is logged.
 //!
 //! Attribution is exact only because branch mode never runs two updates at
 //! once (`config::updater_concurrency` clamps it to 1). Otherwise a concurrent
 //! update's paths would be committed or reverted by whichever update finished
 //! first.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -40,7 +45,18 @@ pub(super) struct DirtyEntry {
 #[derive(Debug, Clone)]
 pub(super) struct DirtySnapshot {
     root: PathBuf,
-    baseline: HashSet<String>,
+    /// Paths dirty at snapshot time, with a cheap fingerprint of their
+    /// worktree state used to detect whether the update also touched them.
+    baseline: HashMap<String, Option<Fingerprint>>,
+}
+
+/// Size and modification time of a worktree path (`None` if it is absent).
+type Fingerprint = (u64, Option<std::time::SystemTime>);
+
+fn fingerprint(path: &Path) -> Option<Fingerprint> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
 }
 
 /// Parse `git status --porcelain=v1 -z --untracked-files=all` output.
@@ -120,7 +136,10 @@ impl DirtySnapshot {
         let baseline = dirty_entries(&root)
             .await?
             .into_iter()
-            .map(|e| e.path)
+            .map(|e| {
+                let fp = fingerprint(&root.join(&e.path));
+                (e.path, fp)
+            })
             .collect();
         Ok(Self { root, baseline })
     }
@@ -130,7 +149,7 @@ impl DirtySnapshot {
         Ok(dirty_entries(&self.root)
             .await?
             .into_iter()
-            .filter(|e| !self.baseline.contains(&e.path))
+            .filter(|e| !self.baseline.contains_key(&e.path))
             .collect())
     }
 
@@ -164,35 +183,51 @@ impl DirtySnapshot {
         }
     }
 
-    /// Restore the package directory and every path dirtied since the
-    /// snapshot, deleting files that did not exist before.
+    /// Restore every path dirtied since the snapshot (in `pkg_dir` or
+    /// elsewhere), deleting files that did not exist before. Paths that were
+    /// already dirty at snapshot time are never touched; if the update changed
+    /// one of them too, a warning is logged and it is left as is.
     pub(super) async fn revert(&self, attr_path: &str, pkg_dir: &str) {
         let introduced = match self.introduced().await {
             Ok(entries) => entries,
             Err(e) => {
-                warn!("{}: {:#}; reverting only {}", attr_path, e, pkg_dir);
-                Vec::new()
+                warn!(
+                    "{}: {:#}; not reverting, {} may hold partial changes",
+                    attr_path, e, pkg_dir
+                );
+                return;
             },
         };
+
+        for (path, before) in &self.baseline {
+            if fingerprint(&self.root.join(path)) != *before {
+                warn!(
+                    "{}: {} had uncommitted changes before the update and was \
+                     modified again; leaving it as is",
+                    attr_path, path
+                );
+            }
+        }
 
         let (new_files, modified): (Vec<_>, Vec<_>) =
             introduced.into_iter().partition(|e| e.new_file);
 
         // Restore modified/deleted tracked files to HEAD (index and worktree).
-        let mut restore: Vec<&str> = vec![pkg_dir];
-        restore.extend(modified.iter().map(|e| e.path.as_str()));
-        let mut args = vec!["checkout", "HEAD", "--"];
-        args.extend(&restore);
-        match git(&self.root, &args).await {
-            Ok(output) if !output.status.success() => {
-                warn!(
-                    "{}: Failed to revert changes: {}",
-                    attr_path,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            },
-            Err(e) => warn!("{}: Failed to run git checkout: {:#}", attr_path, e),
-            Ok(_) => {},
+        // They were clean at snapshot time, so HEAD is their prior state.
+        if !modified.is_empty() {
+            let mut args = vec!["checkout", "HEAD", "--"];
+            args.extend(modified.iter().map(|e| e.path.as_str()));
+            match git(&self.root, &args).await {
+                Ok(output) if !output.status.success() => {
+                    warn!(
+                        "{}: Failed to revert changes: {}",
+                        attr_path,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                },
+                Err(e) => warn!("{}: Failed to run git checkout: {:#}", attr_path, e),
+                Ok(_) => {},
+            }
         }
 
         // Delete files the update created, then prune directories it left empty.
@@ -226,11 +261,10 @@ impl DirtySnapshot {
 
         if !new_files.is_empty() || !modified.is_empty() {
             debug!(
-                "{}: Reverted {} modified and removed {} new path(s) outside {}",
+                "{}: Reverted {} modified and removed {} new path(s)",
                 attr_path,
                 modified.len(),
-                new_files.len(),
-                pkg_dir
+                new_files.len()
             );
         }
     }
@@ -331,6 +365,54 @@ mod tests {
         assert!(!root.join("pkgs/newdep").exists());
         assert_eq!(read("user.lock"), "user edit");
         assert_eq!(read("user-notes.txt"), "mine");
+    }
+
+    async fn status_of(root: &Path, path: &str) -> String {
+        let out = git(root, &["status", "--porcelain=v1", "--", path])
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim_end().to_owned()
+    }
+
+    #[tokio::test]
+    async fn test_revert_keeps_preexisting_changes_in_pkg_dir() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let pkg_dir = root.join("pkgs/foo");
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+
+        // Committed files in the package dir, then the user's own work there.
+        std::fs::write(pkg_dir.join("staged.nix"), "orig").unwrap();
+        std::fs::write(pkg_dir.join("unstaged.nix"), "orig").unwrap();
+        std::fs::write(pkg_dir.join("clean.nix"), "orig").unwrap();
+        sh(&root, &["add", "-A", "pkgs/foo"]).await;
+        sh(&root, &["commit", "-q", "-m", "more"]).await;
+        std::fs::write(pkg_dir.join("staged.nix"), "user staged").unwrap();
+        sh(&root, &["add", "pkgs/foo/staged.nix"]).await;
+        std::fs::write(pkg_dir.join("unstaged.nix"), "user unstaged").unwrap();
+        std::fs::write(pkg_dir.join("user-untracked.txt"), "mine").unwrap();
+
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        // The update modifies a clean file and creates a new one.
+        std::fs::write(pkg_dir.join("clean.nix"), "updated").unwrap();
+        std::fs::write(pkg_dir.join("created.nix"), "new").unwrap();
+
+        snapshot.revert("foo", &pkg_dir.to_string_lossy()).await;
+
+        assert_eq!(read("pkgs/foo/staged.nix"), "user staged");
+        assert_eq!(
+            status_of(&root, "pkgs/foo/staged.nix").await,
+            "M  pkgs/foo/staged.nix"
+        );
+        assert_eq!(read("pkgs/foo/unstaged.nix"), "user unstaged");
+        assert_eq!(
+            status_of(&root, "pkgs/foo/unstaged.nix").await,
+            " M pkgs/foo/unstaged.nix"
+        );
+        assert_eq!(read("pkgs/foo/user-untracked.txt"), "mine");
+        assert_eq!(read("pkgs/foo/clean.nix"), "orig");
+        assert_eq!(status_of(&root, "pkgs/foo/clean.nix").await, "");
+        assert!(!pkg_dir.join("created.nix").exists());
     }
 
     #[tokio::test]
