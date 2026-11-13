@@ -132,7 +132,9 @@ nix develop --command cargo clippy -p ekapkgs-update-web --all-targets
 ```
 
 `build.rs` runs `elm make --optimize` whenever a file under `frontend/`
-changes. `elm` comes from the dev shell (x86_64-linux only). An Elm compile
+changes. `elm` comes from the dev shell on x86_64-linux and
+aarch64-linux (the aarch64 binary is the official elm release, added in
+`nix/overlay.nix` because ekapkgs only pins the x86_64 one). An Elm compile
 error fails the build. If `elm` is not on `PATH`, the build still succeeds:
 it prints a `cargo:warning` and embeds a stub `elm.js` that only shows a
 "frontend not built" notice linking to `/api/dashboard`. The API and the
