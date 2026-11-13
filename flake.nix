@@ -22,8 +22,8 @@
           default = pkgs.ekapkgs-update;
           inherit (pkgs) ekapkgs-update;
         }
-        # The dashboard's Elm frontend needs elm, which ekapkgs only packages
-        # for x86_64-linux.
+        # The dashboard's Elm frontend needs elm: ekapkgs' binary on
+        # x86_64-linux, the overlay's upstream binary on aarch64-linux.
         // pkgs.lib.optionalAttrs (pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.elm) {
           inherit (pkgs) ekapkgs-update-web ekapkgs-update-web-frontend;
         };
@@ -51,8 +51,8 @@
               # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
             ]
             # The web dashboard's Elm frontend (built by ekapkgs-update-web's
-            # build.rs) and its test runner (jq, qjs). ekapkgs only packages
-            # elm for x86_64-linux.
+            # build.rs) and its test runner (jq, qjs). Available on x86_64-linux
+            # and aarch64-linux (see nix/overlay.nix).
             ++ lib.optionals (lib.meta.availableOn stdenv.hostPlatform elm) [
               elm
               jq
