@@ -58,11 +58,19 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+/// Each asset's strong entity tag (`"…"`, the hex FNV-1a of its body), in
+/// [`ASSETS`] order. The content is fixed for the binary's lifetime, so it is
+/// hashed once rather than on every request.
+static TAGS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    ASSETS
+        .iter()
+        .map(|a| format!("\"{:016x}\"", fnv1a(a.body.as_bytes())))
+        .collect()
+});
+
 /// Combined hash of every asset, appended to asset URLs as `?v=`.
 static VERSION: LazyLock<String> = LazyLock::new(|| {
-    let combined = ASSETS.iter().fold(String::new(), |acc, a| {
-        format!("{acc}{:016x}", fnv1a(a.body.as_bytes()))
-    });
+    let combined: String = TAGS.iter().map(|t| t.trim_matches('"')).collect();
     format!("{:012x}", fnv1a(combined.as_bytes()) & 0xffff_ffff_ffff)
 });
 
@@ -103,14 +111,13 @@ pub fn index_response(status: StatusCode) -> Response {
 
 /// `GET /static/*path`
 pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
-    let Some(asset) = ASSETS.iter().find(|a| a.path == path) else {
+    let Some((asset, tag)) = ASSETS.iter().zip(TAGS.iter()).find(|(a, _)| a.path == path) else {
         return (
             StatusCode::NOT_FOUND,
             format!("No static asset named “{path}”."),
         )
             .into_response();
     };
-    let tag = format!("\"{:016x}\"", fnv1a(asset.body.as_bytes()));
     let etag = format!("W/{tag}");
 
     // Weak comparison (RFC 9110 §13.1.2): `W/` prefixes are ignored.
@@ -120,7 +127,7 @@ pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
         .is_some_and(|v| {
             v.split(',').any(|t| {
                 let t = t.trim();
-                t == "*" || t.strip_prefix("W/").unwrap_or(t) == tag
+                t == "*" || t.strip_prefix("W/").unwrap_or(t) == tag.as_str()
             })
         });
 
