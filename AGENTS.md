@@ -31,7 +31,7 @@ Cargo.toml                          # Workspace root
 clippy.toml                         # Clippy thresholds (MSRV, arg limits)
 flake.nix                           # Nix flake: dev shell, packages, NixOS module
 nix/                                # Nix overlay, package defs, NixOS module
-  package-web-frontend.nix          # Offline Elm build of ekapkgs-update-web/frontend → elm.js
+  package-web-frontend.nix          # Offline Elm build of ekapkgs-update-web/frontend → elm.js (uglify-js minified)
   web-frontend/                     # Pinned Elm deps (elm-srcs.nix, registry.dat); update.sh regenerates them
 
 ekapkgs-update/                     # Main CLI crate
@@ -139,7 +139,7 @@ ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + 
     params.rs                       # Query-parameter helpers (repo labels, pages, ratios)
     assets.rs                       # App shell (index.html), embedded static files, ETag/Cache-Control
     queries/                        # Raw sqlx SELECTs with local row structs; live.rs = WS fingerprint
-    routes/                         # mod.rs (page paths → shell, /api, /ws, /static), api.rs, ws.rs; tests.rs
+    routes/                         # mod.rs (page paths → shell, /api, /ws, /static; gzip CompressionLayer), api.rs, ws.rs; tests.rs
   static/                           # css/styles.css, js/app.js (WebSocket → Elm ports); compiled into the binary
 ```
 
@@ -483,7 +483,7 @@ API integrations (via reqwest):
 - **Unit tests**: `#[test]` with inline assertions. Located in same file or `tests_*.rs` siblings.
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
 - **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`.
-- **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database). The Elm frontend has no unit tests; `elm make` type-checks it on every build.
+- **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database), including response compression. The Elm frontend has no unit tests; `elm make` type-checks it on every build.
 - **Web crate frontend**: `build.rs` compiles `frontend/` with `elm`, which the dev shell provides on x86_64-linux only. `EKAPKGS_WEB_ELM_JS` can point at a prebuilt `elm.js` instead; a missing file there is an error. Without either, the build warns and embeds a stub `elm.js` (a "frontend not built" notice), so `cargo build/test --workspace` work without `elm`. An Elm compile error always fails the build. `EKAPKGS_WEB_REQUIRE_ELM=1` makes a missing `elm` fatal too. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
 - **Run**: `cargo test --workspace`
 

@@ -157,8 +157,27 @@ series uses blue. `forced-colors` and print rules keep marks visible.
 `assets.rs` embeds `css/styles.css`, `js/app.js` and the compiled
 `js/elm.js` with `include_str!`. Responses carry:
 
-- an `ETag` (FNV-1a of the content), with `If-None-Match` answered by 304;
+- a weak `ETag` (`W/"<FNV-1a of the content>"`), with `If-None-Match`
+  answered by 304 (weak comparison, so the strong form matches too);
 - `Cache-Control: public, max-age=86400`.
+
+Sizes on the wire are kept down in two places:
+
+- **Minification.** `nix/package-web-frontend.nix` runs `elm make --optimize`
+  and then uglify-js with the recipe from Elm's minification guide (a
+  compress pass with `pure_funcs` for `F2`..`F9`/`A2`..`A9`, `pure_getters`,
+  `keep_fargs=false`, `unsafe_comps`, `unsafe`, then a mangle pass). That
+  takes `elm.js` from about 528 KB to 120 KB. Local `cargo` builds use the
+  unminified output of `build.rs`.
+- **Compression.** `routes::router` ends with tower-http's gzip
+  `CompressionLayer`, so the tests see it too. It picks an
+  encoding from `Accept-Encoding`, adds `Vary: Accept-Encoding`, and covers
+  the JSON API, the shell and the assets alike: the minified `elm.js` is
+  about 38 KB gzipped. Bodies under 32 bytes are sent as is, which leaves
+  304s and the `/ws/live` upgrade untouched. Because one asset can go out
+  in several encodings, its `ETag` is weak. Brotli is not enabled: at
+  tower-http's default quality it came out larger than gzip for `elm.js`
+  (38.8 KB vs 38.2 KB), and browsers prefer it whenever they offer it.
 
 The shell (`index.html`, served for every page path) references assets as
 `?v=<hash of all assets>`, so a new build busts the cache. The shell itself
@@ -179,6 +198,8 @@ has no `postInstall`.
   - filters, sorting and pagination (including bad input);
   - JSON 404s, and the app shell on page routes (200) and unknown paths (404);
   - asset ETag/304, cache headers, and that `elm.js` and `app.js` are present;
+  - gzip responses for `elm.js`, the API and the shell when
+    `Accept-Encoding` allows them (also when `br` is offered first), and 304s for a compressed asset's ETag;
   - the live fingerprint changing after a write, and `/ws/live` rejecting
     a non-upgrade request.
 

@@ -8,6 +8,10 @@
 //! (the NixOS unit runs it from `/`). Asset URLs carry a content hash
 //! (`?v=…`) and an `ETag`, so browsers may cache them for a day and still
 //! pick up a new build immediately.
+//!
+//! The router compresses responses on the fly (see `routes::router`), so
+//! the same content can go out in several encodings. The `ETag` is therefore
+//! weak (`W/"…"`): it names the content, not the exact bytes.
 
 use std::sync::LazyLock;
 
@@ -106,12 +110,19 @@ pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
         )
             .into_response();
     };
-    let etag = format!("\"{:016x}\"", fnv1a(asset.body.as_bytes()));
+    let tag = format!("\"{:016x}\"", fnv1a(asset.body.as_bytes()));
+    let etag = format!("W/{tag}");
 
+    // Weak comparison (RFC 9110 §13.1.2): `W/` prefixes are ignored.
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+        .is_some_and(|v| {
+            v.split(',').any(|t| {
+                let t = t.trim();
+                t == "*" || t.strip_prefix("W/").unwrap_or(t) == tag
+            })
+        });
 
     let mut response = if not_modified {
         StatusCode::NOT_MODIFIED.into_response()
