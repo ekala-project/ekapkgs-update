@@ -20,8 +20,30 @@ const LOG_COLUMNS: &str = "drv_path, attr_path, timestamp, status, error_log, ol
                            new_version, repo_name, session_id, phase, error_type";
 
 /// `a >= b` using the same component-wise comparison as release selection.
+///
+/// That comparison ignores everything after the first `-`, so when the bases
+/// tie the suffixes decide: a plain release beats a suffixed one (`1.0` >
+/// `1.0-rc1`), and two suffixes are compared component-wise, which orders
+/// date-based versions such as `0-unstable-2024-02-01`.
+///
+/// This is the single rule for "the tree has reached this version" (merged
+/// proposals, stale failures).
 fn version_at_least(a: &str, b: &str) -> bool {
-    a == b || compare_version_components(a, b).is_ge()
+    use std::cmp::Ordering;
+
+    if a == b {
+        return true;
+    }
+    match compare_version_components(a, b) {
+        Ordering::Equal => match (a.split_once('-'), b.split_once('-')) {
+            (Some((_, sa)), Some((_, sb))) => {
+                compare_version_components(&sa.replace('-', "."), &sb.replace('-', ".")).is_ge()
+            },
+            (Some(_), None) => false,
+            (None, _) => true,
+        },
+        ord => ord.is_gt(),
+    }
 }
 
 /// Backoff applied after a check that found nothing to do.
@@ -179,8 +201,9 @@ impl Database {
     /// Register a package (or refresh its metadata) without touching its
     /// upstream/backoff state. New rows start as `pending`.
     ///
-    /// When the tree's `current_version` has caught up with a proposed
-    /// version, the proposal is considered merged.
+    /// When the tree's `current_version` has caught up with (or moved past) a
+    /// proposed version, the proposal is considered merged. This is the same
+    /// [`version_at_least`] rule observation reconciliation uses.
     pub async fn upsert_package_info(
         &self,
         repo_name: &str,
@@ -188,6 +211,14 @@ impl Database {
         current_version: &str,
         info: &PackageInfo,
     ) -> Result<()> {
+        // The merge rule is a Rust comparison, so decide it from the stored
+        // row. The SQL only clears the proposal if it is still the one judged
+        // merged here, so a proposal recorded in between is never dropped.
+        let merged_proposal = self
+            .get_update_record(repo_name, attr_path)
+            .await?
+            .and_then(|r| r.proposed_version)
+            .filter(|p| version_at_least(current_version, p));
         sqlx::query(
             r#"
             INSERT INTO updates (repo_name, attr_path, status, current_version, pname,
@@ -197,10 +228,10 @@ impl Database {
             ON CONFLICT(repo_name, attr_path) DO UPDATE SET
                 status = CASE
                     WHEN updates.status = 'proposed'
-                         AND updates.proposed_version = excluded.current_version
+                         AND updates.proposed_version = ?
                     THEN 'up_to_date' ELSE updates.status END,
                 proposed_version = CASE
-                    WHEN updates.proposed_version = excluded.current_version
+                    WHEN updates.proposed_version = ?
                     THEN NULL ELSE updates.proposed_version END,
                 current_version = excluded.current_version,
                 pname = excluded.pname,
@@ -222,6 +253,8 @@ impl Database {
         .bind(&info.upstream_key)
         .bind(&info.upstream_instance)
         .bind(&info.semver_strategy)
+        .bind(&merged_proposal)
+        .bind(&merged_proposal)
         .execute(&self.pool)
         .await
         .with_context(|| format!("upsert package info for {repo_name}:{attr_path}"))?;
@@ -784,6 +817,74 @@ mod tests {
         let rec = db.get_update_record("", "hello").await.unwrap().unwrap();
         assert_eq!(rec.status, UpdateStatus::UpToDate);
         assert_eq!(rec.proposed_version, None);
+    }
+
+    #[test]
+    fn version_at_least_cases() {
+        // (a, b, a >= b)
+        let cases = [
+            ("1.1", "1.1", true),
+            ("1.2", "1.1", true),
+            ("1.10", "1.9", true),
+            ("1.0", "1.1", false),
+            ("1.0", "1.0.0", true),
+            ("1.0", "1.0-rc1", true),
+            ("1.0-rc1", "1.0", false),
+            ("1.0-rc2", "1.0-rc1", true),
+            ("1.1-rc1", "1.0", true),
+            ("2024-01-01", "2023-12-31", true),
+            ("2023-12-31", "2024-01-01", false),
+            ("0-unstable-2024-02-01", "0-unstable-2024-01-15", true),
+            ("0-unstable-2024-01-15", "0-unstable-2024-02-01", false),
+            ("abd", "abc", true),
+            ("abc", "abd", false),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(version_at_least(a, b), expected, "{a} >= {b}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_package_info_reconciles_proposal_like_observations() {
+        // (proposed, tree version at re-index, expected status, expected proposal)
+        let cases = [
+            ("1.1", "1.1", UpdateStatus::UpToDate, None),
+            ("1.1", "1.2", UpdateStatus::UpToDate, None),
+            ("1.1", "1.0.5", UpdateStatus::Proposed, Some("1.1")),
+            ("1.10", "1.9", UpdateStatus::Proposed, Some("1.10")),
+            (
+                "0-unstable-2024-02-01",
+                "0-unstable-2024-03-01",
+                UpdateStatus::UpToDate,
+                None,
+            ),
+            (
+                "0-unstable-2024-02-01",
+                "0-unstable-2024-01-15",
+                UpdateStatus::Proposed,
+                Some("0-unstable-2024-02-01"),
+            ),
+        ];
+        let info = PackageInfo::default();
+        for (proposed, current, status, expected) in cases {
+            let db = setup_db().await;
+            db.upsert_package_info("", "hello", "1.0", &info)
+                .await
+                .unwrap();
+            db.record_successful_update("", "hello", "1.0", proposed, None, None)
+                .await
+                .unwrap();
+            db.upsert_package_info("", "hello", current, &info)
+                .await
+                .unwrap();
+            let rec = db.get_update_record("", "hello").await.unwrap().unwrap();
+            assert_eq!(rec.current_version.as_deref(), Some(current));
+            assert_eq!(
+                (rec.status, rec.proposed_version.as_deref()),
+                (status, expected),
+                "proposed={proposed} current={current}"
+            );
+        }
     }
 
     #[tokio::test]
