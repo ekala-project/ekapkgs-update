@@ -646,7 +646,22 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
 
 /// `git commit` the staged changes of a branch-mode update, in the
 /// repository containing `pkg_dir` (matching `branch_git`'s staging).
+///
+/// An empty index is an error, not a no-op. The update workflow reported
+/// that it rewrote the package to the new version, so staging nothing means
+/// the change was lost (e.g. `git add` failed, or the rewrite landed in an
+/// ignored file). Recording that as `proposed` would claim an update that
+/// does not exist on the branch, so it is reported as a failed commit.
 async fn git_commit(pkg_dir: &str, commit_msg: &str) -> anyhow::Result<()> {
+    let staged = tokio::process::Command::new("git")
+        .args(["-C", pkg_dir, "diff", "--cached", "--quiet"])
+        .status()
+        .await
+        .context("Failed to run git diff --cached")?;
+    if staged.success() {
+        anyhow::bail!("git commit failed: nothing staged to commit");
+    }
+
     let output = tokio::process::Command::new("git")
         .args(["-C", pkg_dir, "commit", "-m", commit_msg])
         .output()
@@ -684,6 +699,71 @@ async fn take_snapshot(
             warn!("{}: Failed to snapshot working tree: {:#}", attr_path, e);
             UpdateResult::Skipped(format!("Working tree snapshot failed: {e:#}"))
         })
+}
+
+/// Stage and commit a branch-mode update. Must be called with the git mutex
+/// held.
+///
+/// If the commit fails (pre-commit hook, missing identity, nothing staged),
+/// every path the update dirtied is reverted, index included, so that its
+/// edits are not swept into the next update's commit.
+async fn commit_or_revert(
+    snapshot: &super::branch_git::DirtySnapshot,
+    attr_path: &str,
+    pkg_dir: &str,
+    commit_msg: &str,
+) -> anyhow::Result<()> {
+    snapshot.stage(attr_path, pkg_dir).await;
+    if let Err(e) = git_commit(pkg_dir, commit_msg).await {
+        info!(
+            "{}: Reverting {} after failed commit...",
+            attr_path, pkg_dir
+        );
+        snapshot.revert(attr_path, pkg_dir).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Commit a successful branch-mode update under the git mutex and record
+/// the outcome: `proposed` on success, a `pr_creation` failure otherwise.
+async fn commit_direct_update(
+    attempt: &Attempt<'_>,
+    snapshot: &super::branch_git::DirtySnapshot,
+    git_mutex: &Mutex<()>,
+    pkg_dir: &str,
+    commit_msg: &str,
+) -> UpdateResult {
+    let attr_path = &attempt.req.attr_path;
+    // Serialize git operations under the mutex to prevent concurrent
+    // commits from staging each other's changes
+    let committed = {
+        let _lock = git_mutex.lock().await;
+        attempt
+            .tracker
+            .run(
+                UpdatePhase::PrCreation,
+                commit_or_revert(snapshot, attr_path, pkg_dir, commit_msg),
+            )
+            .await
+    };
+
+    match committed {
+        Ok(()) => {
+            info!("{}: Committed: {}", attr_path, commit_msg);
+            attempt.record_success(None).await;
+            UpdateResult::Updated {
+                old_version: attempt.req.current_version.clone(),
+                new_version: attempt.req.new_version.clone(),
+            }
+        },
+        Err(e) => {
+            let error_message = format!("{e:#}");
+            warn!("{}: {}", attr_path, error_message);
+            let failure = attempt.failure(&error_message);
+            attempt.record_failure(&failure, &error_message).await
+        },
+    }
 }
 
 /// Perform a package update directly in the working tree (no worktree isolation).
@@ -783,29 +863,7 @@ pub(super) async fn perform_direct_update(
                 );
             }
 
-            // Serialize git operations under the mutex to prevent concurrent
-            // commits from staging each other's changes
-            {
-                let _lock = git_mutex.lock().await;
-
-                snapshot.stage(attr_path, &pkg_dir).await;
-
-                match attempt
-                    .tracker
-                    .run(UpdatePhase::PrCreation, git_commit(&pkg_dir, &commit_msg))
-                    .await
-                {
-                    Ok(()) => info!("{}: Committed: {}", attr_path, commit_msg),
-                    Err(e) => warn!("{}: {:#}", attr_path, e),
-                }
-            }
-
-            attempt.record_success(None).await;
-
-            Ok(UpdateResult::Updated {
-                old_version: current_version.clone(),
-                new_version: new_version.clone(),
-            })
+            Ok(commit_direct_update(&attempt, &snapshot, &git_mutex, &pkg_dir, &commit_msg).await)
         },
         Err(e) => {
             let error_message = format!("{e:#}");
@@ -848,33 +906,14 @@ pub(super) async fn perform_direct_update(
                     if matches!(fix_result, ClaudeFixResult::Fixed) {
                         info!("{}: Claude Code fixed the build! Committing.", attr_path);
 
-                        // Commit the fix under the git mutex
-                        {
-                            let _lock = git_mutex.lock().await;
-
-                            snapshot.stage(attr_path, &pkg_dir).await;
-
-                            match attempt
-                                .tracker
-                                .run(UpdatePhase::PrCreation, git_commit(&pkg_dir, &commit_msg))
-                                .await
-                            {
-                                Ok(()) => {
-                                    info!(
-                                        "{}: Committed (Claude-fixed): {}",
-                                        attr_path, commit_msg
-                                    );
-                                },
-                                Err(commit_err) => warn!("{}: {:#}", attr_path, commit_err),
-                            }
-                        }
-
-                        attempt.record_success(None).await;
-
-                        return Ok(UpdateResult::Updated {
-                            old_version: current_version.clone(),
-                            new_version: new_version.clone(),
-                        });
+                        return Ok(commit_direct_update(
+                            &attempt,
+                            &snapshot,
+                            &git_mutex,
+                            &pkg_dir,
+                            &commit_msg,
+                        )
+                        .await);
                     }
 
                     log_unfixed(attr_path, &fix_result);
@@ -1232,6 +1271,103 @@ async fn prompt_for_pr_confirmation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::run::branch_git::DirtySnapshot;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A repo with one committed package, hooks read from `.githooks`.
+    fn init_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "test"]);
+        git(&root, &["config", "core.hooksPath", ".githooks"]);
+        std::fs::create_dir_all(root.join("pkgs/foo")).unwrap();
+        std::fs::write(root.join("pkgs/foo/default.nix"), "v1").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        (dir, root)
+    }
+
+    fn simulate_update(pkg_dir: &Path) {
+        std::fs::write(pkg_dir.join("default.nix"), "v2").unwrap();
+        std::fs::write(pkg_dir.join("new.nix"), "new").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_commit_or_revert_commits_update() {
+        let (_dir, root) = init_repo();
+        let pkg_dir = root.join("pkgs/foo");
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        simulate_update(&pkg_dir);
+        let before = git(&root, &["rev-parse", "HEAD"]);
+
+        commit_or_revert(&snapshot, "foo", &pkg_dir.to_string_lossy(), "foo: 1 -> 2")
+            .await
+            .unwrap();
+
+        assert_ne!(git(&root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git(&root, &["status", "--porcelain"]), "");
+    }
+
+    #[tokio::test]
+    async fn test_commit_or_revert_reverts_on_hook_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, root) = init_repo();
+        let hook = root.join(".githooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho rejected >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pkg_dir = root.join("pkgs/foo");
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        simulate_update(&pkg_dir);
+        let before = git(&root, &["rev-parse", "HEAD"]);
+
+        let err = commit_or_revert(&snapshot, "foo", &pkg_dir.to_string_lossy(), "foo: 1 -> 2")
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("rejected"), "{err:#}");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            std::fs::read_to_string(pkg_dir.join("default.nix")).unwrap(),
+            "v1"
+        );
+        assert!(!pkg_dir.join("new.nix").exists());
+        // Nothing left staged; only the pre-existing untracked hooks remain.
+        assert_eq!(git(&root, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(git(&root, &["status", "--porcelain"]), "?? .githooks/\n");
+    }
+
+    #[tokio::test]
+    async fn test_commit_or_revert_nothing_staged_is_error() {
+        let (_dir, root) = init_repo();
+        let pkg_dir = root.join("pkgs/foo");
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        let before = git(&root, &["rev-parse", "HEAD"]);
+
+        let err = commit_or_revert(&snapshot, "foo", &pkg_dir.to_string_lossy(), "foo: 1 -> 2")
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("nothing staged"), "{err:#}");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), before);
+    }
 
     /// A snapshot failure is a setup failure reported as `Skipped`, not an
     /// `Err` that `run_service` would count as failed without recording it.
