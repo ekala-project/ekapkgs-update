@@ -790,9 +790,21 @@ async fn static_assets_are_embedded_and_cacheable() {
         assert_eq!(stale.status, StatusCode::OK, "{uri}");
     }
 
-    // The compiled frontend is the real thing, and the shell boots it.
+    // elm.js defines `Elm.Main` (compiled or stub), and the shell boots it.
     let elm = get(&app, "/static/js/elm.js").await.body;
     assert!(elm.contains("Elm"), "elm.js does not look like Elm output");
+    // Without `elm`, build.rs embeds a stub; it must still satisfy app.js.
+    let stub = elm.contains("frontend not built");
+    assert_eq!(
+        stub,
+        crate::assets::FRONTEND == "stub",
+        "{}",
+        crate::assets::FRONTEND
+    );
+    if stub {
+        assert!(elm.contains("Elm = { Main: { init: init } }"));
+        assert!(elm.contains("/api/dashboard"));
+    }
     let app_js = get(&app, "/static/js/app.js").await.body;
     assert!(app_js.contains("Elm.Main.init"));
     assert!(app_js.contains("/ws/live"));
