@@ -103,7 +103,7 @@ cargo run -p ekapkgs-update-web
 - 🔍 Searchable package list with version tracking
 - 📋 Detailed session history with phase-by-phase breakdown
 - ⚡ WebSocket updates for live progress
-- 🎨 Clean, responsive UI with HTMX + server-side rendering
+- 🎨 Clean, responsive single-page UI written in Elm over a JSON API
 
 **[→ See ekapkgs-update-web README for full details](./ekapkgs-update-web/README.md)**
 

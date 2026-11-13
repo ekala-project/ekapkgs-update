@@ -1,17 +1,18 @@
-//! Static assets embedded in the binary.
+//! The single-page app shell and its static assets, embedded in the binary.
 //!
-//! CSS and JavaScript are compiled in with `include_str!`, so the server does
-//! not depend on its working directory (the NixOS unit runs it from `/`).
-//! Asset URLs carry a content hash (`?v=…`) and an `ETag`, so browsers may
-//! cache them for a day and still pick up a new build immediately.
+//! `elm.js` is compiled by `build.rs` (or handed to it by the Nix build via
+//! `EKAPKGS_WEB_ELM_JS`) into `OUT_DIR`; the stylesheet and the ports glue
+//! (`app.js`) are plain files. Everything is compiled in with
+//! `include_str!`, so the server does not depend on its working directory
+//! (the NixOS unit runs it from `/`). Asset URLs carry a content hash
+//! (`?v=…`) and an `ETag`, so browsers may cache them for a day and still
+//! pick up a new build immediately.
 
 use std::sync::LazyLock;
 
 use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-
-use crate::error::AppError;
+use axum::response::{Html, IntoResponse, Response};
 
 /// One embedded file.
 struct Asset {
@@ -27,14 +28,14 @@ const ASSETS: &[Asset] = &[
         body: include_str!("../static/css/styles.css"),
     },
     Asset {
-        path: "js/htmx.min.js",
+        path: "js/elm.js",
         content_type: "text/javascript; charset=utf-8",
-        body: include_str!("../static/js/htmx.min.js"),
+        body: include_str!(concat!(env!("OUT_DIR"), "/elm.js")),
     },
     Asset {
-        path: "js/live.js",
+        path: "js/app.js",
         content_type: "text/javascript; charset=utf-8",
-        body: include_str!("../static/js/live.js"),
+        body: include_str!("../static/js/app.js"),
     },
 ];
 
@@ -55,15 +56,49 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!("{:012x}", fnv1a(combined.as_bytes()) & 0xffff_ffff_ffff)
 });
 
-/// Cache-busting token for asset URLs (used by `base.html`).
-pub fn version() -> &'static str {
-    VERSION.as_str()
+/// The HTML shell every page route returns. The Elm app renders into
+/// `<body>`; the `<noscript>` text is all a browser without JavaScript sees.
+static INDEX_HTML: LazyLock<String> = LazyLock::new(|| {
+    let v = VERSION.as_str();
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ekapkgs-update</title>
+  <link rel="stylesheet" href="/static/css/styles.css?v={v}">
+  <script src="/static/js/elm.js?v={v}"></script>
+  <script src="/static/js/app.js?v={v}" defer></script>
+</head>
+<body>
+  <noscript><p class="noscript">The ekapkgs-update dashboard needs JavaScript. The same data is available as JSON under <a href="/api/dashboard">/api</a>.</p></noscript>
+</body>
+</html>
+"#
+    )
+});
+
+/// Respond with the app shell. Page routes use 200; unknown paths use 404
+/// (the frontend then shows its "not found" page).
+pub fn index_response(status: StatusCode) -> Response {
+    let mut response = (status, Html(INDEX_HTML.as_str())).into_response();
+    // The shell names versioned assets, so it must never be cached itself.
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 /// `GET /static/*path`
 pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
     let Some(asset) = ASSETS.iter().find(|a| a.path == path) else {
-        return AppError::NotFound(format!("No static asset named “{path}”.")).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            format!("No static asset named “{path}”."),
+        )
+            .into_response();
     };
     let etag = format!("\"{:016x}\"", fnv1a(asset.body.as_bytes()));
 

@@ -11,12 +11,10 @@ use tracing::info;
 
 mod assets;
 mod error;
-mod format;
+mod params;
 mod queries;
 mod routes;
 mod state;
-mod templates;
-mod views;
 
 use state::AppState;
 

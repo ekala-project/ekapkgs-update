@@ -4,6 +4,7 @@
   pkg-config,
   openssl,
   perl,
+  ekapkgs-update-web-frontend,
 }:
 
 rustPlatform.buildRustPackage {
@@ -40,8 +41,11 @@ rustPlatform.buildRustPackage {
   # This causes the build to occur again, but in debug mode
   doCheck = false;
 
-  # Templates (askama) and static assets (include_str!) are compiled into
-  # the binary, so nothing needs to be installed alongside it.
+  # build.rs embeds this pre-compiled Elm bundle instead of running `elm`
+  # (which would need network access for its packages). It and the other
+  # static assets are compiled into the binary (include_str!), so nothing
+  # needs to be installed alongside it.
+  env.EKAPKGS_WEB_ELM_JS = "${ekapkgs-update-web-frontend}/elm.js";
 
   meta = with lib; {
     description = "Web monitoring portal for ekapkgs-update";

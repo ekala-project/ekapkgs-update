@@ -7,7 +7,7 @@ ekapkgs-update automates Nix package updates: it discovers upstream releases (Gi
 **Workspace members:**
 
 - `ekapkgs-update/` — CLI tool (binary + library)
-- `ekapkgs-update-web/` — Axum web dashboard (read-only view of shared SQLite database)
+- `ekapkgs-update-web/` — Axum JSON API + Elm single-page dashboard (read-only view of shared SQLite database)
 
 ## Rules
 
@@ -31,6 +31,8 @@ Cargo.toml                          # Workspace root
 clippy.toml                         # Clippy thresholds (MSRV, arg limits)
 flake.nix                           # Nix flake: dev shell, packages, NixOS module
 nix/                                # Nix overlay, package defs, NixOS module
+  package-web-frontend.nix          # Offline Elm build of ekapkgs-update-web/frontend → elm.js
+  web-frontend/                     # Pinned Elm deps (elm-srcs.nix, registry.dat); update.sh regenerates them
 
 ekapkgs-update/                     # Main CLI crate
   Cargo.toml
@@ -117,20 +119,28 @@ ekapkgs-update/                     # Main CLI crate
     migrate_tests.rs                # Integration tests with fixture files
     watch_tests.rs                  # Watch index/feed/dispatch integration tests
 
-ekapkgs-update-web/                 # Web dashboard crate (read-only)
+ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + Elm SPA)
   Cargo.toml
+  build.rs                          # `elm make --optimize` frontend/ → OUT_DIR/elm.js (or copies $EKAPKGS_WEB_ELM_JS)
+  frontend/                         # Elm 0.19 application
+    elm.json
+    src/
+      Main.elm                      #   Browser.application: route → GET /api/… → page; ports liveStatus/liveUpdate
+      Route.elm                     #   Path URLs ↔ Route, Route → API URL
+      Api.elm                       #   Shared JSON decoders, HTTP error handling
+      Format.elm                    #   Times, durations, numbers, badges, URLs (safeUrl)
+      View.elm                      #   Shared view helpers (chips, pager, bars, filters, logs)
+      Ctx.elm, Msg.elm              #   View context and messages
+      Page/                         #   One module per page (Data, decoder, view); Session/Item.elm shared row logic
   src/
     main.rs                         # CLI options, Database::new, router + CORS/trace layers
     state.rs                        # AppState (wraps Database)
-    error.rs                        # HTML or JSON 404/500 responses, fallback
-    assets.rs                       # Static files embedded via include_str!, ETag/Cache-Control
-    format.rs                       # Relative times, durations, badges/tones, pager, URLs
+    error.rs                        # AppError → JSON 404/500
+    params.rs                       # Query-parameter helpers (repo labels, pages, ratios)
+    assets.rs                       # App shell (index.html), embedded static files, ETag/Cache-Control
     queries/                        # Raw sqlx SELECTs with local row structs; live.rs = WS fingerprint
-    views/                          # Row → display view models; charts.rs = CSS chart geometry
-    templates.rs                    # Askama page + fragment structs
-    routes/                         # dashboard, packages, sessions, failures, watch, analytics, api, ws; tests.rs
-  templates/                        # Pages, macros.html, error.html, fragments/ (HTMX partials)
-  static/                           # css/styles.css, js/htmx.min.js, js/live.js (compiled into the binary)
+    routes/                         # mod.rs (page paths → shell, /api, /ws, /static), api.rs, ws.rs; tests.rs
+  static/                           # css/styles.css, js/app.js (WebSocket → Elm ports); compiled into the binary
 ```
 
 ## Architecture: The `run` Command Pipeline
@@ -473,7 +483,8 @@ API integrations (via reqwest):
 - **Unit tests**: `#[test]` with inline assertions. Located in same file or `tests_*.rs` siblings.
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
 - **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`.
-- **Web crate tests**: `routes/tests.rs` drives every page, fragment and API endpoint via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database).
+- **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database). The Elm frontend has no unit tests; `elm make` type-checks it on every build.
+- **Web crate builds need `elm`** (in the dev shell, x86_64-linux only) or `EKAPKGS_WEB_ELM_JS` pointing at a prebuilt `elm.js`. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
 - **Run**: `cargo test --workspace`
 
 ## Concurrency and Resource Gotchas

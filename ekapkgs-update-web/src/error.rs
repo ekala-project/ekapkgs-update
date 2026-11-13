@@ -1,15 +1,13 @@
-//! Error responses: HTML pages for browsers, JSON for `/api/*`.
+//! API error responses: `{"error": "<message>", "status": <code>}`.
 
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use crate::templates::ErrorTemplate;
-
-/// Error returned by HTML handlers.
+/// Error returned by API handlers.
 #[derive(Debug)]
 pub enum AppError {
-    /// 404 with a human explanation.
+    /// 404 with a human explanation (shown by the frontend).
     NotFound(String),
     /// 500, typically a database error. The message is logged, not shown.
     Internal(String),
@@ -37,65 +35,20 @@ impl AppError {
                 .to_owned(),
         }
     }
-
-    fn log(&self) {
-        if let Self::Internal(msg) = self {
-            tracing::error!("request failed: {msg}");
-        }
-    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        self.log();
+        if let Self::Internal(msg) = &self {
+            tracing::error!("request failed: {msg}");
+        }
         let status = self.status();
-        let template = ErrorTemplate {
-            code: status.as_u16(),
-            title: if status == StatusCode::NOT_FOUND {
-                "Not found".to_owned()
-            } else {
-                "Something went wrong".to_owned()
-            },
-            message: self.public_message(),
-        };
-        (status, template).into_response()
-    }
-}
-
-/// Error returned by JSON handlers: same semantics, JSON body.
-#[derive(Debug)]
-pub struct ApiError(pub AppError);
-
-impl From<AppError> for ApiError {
-    fn from(e: AppError) -> Self {
-        Self(e)
-    }
-}
-
-impl From<sqlx::Error> for ApiError {
-    fn from(e: sqlx::Error) -> Self {
-        Self(AppError::from(e))
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        self.0.log();
-        let status = self.0.status();
         (
             status,
-            Json(
-                serde_json::json!({ "error": self.0.public_message(), "status": status.as_u16() }),
-            ),
+            Json(serde_json::json!({ "error": self.public_message(), "status": status.as_u16() })),
         )
             .into_response()
     }
 }
 
-/// Router fallback: unknown paths render the 404 page.
-pub async fn fallback() -> AppError {
-    AppError::NotFound("There is no page at this address.".to_owned())
-}
-
-pub type AppResult<T> = Result<T, AppError>;
-pub type ApiResult<T> = Result<T, ApiError>;
+pub type ApiResult<T> = Result<T, AppError>;

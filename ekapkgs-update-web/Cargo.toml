@@ -3,6 +3,8 @@ name = "ekapkgs-update-web"
 version = "0.1.0"
 edition = "2021"
 
+build = "build.rs"
+
 [[bin]]
 name = "ekapkgs-update-web"
 path = "src/main.rs"
@@ -20,10 +22,6 @@ tokio = { workspace = true, features = ["sync", "time"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-
-# Templates
-askama = { version = "0.12", features = ["with-axum"] }
-askama_axum = "0.4"
 
 # Utilities
 clap = { version = "4.5", features = ["derive"] }
