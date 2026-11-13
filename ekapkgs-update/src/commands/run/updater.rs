@@ -571,14 +571,7 @@ pub(super) async fn perform_update(
                 {
                     Ok(artifacts) => {
                         info!("{}: Preserved failure artifacts", attr_path);
-                        let path = artifacts
-                            .worktree_path
-                            .parent()
-                            .and_then(|p| p.parent())
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|| {
-                                artifacts.worktree_path.to_string_lossy().to_string()
-                            });
+                        let path = artifacts.package_dir().to_string_lossy().to_string();
                         if let Err(db_err) = db
                             .set_failed_phase_artifacts(session_id, req.repo(), attr_path, &path)
                             .await

@@ -228,11 +228,7 @@ pub async fn enqueue(
             continue;
         }
 
-        let artifacts_path = artifact
-            .worktree_path
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let artifacts_path = artifact.package_dir().to_string_lossy().to_string();
 
         db.enqueue_autofix(
             &artifact.repo_name,
@@ -292,11 +288,7 @@ async fn auto_enqueue(db: &Database, max_attempts: i64) -> anyhow::Result<usize>
             continue;
         }
 
-        let artifacts_path = artifact
-            .worktree_path
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let artifacts_path = artifact.package_dir().to_string_lossy().to_string();
 
         db.enqueue_autofix(
             &artifact.repo_name,
