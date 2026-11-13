@@ -129,10 +129,18 @@ nix develop --command cargo test -p ekapkgs-update-web
 nix develop --command cargo clippy -p ekapkgs-update-web --all-targets
 ```
 
-Building the crate needs `elm` on `PATH` (the dev shell provides it on
-x86_64-linux). `build.rs` runs `elm make --optimize` whenever a file under
-`frontend/` changes. To skip that, set `EKAPKGS_WEB_ELM_JS` to an
-already-compiled `elm.js`. The Nix package does this, building the frontend
+`build.rs` runs `elm make --optimize` whenever a file under `frontend/`
+changes. `elm` comes from the dev shell (x86_64-linux only). An Elm compile
+error fails the build. If `elm` is not on `PATH`, the build still succeeds:
+it prints a `cargo:warning` and embeds a stub `elm.js` that only shows a
+"frontend not built" notice linking to `/api/dashboard`. The API and the
+tests work as usual. Set `EKAPKGS_WEB_REQUIRE_ELM=1` to make a missing
+`elm` an error. The build re-runs when `PATH` changes, so building again
+inside `nix develop` picks up the real frontend.
+
+To skip the compile, set `EKAPKGS_WEB_ELM_JS` to an already-compiled
+`elm.js`. A missing file there is an error, never a stub. The Nix package
+does this, building the frontend
 in a separate derivation (`nix/package-web-frontend.nix`) with dependencies
 pinned in `nix/web-frontend/`. After changing `frontend/elm.json`, run
 `nix/web-frontend/update.sh` to refresh those pins.

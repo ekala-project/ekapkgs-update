@@ -1,7 +1,8 @@
 //! The single-page app shell and its static assets, embedded in the binary.
 //!
 //! `elm.js` is compiled by `build.rs` (or handed to it by the Nix build via
-//! `EKAPKGS_WEB_ELM_JS`) into `OUT_DIR`; the stylesheet and the ports glue
+//! `EKAPKGS_WEB_ELM_JS`) into `OUT_DIR`. Without `elm` it is a stub that only
+//! shows a "frontend not built" notice (see [`FRONTEND`]); the stylesheet and the ports glue
 //! (`app.js`) are plain files. Everything is compiled in with
 //! `include_str!`, so the server does not depend on its working directory
 //! (the NixOS unit runs it from `/`). Asset URLs carry a content hash
@@ -38,6 +39,11 @@ const ASSETS: &[Asset] = &[
         body: include_str!("../static/js/app.js"),
     },
 ];
+
+/// Where the embedded `elm.js` came from: `prebuilt` (`EKAPKGS_WEB_ELM_JS`),
+/// `elm` (compiled by `build.rs`) or `stub` (`elm` was not on `PATH`).
+#[cfg(test)]
+pub const FRONTEND: &str = env!("EKAPKGS_WEB_FRONTEND");
 
 const CACHE_CONTROL: &str = "public, max-age=86400";
 

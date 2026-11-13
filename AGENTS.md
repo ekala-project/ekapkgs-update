@@ -121,7 +121,7 @@ ekapkgs-update/                     # Main CLI crate
 
 ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + Elm SPA)
   Cargo.toml
-  build.rs                          # `elm make --optimize` frontend/ → OUT_DIR/elm.js (or copies $EKAPKGS_WEB_ELM_JS)
+  build.rs                          # `elm make --optimize` frontend/ → OUT_DIR/elm.js (or copies $EKAPKGS_WEB_ELM_JS; stub if no elm)
   frontend/                         # Elm 0.19 application
     elm.json
     src/
@@ -484,7 +484,7 @@ API integrations (via reqwest):
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
 - **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`.
 - **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database). The Elm frontend has no unit tests; `elm make` type-checks it on every build.
-- **Web crate builds need `elm`** (in the dev shell, x86_64-linux only) or `EKAPKGS_WEB_ELM_JS` pointing at a prebuilt `elm.js`. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
+- **Web crate frontend**: `build.rs` compiles `frontend/` with `elm`, which the dev shell provides on x86_64-linux only. `EKAPKGS_WEB_ELM_JS` can point at a prebuilt `elm.js` instead; a missing file there is an error. Without either, the build warns and embeds a stub `elm.js` (a "frontend not built" notice), so `cargo build/test --workspace` work without `elm`. An Elm compile error always fails the build. `EKAPKGS_WEB_REQUIRE_ELM=1` makes a missing `elm` fatal too. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
 - **Run**: `cargo test --workspace`
 
 ## Concurrency and Resource Gotchas

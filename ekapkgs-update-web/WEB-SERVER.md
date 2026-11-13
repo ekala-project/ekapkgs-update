@@ -136,10 +136,20 @@ series uses blue. `forced-colors` and print rules keep marks visible.
   inject markup. URLs from the database go through `Format.safeUrl`.
 - `build.rs` runs `elm make src/Main.elm --optimize` into `OUT_DIR`, and
   `assets.rs` embeds the result. If `EKAPKGS_WEB_ELM_JS` is set, that file
-  is used instead. The Nix package sets it to the output of
+  is used instead, and a missing file is a hard error. The Nix package sets it
+  to the output of
   `nix/package-web-frontend.nix`, which builds offline from the pins in
   `nix/web-frontend/` (`elm-srcs.nix`, `registry.dat`). Regenerate them with
   `nix/web-frontend/update.sh` after changing `elm.json`.
+- Without `elm` on `PATH` (and no `EKAPKGS_WEB_ELM_JS`), `build.rs` warns
+  and embeds a stub `elm.js`. Its `Elm.Main.init` renders a "frontend not
+  built" notice linking to `/api/dashboard` and returns an app without
+  ports, which `app.js` tolerates. That keeps `cargo build --workspace` and
+  `cargo test --workspace` working without `elm`. An Elm compile error is
+  still a hard error, and `EKAPKGS_WEB_REQUIRE_ELM=1` makes a missing `elm`
+  one too. The build re-runs when `PATH` changes. The source is exposed to
+  the crate as `EKAPKGS_WEB_FRONTEND` (`prebuilt`, `elm` or `stub`), and
+  the asset test checks the stub when it is embedded.
 
 ## Static assets
 
@@ -185,7 +195,8 @@ build.
 - A repository may not be named `default`, because the dashboard uses that
   name for the `''` repository in URLs. The CLI config and the NixOS module
   reject it.
-- ekapkgs packages `elm` only for x86_64-linux, so on aarch64-linux the dev
-  shell has no `elm` and the web package cannot be built there.
+- ekapkgs packages `elm` only for x86_64-linux. On aarch64-linux the dev
+  shell has no `elm`, so `cargo` builds embed the stub frontend, and the
+  Nix web package cannot be built there.
 - The portal and the CLI must be built from the same migration set: an
   older portal refuses to start against a database migrated by a newer CLI.
