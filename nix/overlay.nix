@@ -1,6 +1,9 @@
 final: prev: with final; {
   dev-shell = callPackage ./dev-shell.nix { };
 
+  # Not packaged in ekapkgs; used by the dev shell and `nix fmt`.
+  elm-format = callPackage ./elm-format.nix { };
+
   ekapkgs-update = callPackage ./package.nix { };
 
   ekapkgs-update-web-frontend = callPackage ./package-web-frontend.nix { };

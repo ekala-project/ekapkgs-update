@@ -13,7 +13,7 @@ ekapkgs-update automates Nix package updates: it discovers upstream releases (Gi
 
 - **No commit attribution** — Do not add `Co-Authored-By:` or similar attribution lines to commits.
 - **Zero warnings before committing** — Run `cargo clippy --workspace` and resolve all warnings before any commit. All compiler warnings must also be clean.
-- **Format before committing** — Run `cargo fmt` and `nix fmt .` before committing to ensure consistent formatting across Rust and Nix files.
+- **Format before committing** — Run `cargo fmt` and `nix fmt .` before committing to ensure consistent formatting across Rust, Nix and Elm files. `nix fmt .` runs rustfmt, nixfmt and `elm-format` (over every `*.elm` file, including `ekapkgs-update-web/frontend/`); `elm-format` is also in the dev shell.
 - **Keep this file current** — If you alter the project structure (add/remove/rename modules, crates, or significant files), update this file to reflect the change.
 
 ## Hard Constraints
@@ -31,6 +31,7 @@ Cargo.toml                          # Workspace root
 clippy.toml                         # Clippy thresholds (MSRV, arg limits)
 flake.nix                           # Nix flake: dev shell, packages, NixOS module
 nix/                                # Nix overlay, package defs, NixOS module
+  elm-format.nix                    # elm-format built from source (not in ekapkgs); dev shell + nix fmt
   package-web-frontend.nix          # Offline Elm build of ekapkgs-update-web/frontend → elm.js (uglify-js minified)
   web-frontend/                     # Pinned Elm deps incl. test deps (elm-srcs.nix, registry.dat); update.sh regenerates them
   web-frontend-tests.nix            # Sandbox check running the Elm unit tests (flake checks.web-frontend-tests)

@@ -57,7 +57,10 @@
               elm
               jq
               quickjs
-            ];
+            ]
+            # Formatter for the Elm frontend (also run by `nix fmt`). Built
+            # from source in nix/elm-format.nix.
+            ++ lib.optional (lib.meta.availableOn stdenv.hostPlatform elm-format) elm-format;
           buildInputs = with pkgs; [
             openssl
             sqlite
@@ -68,6 +71,19 @@
       treefmt = {
         programs.rustfmt.enable = true;
         programs.nixfmt.enable = true;
+        # treefmt-nix's elm-format module defaults to pkgs.elmPackages, which
+        # ekapkgs lacks; use the overlay's from-source build instead.
+        imports = [
+          (
+            { pkgs, ... }:
+            {
+              programs.elm-format = {
+                enable = true;
+                package = pkgs.elm-format;
+              };
+            }
+          )
+        ];
       };
 
       nixosModules = {

@@ -155,6 +155,11 @@ For a quick type check of the frontend alone:
 cd ekapkgs-update-web/frontend && elm make src/Main.elm --output=/dev/null
 ```
 
+The Elm sources are formatted with `elm-format`, which `nix fmt .` runs over
+every `*.elm` file (along with rustfmt and nixfmt). ekapkgs does not package
+it, so `nix/elm-format.nix` builds it from source; the dev shell provides it
+too, for editor integration or `elm-format --yes src/`.
+
 The frontend's unit tests live in `frontend/tests/`. The runner needs elm,
 jq and QuickJS (`qjs`), all in the dev shell on x86_64-linux:
 
