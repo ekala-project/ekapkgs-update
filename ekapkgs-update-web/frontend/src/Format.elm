@@ -194,7 +194,8 @@ compact n =
     if abs n < 10000 then
         thousands n
 
-    else if abs n < 1000000 then
+    else if round (toFloat (abs n) / 100) < 10000 then
+        -- Below 999,950, which would round up to "1000.0K".
         fixed1 (toFloat n / 1000) ++ "K"
 
     else
@@ -242,7 +243,8 @@ bytes n =
     if n < 1024 then
         String.fromInt n ++ " B"
 
-    else if n < 1024 * 1024 then
+    else if round (toFloat n * 10 / 1024) < 10240 then
+        -- Below 1023.95 KB, which would round up to "1024.0 KB".
         fixed1 (toFloat n / 1024) ++ " KB"
 
     else
@@ -461,11 +463,12 @@ relative now ts =
             abs secs
 
         body =
-            if a < 3600 then
+            if a < 3570 then
+                -- Rounded to the nearest minute, so stop before "60m".
                 String.fromInt ((a + 30) // 60) ++ "m"
 
             else if a < 86400 then
-                String.fromInt (a // 3600) ++ "h"
+                String.fromInt (max 1 (a // 3600)) ++ "h"
 
             else if a < 86400 * 30 then
                 String.fromInt (a // 86400) ++ "d"
