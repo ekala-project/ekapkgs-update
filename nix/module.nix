@@ -475,8 +475,13 @@ in
           lib.types.submodule {
             options = {
               name = lib.mkOption {
-                type = lib.types.str;
-                description = "Unique name for this repository.";
+                # Must match `config::is_valid_repo_name`: `+` separates the
+                # repo from the attr path in worktree/failure directory names.
+                type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9_-]*";
+                description = ''
+                  Unique name for this repository: ASCII letters, digits, `-`
+                  and `_`, starting with a letter or digit.
+                '';
                 example = "core-pkgs";
               };
               upstream = lib.mkOption {

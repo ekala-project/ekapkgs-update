@@ -250,11 +250,7 @@ pub(super) async fn perform_update(
 
     // Create a worktree for this update (repo-qualified so the same attr
     // path in two watched repos doesn't share a worktree)
-    let worktree_key = if req.repo().is_empty() {
-        attr_path.clone()
-    } else {
-        format!("{}-{}", req.repo(), attr_path)
-    };
+    let worktree_key = super::preservation::repo_scoped_name(req.repo(), attr_path);
     let worktree_path = match create_worktree(&repo_dir, &worktree_key).await {
         Ok(path) => path,
         Err(e) => {

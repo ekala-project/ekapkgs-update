@@ -178,7 +178,7 @@ Progress (`packages_evaluated`, `packages_backoff`) is written to the session ev
 
 1. Receives `UpdateRequest` from channel
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
-3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>-<attr>` in multi-repo watch), supports concurrency and PRs
+3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update` — serializes git operations via `Arc<Mutex<()>>`, no PR support
 5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup failed or rebuild limit) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
 6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
@@ -296,7 +296,7 @@ When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can
 
 ### Database State and Backoff (`database/updates.rs`)
 
-`updates` is keyed by `(repo_name, attr_path)`. `repo_name = ''` is used by `run` and legacy watch; multi-repo watch uses the config name (`default` is reserved — the dashboard labels `''` with it; rejected by `ConfigFile::validate` and a NixOS module assertion). All `updates` methods take `repo_name` first. `autofix_queue` / `autofix_attempts` are repo-scoped the same way (via `FailureArtifacts.repo_name`; preserved failures live under `failed/<session>/[<repo>-]<attr>/`).
+`updates` is keyed by `(repo_name, attr_path)`. `repo_name = ''` is used by `run` and legacy watch; multi-repo watch uses the config name (`default` is reserved — the dashboard labels `''` with it; rejected by `ConfigFile::validate` and a NixOS module assertion; names are limited to `[A-Za-z0-9][A-Za-z0-9_-]*` so the `+` separator stays unambiguous). All `updates` methods take `repo_name` first. `autofix_queue` / `autofix_attempts` are repo-scoped the same way (via `FailureArtifacts.repo_name`; preserved failures live under `failed/<session>/[<repo>+]<attr>/`; older `<repo>-<attr>` dirs are still found via `manifest.json`).
 
 `status` values:
 
