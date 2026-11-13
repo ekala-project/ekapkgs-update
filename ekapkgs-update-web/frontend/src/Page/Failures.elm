@@ -23,6 +23,7 @@ type alias Facets =
 type alias Data =
     { logs : List Api.Log
     , total : Int
+    , page : Int
     , perPage : Int
     , facets : Facets
     }
@@ -30,9 +31,10 @@ type alias Data =
 
 decoder : D.Decoder Data
 decoder =
-    D.map4 Data
+    D.map5 Data
         (D.field "logs" (D.list Api.log))
         (D.field "total" D.int)
+        (D.field "page" D.int)
         (D.field "per_page" D.int)
         (D.field "facets"
             (D.map3 Facets
@@ -80,7 +82,7 @@ view ctx data =
 
                 else
                     [ div [ class "log-list" ] (List.map (View.logEntry ctx.now True) data.logs)
-                    , View.pager ctx { perPage = data.perPage, total = data.total }
+                    , View.pager ctx { page = data.page, perPage = data.perPage, total = data.total }
                     ]
                )
     }

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::{Params, flag, param};
 use crate::error::{ApiResult, AppError};
-use crate::params::{parse_page, repo_from_param};
+use crate::params::{clamp_page, parse_page, repo_from_param};
 use crate::queries::failures::{self as fail_q, FailureFilter};
 use crate::queries::packages::{self as pkg_q, PackageFilter, PackageSort};
 use crate::queries::sessions::{self as sess_q, SessionFilter};
@@ -146,9 +146,9 @@ pub async fn packages(
     let pool = state.db.pool();
     let filter = package_filter(&params);
     let sort = PackageSort::parse(param(&params, "sort").as_deref());
-    let page = page(&params);
     let limit = limit(&params, PACKAGES_PER_PAGE);
     let total = pkg_q::count(pool, &filter).await?;
+    let page = clamp_page(page(&params), total, limit);
     let rows = pkg_q::list(pool, &filter, sort, limit, (page - 1) * limit).await?;
     let counts = pkg_q::status_counts(pool, &filter).await?;
     let all_total = pkg_q::status_counts(pool, &PackageFilter::default())
@@ -221,9 +221,9 @@ pub async fn sessions(
 ) -> ApiResult<Json<Value>> {
     let pool = state.db.pool();
     let filter = session_filter(&params);
-    let page = page(&params);
     let limit = limit(&params, SESSIONS_PER_PAGE);
     let total = sess_q::count(pool, &filter).await?;
+    let page = clamp_page(page(&params), total, limit);
     let rows = sess_q::list(pool, &filter, limit, (page - 1) * limit).await?;
     let hidden_empty = if filter.show_empty {
         0
@@ -291,9 +291,9 @@ pub async fn failures(
         phase: param(&params, "phase"),
         error_type: param(&params, "error_type"),
     };
-    let page = page(&params);
     let limit = limit(&params, FAILURES_PER_PAGE);
     let total = fail_q::count(pool, &filter).await?;
+    let page = clamp_page(page(&params), total, limit);
     let rows = fail_q::list(pool, &filter, limit, (page - 1) * limit).await?;
     let (repos, phases, error_types) = fail_q::facets(pool).await?;
     Ok(Json(json!({
@@ -313,13 +313,14 @@ pub async fn watch(
 ) -> ApiResult<Json<Value>> {
     let pool = state.db.pool();
     let kind = param(&params, "kind").filter(|k| k == "poll" || k == "index");
-    let page = page(&params);
     let limit = limit(&params, CYCLES_PER_PAGE);
+    let cycle_total = watch_q::cycle_count(pool, kind.as_deref()).await?;
+    let page = clamp_page(page(&params), cycle_total, limit);
     Ok(Json(json!({
         "repos": watch_q::repos(pool).await?,
         "kind": kind,
         "cycles": watch_q::cycles(pool, kind.as_deref(), limit, (page - 1) * limit).await?,
-        "cycle_total": watch_q::cycle_count(pool, kind.as_deref()).await?,
+        "cycle_total": cycle_total,
         "cycle_counts": {
             "all": watch_q::cycle_count(pool, None).await?,
             "poll": watch_q::cycle_count(pool, Some("poll")).await?,

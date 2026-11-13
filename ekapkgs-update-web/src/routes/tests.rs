@@ -466,10 +466,20 @@ async fn api_packages_paginate() {
     assert_eq!(len(&limited["packages"]), 10);
     assert_eq!(limited["per_page"], 10);
 
-    // Past the end is an empty page, not an error.
-    let beyond = api(&app, "/api/packages?page=99").await;
-    assert_eq!(len(&beyond["packages"]), 0);
+    // Past the end clamps to the last page, which the response reports.
+    let beyond = api(&app, "/api/packages?sort=attr&page=99").await;
+    assert_eq!(beyond["page"], 2);
     assert_eq!(beyond["total"], 68);
+    assert_eq!(beyond["packages"], second["packages"]);
+
+    let beyond_limited = api(&app, "/api/packages?limit=10&page=99").await;
+    assert_eq!(beyond_limited["page"], 7);
+    assert_eq!(len(&beyond_limited["packages"]), 8);
+
+    // A filter with no matches still has one (empty) page.
+    let none = api(&app, "/api/packages?q=zzz&page=5").await;
+    assert_eq!(none["page"], 1);
+    assert_eq!(len(&none["packages"]), 0);
 }
 
 #[tokio::test]
@@ -555,6 +565,13 @@ async fn api_sessions() {
     let cancelled = api(&app, "/api/sessions?status=cancelled").await;
     assert_eq!(cancelled["total"], 0);
 
+    // Out-of-range pages clamp to the last page.
+    let beyond = api(&app, "/api/sessions?show_empty=1&limit=3&page=99").await;
+    assert_eq!(beyond["page"], 2);
+    assert_eq!(len(&beyond["sessions"]), 1);
+    let none = api(&app, "/api/sessions?status=cancelled&page=4").await;
+    assert_eq!(none["page"], 1);
+
     let detail = api(&app, &format!("/api/sessions/{RUN_DONE}")).await;
     assert_eq!(detail["session"]["id"], RUN_DONE);
     assert!(detail["session"].get("config_json").is_some());
@@ -609,6 +626,14 @@ async fn api_failures() {
 
     let none = api(&app, "/api/failures?q=zzz").await;
     assert_eq!(none["total"], 0);
+
+    // Out-of-range pages clamp to the last page.
+    let beyond = api(&app, "/api/failures?limit=1&page=99").await;
+    assert_eq!(beyond["page"], 2);
+    assert_eq!(len(&beyond["logs"]), 1);
+    let first = api(&app, "/api/failures?limit=1").await;
+    assert_ne!(beyond["logs"][0], first["logs"][0]);
+    assert_eq!(api(&app, "/api/failures?q=zzz&page=3").await["page"], 1);
 }
 
 #[tokio::test]
@@ -641,6 +666,14 @@ async fn api_watch() {
     let bogus = api(&app, "/api/watch?kind=bogus").await;
     assert!(bogus["kind"].is_null());
     assert_eq!(bogus["cycle_total"], 4);
+
+    // Out-of-range pages clamp to the last page of the selected kind.
+    let beyond = api(&app, "/api/watch?kind=poll&limit=2&page=99").await;
+    assert_eq!(beyond["page"], 2);
+    assert_eq!(len(&beyond["cycles"]), 1);
+    let index_beyond = api(&app, "/api/watch?kind=index&page=9").await;
+    assert_eq!(index_beyond["page"], 1);
+    assert_eq!(index_beyond["cycles"][0]["id"], 1);
 }
 
 #[tokio::test]
@@ -737,6 +770,14 @@ async fn empty_database_serves_every_endpoint() {
     assert_eq!(api(&app, "/api/sessions").await["total"], 0);
     assert_eq!(api(&app, "/api/failures").await["total"], 0);
     assert_eq!(api(&app, "/api/watch").await["cycle_total"], 0);
+    for uri in [
+        "/api/packages?page=7",
+        "/api/sessions?page=7",
+        "/api/failures?page=7",
+        "/api/watch?page=7",
+    ] {
+        assert_eq!(api(&app, uri).await["page"], 1, "{uri}");
+    }
 
     let reply = get(&app, "/").await;
     assert_eq!(reply.status, StatusCode::OK);

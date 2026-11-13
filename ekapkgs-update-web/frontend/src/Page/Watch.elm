@@ -32,6 +32,7 @@ type alias Data =
     , cycles : List Api.Cycle
     , cycleTotal : Int
     , cycleCounts : CycleCounts
+    , page : Int
     , perPage : Int
     , lastPoll : Maybe Api.Cycle
     , sourceTypes : List Api.SourceTypeCount
@@ -48,6 +49,7 @@ decoder =
         |> Api.required "cycles" (D.list Api.cycle)
         |> Api.required "cycle_total" D.int
         |> Api.required "cycle_counts" cycleCounts
+        |> Api.required "page" D.int
         |> Api.required "per_page" D.int
         |> Api.nullable "last_poll" Api.cycle
         |> Api.required "source_types" (D.list Api.sourceTypeCount)
@@ -451,7 +453,7 @@ viewCycles ctx data =
                     , tbody [] (List.map (viewCycle ctx.now) data.cycles)
                     ]
                 ]
-        , View.pager ctx { perPage = data.perPage, total = data.cycleTotal }
+        , View.pager ctx { page = data.page, perPage = data.perPage, total = data.cycleTotal }
         ]
 
 

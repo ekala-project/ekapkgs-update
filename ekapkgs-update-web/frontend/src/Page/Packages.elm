@@ -23,6 +23,7 @@ type alias Data =
     { packages : List Api.Package
     , total : Int
     , allTotal : Int
+    , page : Int
     , perPage : Int
     , sort : String
     , sorts : List Sort
@@ -38,6 +39,7 @@ decoder =
         |> Api.required "packages" (D.list Api.package)
         |> Api.required "total" D.int
         |> Api.required "all_total" D.int
+        |> Api.required "page" D.int
         |> Api.required "per_page" D.int
         |> Api.required "sort" D.string
         |> Api.required "sorts"
@@ -147,7 +149,7 @@ view ctx data =
                     , tbody [] (List.map (row ctx showRepo) data.packages)
                     ]
                 ]
-        , View.pager ctx { perPage = data.perPage, total = data.total }
+        , View.pager ctx { page = data.page, perPage = data.perPage, total = data.total }
         ]
     }
 
