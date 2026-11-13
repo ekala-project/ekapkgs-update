@@ -661,6 +661,31 @@ async fn git_commit(pkg_dir: &str, commit_msg: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Snapshot the working tree before a branch-mode update.
+///
+/// A failure here (e.g. `git status` failing while another process holds
+/// `index.lock`) is a repository-level setup failure, the branch-mode
+/// counterpart of worktree mode's "Worktree creation failed": nothing has
+/// been attempted or touched yet and the package is not at fault. So it is
+/// reported as [`UpdateResult::Skipped`] (session `skipped` counter, warning
+/// logged) without `record_failed_update`: a per-package failure backoff
+/// would park the version for 2 days, in watch for every package dispatched
+/// while the repository was briefly locked. Leaving the `updates` row as is
+/// means watch retries on its next poll and `run` on its next pass, bounded
+/// by their own cadence rather than looping. (Previously this was an `Err`,
+/// which `run_service` counted as failed without recording anything.)
+async fn take_snapshot(
+    attr_path: &str,
+    pkg_dir: &str,
+) -> Result<super::branch_git::DirtySnapshot, UpdateResult> {
+    super::branch_git::DirtySnapshot::take(Path::new(pkg_dir))
+        .await
+        .map_err(|e| {
+            warn!("{}: Failed to snapshot working tree: {:#}", attr_path, e);
+            UpdateResult::Skipped(format!("Working tree snapshot failed: {e:#}"))
+        })
+}
+
 /// Perform a package update directly in the working tree (no worktree isolation).
 /// Used in commit mode where changes are committed directly to the repo.
 /// On failure, reverts every path the update dirtied (see `branch_git`).
@@ -701,7 +726,10 @@ pub(super) async fn perform_direct_update(
     // packages created by a Claude fix) are committed or reverted with this update.
     let snapshot = {
         let _lock = git_mutex.lock().await;
-        super::branch_git::DirtySnapshot::take(Path::new(&pkg_dir)).await?
+        match take_snapshot(attr_path, &pkg_dir).await {
+            Ok(snapshot) => snapshot,
+            Err(skipped) => return Ok(skipped),
+        }
     };
 
     // Perform the update directly in the working tree (commit handled separately under mutex).
@@ -1199,4 +1227,26 @@ async fn prompt_for_pr_confirmation(
 
     let response = response.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A snapshot failure is a setup failure reported as `Skipped`, not an
+    /// `Err` that `run_service` would count as failed without recording it.
+    #[tokio::test]
+    async fn test_snapshot_failure_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = take_snapshot("hello", &dir.path().to_string_lossy()).await;
+        match result {
+            Err(UpdateResult::Skipped(reason)) => {
+                assert!(
+                    reason.starts_with("Working tree snapshot failed"),
+                    "{reason}"
+                );
+            },
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
 }
