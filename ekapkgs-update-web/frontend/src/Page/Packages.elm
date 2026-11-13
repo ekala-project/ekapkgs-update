@@ -323,16 +323,28 @@ prLink : Api.Package -> Html msg
 prLink p =
     case Format.safeUrl p.prUrl of
         Just url ->
-            a [ href url, target "_blank", rel "noopener noreferrer" ]
-                [ text
-                    (case p.prNumber of
-                        Just n ->
-                            "#" ++ String.fromInt n
+            let
+                state =
+                    Format.prState p.status
+            in
+            span []
+                (a [ href url, target "_blank", rel "noopener noreferrer", title (state ++ " PR") ]
+                    [ text
+                        (case p.prNumber of
+                            Just n ->
+                                "#" ++ String.fromInt n
 
-                        Nothing ->
-                            "PR"
-                    )
-                ]
+                            Nothing ->
+                                "PR"
+                        )
+                    ]
+                    :: (if state == "open" then
+                            []
+
+                        else
+                            [ text " ", span [ class "muted small" ] [ text state ] ]
+                       )
+                )
 
         Nothing ->
             span [ class "muted" ] [ text Format.dash ]

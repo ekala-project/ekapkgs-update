@@ -32,7 +32,7 @@ pub const CYCLES_PER_PAGE: i64 = 25;
 pub const SUCCESS_WINDOW_DAYS: i64 = 30;
 /// Recent phases the dashboard groups into its activity feed.
 const ACTIVITY_SAMPLE: i64 = 300;
-/// Open PRs listed on the dashboard.
+/// Latest PRs (open or merged) listed on the dashboard.
 const RECENT_PRS: i64 = 8;
 /// Running phases fetched for the "in progress" panel.
 const RUNNING_PHASES: i64 = 200;

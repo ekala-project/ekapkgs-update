@@ -207,7 +207,8 @@ pub struct StatusCounts {
     pub proposed: i64,
     pub failed: i64,
     pub upstream_error: i64,
-    /// Packages with a PR URL recorded.
+    /// Subset of `proposed` with a PR URL recorded. `pr_url` is kept as
+    /// history after the proposal is merged, so the status must be checked.
     pub open_prs: i64,
 }
 
@@ -219,7 +220,8 @@ pub async fn status_counts(
 ) -> sqlx::Result<StatusCounts> {
     let sql = format!(
         "SELECT u.status, COUNT(*), COALESCE(SUM(CASE WHEN {} THEN 1 ELSE 0 END), 0), \
-         COALESCE(SUM(CASE WHEN u.pr_url IS NOT NULL THEN 1 ELSE 0 END), 0) \
+         COALESCE(SUM(CASE WHEN u.status = 'proposed' AND u.pr_url IS NOT NULL \
+         THEN 1 ELSE 0 END), 0) \
          FROM updates u{FILTER_SQL} GROUP BY u.status",
         backlog_sql!()
     );
@@ -246,7 +248,8 @@ pub async fn status_counts(
     Ok(counts)
 }
 
-/// Packages with a recorded PR, most recently attempted first.
+/// Packages with a recorded PR, most recently attempted first. Includes
+/// merged proposals (`pr_url` is kept as history); the status tells them apart.
 pub async fn recent_prs(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<PackageRow>> {
     let sql = format!(
         "SELECT {} FROM updates u WHERE u.pr_url IS NOT NULL \
