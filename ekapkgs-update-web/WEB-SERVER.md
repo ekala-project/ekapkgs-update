@@ -203,9 +203,29 @@ has no `postInstall`.
   - the live fingerprint changing after a write, and `/ws/live` rejecting
     a non-upgrade request.
 
-Query and parameter helpers have unit tests next to their code. The Elm
-code has no unit tests (`elm-test` needs node). It is type-checked by every
-build.
+Query and parameter helpers have unit tests next to their code.
+
+The Elm frontend has table-driven unit tests in `frontend/tests/`
+(elm-explorations/test). They cover `Format` (timestamp parsing, relative
+times, durations, number and byte formatting, `safeUrl`, upstream links,
+tones, phases), `Route` (`fromUrl` for every page, `apiUrl`, `parseQuery`,
+`withQuery`), `Page.Session.Item` and the session decoder. Every
+`*Test.elm` module exposes `suite : Test`, and `tests/Table.elm` turns
+`( input, expected )` rows into tests.
+
+There is no `elm-test` (it needs node). `frontend/test-runner/run.sh`
+instead:
+
+1. writes `elm-stuff/tests/elm.json`, which promotes the test-dependencies
+   to dependencies;
+2. generates a `TestMain` that passes every suite to `TestRunner.program`;
+3. compiles it with `elm make` and runs it with QuickJS (`driver.js`).
+
+The runner reports failures and exits non-zero on any failure, `Test.todo`,
+`Test.only` or `Test.skip`. `nix flake check` runs the same script in the
+sandbox (`checks.<system>.web-frontend-tests`, `nix/web-frontend-tests.nix`).
+The test-dependencies are pinned in `nix/web-frontend/` along with the
+other packages.
 
 ## Known limitations
 

@@ -153,6 +153,18 @@ For a quick type check of the frontend alone:
 cd ekapkgs-update-web/frontend && elm make src/Main.elm --output=/dev/null
 ```
 
+The frontend's unit tests live in `frontend/tests/`. The runner needs elm,
+jq and QuickJS (`qjs`), all in the dev shell on x86_64-linux:
+
+```bash
+nix develop --command ekapkgs-update-web/frontend/test-runner/run.sh
+nix build .#checks.x86_64-linux.web-frontend-tests   # same, in the sandbox
+```
+
+Pass a seed (`run.sh 42`) to vary fuzz tests. A new test module must be
+named `*Test.elm` and expose `suite : Test`. The runner picks it up
+automatically.
+
 `src/routes/tests.rs` drives every API endpoint against an in-memory
 database with the real migrations. It does this once with a fixture that
 covers every table and once with an empty database. It also checks filters,

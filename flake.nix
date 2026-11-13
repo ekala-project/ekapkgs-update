@@ -28,6 +28,13 @@
           inherit (pkgs) ekapkgs-update-web ekapkgs-update-web-frontend;
         };
 
+      # The Elm unit tests, gated like the frontend package.
+      checks =
+        pkgs:
+        pkgs.lib.optionalAttrs (pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.elm) {
+          web-frontend-tests = pkgs.callPackage ./nix/web-frontend-tests.nix { };
+        };
+
       devShells = pkgs: {
         default = pkgs.mkDevShell {
           nativeBuildInputs =
@@ -44,8 +51,13 @@
               # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
             ]
             # The web dashboard's Elm frontend (built by ekapkgs-update-web's
-            # build.rs). ekapkgs only packages elm for x86_64-linux.
-            ++ lib.optional (lib.meta.availableOn stdenv.hostPlatform elm) elm;
+            # build.rs) and its test runner (jq, qjs). ekapkgs only packages
+            # elm for x86_64-linux.
+            ++ lib.optionals (lib.meta.availableOn stdenv.hostPlatform elm) [
+              elm
+              jq
+              quickjs
+            ];
           buildInputs = with pkgs; [
             openssl
             sqlite

@@ -119,7 +119,11 @@ parseQuery : Maybe String -> Dict String String
 parseQuery raw =
     let
         dec s =
-            String.replace "+" " " s |> Url.percentDecode |> Maybe.withDefault s
+            let
+                spaced =
+                    String.replace "+" " " s
+            in
+            Url.percentDecode spaced |> Maybe.withDefault spaced
 
         pair part =
             case String.split "=" part of
