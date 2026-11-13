@@ -316,6 +316,8 @@ Successful updates (`record_successful_update`) reset `failure_count` and back o
 
 The web dashboard (`ekapkgs-update-web`) reads these tables directly. Keep the migration comments in `migrations/20261111_dashboard_data.sql` in sync with the column semantics.
 
+Databases from before 20261111: `20261113_legacy_failure_backfill.sql` marks packages whose newest failure log is newer than `last_attempted` as `failed`. After the migrations, `Database::new` calls `repair_derived_state` (`database/updates.rs`), which does the parts that need Rust. It merges `proposed` rows the tree has reached (`version_at_least`) and fills a missing `last_error` with `summarize_error`. It is idempotent and best effort; never edit an applied migration, because sqlx checksums them.
+
 ### CommitStrategy (`cli.rs`)
 
 - **Worktrees** (default): Each update in an isolated git worktree. Full concurrency and PR support.
