@@ -38,8 +38,10 @@ pub struct FailureArtifacts {
 
 impl FailureArtifacts {
     /// Directory structure:
-    /// `~/.cache/ekapkgs-update/failed/{session_id}/[{repo_name}-]{attr_path}/`
-    /// (one watch session can fail the same attr in several repos).
+    /// `~/.cache/ekapkgs-update/failed/{session_id}/[{repo_name}+]{attr_path}/`
+    /// (one watch session can fail the same attr in several repos; see
+    /// [`repo_scoped_name`]). Lookups read `manifest.json`, not the directory
+    /// name, so older `{repo_name}-{attr_path}` directories are still found.
     pub fn base_path(
         session_id: &str,
         repo_name: &str,
@@ -66,13 +68,26 @@ impl FailureArtifacts {
     }
 }
 
-fn package_dir_name(repo_name: &str, attr_path: &str) -> String {
-    let attr = attr_path.replace(['.', '/'], "_");
+/// Separator between the repo name and the attr path in repo-scoped names.
+/// Repo names cannot contain it (`config::is_valid_repo_name`), so the first
+/// `+` always ends the repo name: the encoding stays unambiguous although
+/// both repo names and attr paths may contain `-`.
+const REPO_SEPARATOR: char = '+';
+
+/// Unique name for `attr_path` within `repo_name`: the attr path itself for
+/// the unnamed scope, `{repo_name}+{attr_path}` otherwise. Used for worktree
+/// names and preserved-failure directories, so updates in different repos of
+/// one watch cycle never share (and delete) each other's worktree.
+pub fn repo_scoped_name(repo_name: &str, attr_path: &str) -> String {
     if repo_name.is_empty() {
-        attr
+        attr_path.to_owned()
     } else {
-        format!("{}-{attr}", repo_name.replace(['.', '/'], "_"))
+        format!("{repo_name}{REPO_SEPARATOR}{attr_path}")
     }
+}
+
+fn package_dir_name(repo_name: &str, attr_path: &str) -> String {
+    repo_scoped_name(repo_name, &attr_path.replace(['.', '/'], "_"))
 }
 
 /// Preserve a failed update's context for later inspection
@@ -482,12 +497,22 @@ mod tests {
         );
         assert_eq!(
             package_dir_name("core", "python3Packages.foo"),
-            "core-python3Packages_foo"
+            "core+python3Packages_foo"
         );
         assert_ne!(
             package_dir_name("core", "foo"),
             package_dir_name("extra", "foo")
         );
+    }
+
+    #[test]
+    fn repo_scoped_names_do_not_collide_on_dashes() {
+        // repo `a` + attr `b-c` and repo `a-b` + attr `c` used to both map
+        // to `a-b-c`.
+        assert_eq!(repo_scoped_name("a", "b-c"), "a+b-c");
+        assert_eq!(repo_scoped_name("a-b", "c"), "a-b+c");
+        assert_eq!(repo_scoped_name("", "b-c"), "b-c");
+        assert_ne!(package_dir_name("a", "b-c"), package_dir_name("a-b", "c"));
     }
 
     #[test]

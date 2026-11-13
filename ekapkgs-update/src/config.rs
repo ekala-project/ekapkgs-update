@@ -50,6 +50,17 @@ const APP_NAME: &str = "ekapkgs-update";
 /// `default`, so a real repo with this name would be indistinguishable.
 pub const RESERVED_REPO_NAME: &str = "default";
 
+/// Whether `name` is an allowed repo name: an ASCII letter or digit followed
+/// by letters, digits, `-` or `_`. Repo names are joined with attr paths by
+/// `+` into worktree and preserved-failure names
+/// (`commands::run::preservation::repo_scoped_name`), so they must never
+/// contain it, and they must be safe as a path component.
+pub fn is_valid_repo_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Configuration for a single watched repository.
 ///
 /// Used by the `watch` command to track multiple upstream repositories,
@@ -244,6 +255,13 @@ impl ConfigFile {
         for repo in &self.repos {
             if repo.name.is_empty() {
                 bail!("repos: each repo must have a non-empty name");
+            }
+            if !is_valid_repo_name(&repo.name) {
+                bail!(
+                    "repos: invalid repo name '{}' (use ASCII letters, digits, '-' and '_', \
+                     starting with a letter or digit)",
+                    repo.name
+                );
             }
             if repo.name.eq_ignore_ascii_case(RESERVED_REPO_NAME) {
                 bail!(
@@ -490,6 +508,19 @@ upstream = "github.com/ekala-project/ekapkgs"
             let config: ConfigFile = toml::from_str(&toml_str).unwrap();
             assert!(config.validate().is_err(), "{name} should be rejected");
         }
+    }
+
+    #[test]
+    fn test_repo_name_charset() {
+        for name in ["core-pkgs", "ekapkgs", "a_b", "a-b", "9lives"] {
+            assert!(is_valid_repo_name(name), "{name} should be accepted");
+        }
+        for name in ["", "a+b", "a.b", "a/b", "-a", "_a", ".", "a b"] {
+            assert!(!is_valid_repo_name(name), "{name} should be rejected");
+        }
+        let toml_str = "[[repos]]\nname = \"a+b\"\nupstream = \"ekala-project/core-pkgs\"\n";
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]
