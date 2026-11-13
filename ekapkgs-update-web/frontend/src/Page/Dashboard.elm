@@ -159,7 +159,7 @@ viewStats data =
               , value = c.proposed
               , href = packagesLink "proposed"
               , tone = "info"
-              , note = Format.thousands c.openPrs ++ " with PR"
+              , note = Format.thousands c.openPrs ++ " with open PR"
               , noteHref = Nothing
               }
             , { label = "Failed"
@@ -740,15 +740,26 @@ viewActivityItem now g =
 
 viewPr : Time.Posix -> Api.Package -> Html Msg
 viewPr now pkg =
+    let
+        state =
+            Format.prState pkg.status
+    in
     li [ class "feed-item" ]
         (List.concat
             [ [ View.badge (Format.packageBadge pkg.status pkg.isBacklog)
               , text " "
               , a [ href (Format.packageHref pkg.repoName pkg.attrPath), class "attr" ] [ text pkg.attrPath ]
               , text " "
-              , span [ class "feed-detail" ] [ View.ver pkg.currentVersion, text " → ", View.ver pkg.proposedVersion ]
+              , span [ class "feed-detail" ]
+                    (if state == "open" then
+                        [ View.ver pkg.currentVersion, text " → ", View.ver pkg.proposedVersion ]
+
+                     else
+                        [ View.ver pkg.currentVersion ]
+                    )
               ]
             , prLink (Format.safeUrl pkg.prUrl) pkg.prNumber
+            , [ text " ", span [ class "tag", title "PR state" ] [ text state ] ]
             , [ text " "
               , span [ class "feed-meta muted small" ] [ View.ts now (pkg.lastChecked |> orElse pkg.lastAttempted) ]
               ]

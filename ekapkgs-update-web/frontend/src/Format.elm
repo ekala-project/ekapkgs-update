@@ -22,6 +22,7 @@ module Format exposing
     , phaseRank
     , phaseShort
     , phases
+    , prState
     , prettyJson
     , ratioPct
     , relative
@@ -807,6 +808,23 @@ packageBadge status backlog =
 
     else
         statusBadge status
+
+
+{-| State of a package's recorded PR, from its `updates.status`. The PR URL is
+kept after the proposal is merged, so only a `proposed` package has an open PR;
+`up_to_date` means the tree caught up with the proposal.
+-}
+prState : String -> String
+prState status =
+    case status of
+        "proposed" ->
+            "open"
+
+        "up_to_date" ->
+            "merged"
+
+        _ ->
+            "earlier"
 
 
 

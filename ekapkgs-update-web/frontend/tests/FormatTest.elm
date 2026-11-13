@@ -346,6 +346,13 @@ suite =
             , ( ( "outdated", False ), { label = "outdated", tone = "warn" } )
             , ( ( "failed", False ), { label = "failed", tone = "critical" } )
             ]
+        , cases "prState"
+            Format.prState
+            [ ( "proposed", "open" )
+            , ( "up_to_date", "merged" )
+            , ( "failed", "earlier" )
+            , ( "outdated", "earlier" )
+            ]
         , test "phaseRank follows the workflow order" <|
             \_ ->
                 Expect.equal (List.range 0 (List.length Format.phases - 1)) (List.map Format.phaseRank Format.phases)

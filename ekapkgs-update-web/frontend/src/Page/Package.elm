@@ -187,6 +187,25 @@ updateFacts ctx u =
 
             else
                 []
+
+        prState =
+            Format.prState u.status
+
+        prAnchor =
+            Format.safeUrl u.prUrl
+                |> Maybe.map
+                    (\url ->
+                        a [ href url, target "_blank", rel "noopener noreferrer" ]
+                            [ text
+                                (case u.prNumber of
+                                    Just n ->
+                                        "PR #" ++ String.fromInt n
+
+                                    Nothing ->
+                                        "PR"
+                                )
+                            ]
+                    )
     in
     List.concat
         [ [ fact "Status" [ View.badge (Format.packageBadge u.status u.isBacklog) ]
@@ -196,26 +215,21 @@ updateFacts ctx u =
         , when (nonEmpty u.proposedVersion /= Nothing)
             (fact "Proposed"
                 (View.ver u.proposedVersion
-                    :: (case Format.safeUrl u.prUrl of
-                            Just url ->
-                                [ text " "
-                                , a [ href url, target "_blank", rel "noopener noreferrer" ]
-                                    [ text
-                                        (case u.prNumber of
-                                            Just n ->
-                                                "PR #" ++ String.fromInt n
+                    :: (case ( prAnchor, prState ) of
+                            ( Just link, "open" ) ->
+                                [ text " ", link ]
 
-                                            Nothing ->
-                                                "PR"
-                                        )
-                                    ]
-                                ]
-
-                            Nothing ->
+                            _ ->
                                 []
                        )
                 )
             )
+        , case ( prAnchor, prState ) of
+            ( Just link, state ) ->
+                when (state /= "open") (fact "Last PR" [ link, text " ", span [ class "muted" ] [ text state ] ])
+
+            ( Nothing, _ ) ->
+                []
         , when (nonEmpty u.baselineVersion /= Nothing)
             (fact "Watch baseline"
                 (View.ver u.baselineVersion

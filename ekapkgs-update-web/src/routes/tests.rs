@@ -63,6 +63,7 @@ INSERT INTO updates (repo_name, attr_path, status, current_version, latest_upstr
     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
   ('extra', 'hello', 'outdated', '2.10', '2.12', NULL, NULL, NULL, 0, NULL, NULL,
     AGO(90), NULL, NULL, NULL, NULL, 2, 'hello', NULL, NULL, 'directory', 'hello', NULL, NULL),
+  -- Merged proposal: the PR is kept as history but is no longer open.
   ('extra', 'curl', 'up_to_date', '8.10.0', '8.10.0', NULL, NULL, NULL, 0, NULL,
     'd4e5f6a7-0000-4000-8000-000000000004', AGO(190), AGO(190), NULL,
     'https://github.com/example/extra/pull/7', 7, 900, 'curl', 'Command line URL tool',
@@ -362,6 +363,9 @@ async fn api_stats_and_dashboard() {
     assert!(!dash["activity"].as_array().unwrap().is_empty());
     let prs = attrs(&dash, "recent_prs");
     assert!(prs.contains(&"ripgrep".to_owned()), "{prs:?}");
+    // The merged curl PR is listed as history but not counted as open.
+    assert!(prs.contains(&"curl".to_owned()), "{prs:?}");
+    assert_eq!(dash["counts"]["open_prs"], 1, "{dash}");
 }
 
 #[tokio::test]

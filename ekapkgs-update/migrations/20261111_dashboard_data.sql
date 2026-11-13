@@ -34,8 +34,8 @@ CREATE TABLE updates_new (
     last_checked TEXT,                        -- last time upstream was compared
     last_attempted TEXT,                      -- last update attempt (or legacy check time)
     next_attempt TEXT,                        -- backoff: do not check/attempt before this
-    pr_url TEXT,
-    pr_number INTEGER,
+    pr_url TEXT,                              -- last PR opened; kept after merge (open iff status = 'proposed')
+    pr_number INTEGER,                        -- number of that PR
     rebuild_count INTEGER,
     cve_resolved_count INTEGER DEFAULT 0,
     cve_introduced_count INTEGER DEFAULT 0,
