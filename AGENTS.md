@@ -179,7 +179,7 @@ Progress (`packages_evaluated`, `packages_backoff`) is written to the session ev
 1. Receives `UpdateRequest` from channel
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
 3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
-4. **Branch mode**: calls `perform_direct_update` — serializes git operations via `Arc<Mutex<()>>`, no PR support
+4. **Branch mode**: calls `perform_direct_update`. It always runs one update at a time (`updater_concurrency`, with a warning if `--concurrent-updates` asked for more), serializes git operations via `Arc<Mutex<()>>`, and has no PR support
 5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup failed or rebuild limit) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
 6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
 
@@ -319,7 +319,7 @@ The web dashboard (`ekapkgs-update-web`) reads these tables directly. Keep the m
 ### CommitStrategy (`cli.rs`)
 
 - **Worktrees** (default): Each update in an isolated git worktree. Full concurrency and PR support.
-- **Branch**: Direct commits to current branch. Git serialized via `Arc<Mutex<()>>`. No PRs.
+- **Branch**: Direct commits to the current branch. No PRs. Updates run one at a time: `updater_concurrency` (`commands/run/config.rs`) clamps `--concurrent-updates` to 1 in `run_service`, for both `run` and `watch`, and logs a warning. The checker still uses the requested value. All updates share one working tree, and `branch_git::DirtySnapshot` treats every path dirtied after an update started as that update's own. Two updates in flight would commit each other's files, or revert them mid-build. Git operations are also serialized via `Arc<Mutex<()>>`.
 
 ### PR Review (`commands/review.rs`)
 
@@ -495,7 +495,7 @@ API integrations (via reqwest):
 
 1. **OOM risk** — Checker tasks spawn nix-instantiate subprocesses. Concurrency MUST be limited via Semaphore (`max(4, concurrency * 2)`).
 2. **File descriptor limit** — `init::increase_fd_limit()` raises soft RLIMIT_NOFILE at startup. Without this, concurrent worktree operations hit "Too many open files".
-3. **Git mutex** — In branch mode, all git operations go through `Arc<Mutex<()>>`. Do not bypass.
+3. **Branch mode is serial** — Branch mode never runs two updates at once (`updater_concurrency`). The mutex alone is not enough: builds and Claude fixes run outside it, and snapshot-based staging and revert would claim another update's files. All git operations also go through `Arc<Mutex<()>>`. Do not bypass either guard.
 4. **Extra nix-build args** — Set once via `OnceLock` in `commands/update/build.rs`. Second call is a no-op.
 5. **Database pool** — `Database` is `Clone` (shared pool). Safe to pass across async tasks.
 6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only single-shot CLI commands (`retry`, `apply`) change the cwd.

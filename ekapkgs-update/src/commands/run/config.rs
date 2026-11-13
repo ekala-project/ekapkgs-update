@@ -11,6 +11,39 @@ use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::database::{Database, SessionCounter, SessionMode};
 use crate::git::PrConfig;
 
+/// Number of updates the updater service may run at once for `commit_strategy`.
+///
+/// Branch mode always runs one update at a time, whatever was requested.
+/// All branch-mode updates share one working tree. The git mutex serializes
+/// only `git add` / `commit` / `checkout`; rewriting, building and
+/// `--claude-fix` edits run outside it. `branch_git::DirtySnapshot` treats
+/// every path dirtied after an update started as that update's own. With two
+/// updates in flight, one would sweep the other's files into its commit, or
+/// delete and check them out mid-build when it reverts. Attributing paths per
+/// update cannot be made exact: two updates can edit the same shared file, and
+/// a fix may touch any path. Serializing whole updates is the only safe
+/// choice. Worktree mode isolates each update and keeps the requested
+/// concurrency.
+#[must_use]
+pub fn updater_concurrency(commit_strategy: CommitStrategy, requested: usize) -> usize {
+    match commit_strategy {
+        CommitStrategy::Branch => 1,
+        CommitStrategy::Worktrees => requested.max(1),
+    }
+}
+
+/// Warn when branch mode ignores a requested `--concurrent-updates` above 1.
+pub fn warn_if_branch_concurrency_ignored(commit_strategy: CommitStrategy, requested: usize) {
+    if updater_concurrency(commit_strategy, requested) < requested {
+        tracing::warn!(
+            "--concurrent-updates {} ignored: branch mode runs one update at a time, because \
+             concurrent updates in the shared working tree would commit or revert each \
+             other's files (use --commit-strategy worktrees for concurrency)",
+            requested
+        );
+    }
+}
+
 /// Configuration for automated run mode
 #[derive(Debug, Clone, Serialize)]
 pub struct RunConfig {
@@ -170,7 +203,9 @@ impl RunConfig {
         let concurrency = if interactive {
             1
         } else if is_branch_mode {
-            // Branch mode defaults to 1 but allows --concurrent-updates override
+            // Updates are clamped to 1 in `run_service` (see
+            // `updater_concurrency`); the requested value still sizes the
+            // release checker.
             concurrent_updates.unwrap_or(1)
         } else {
             concurrent_updates.unwrap_or_else(|| {
@@ -179,10 +214,8 @@ impl RunConfig {
             })
         };
         if is_branch_mode {
-            info!(
-                "Running in branch mode (concurrency: {}, direct commits)",
-                concurrency
-            );
+            warn_if_branch_concurrency_ignored(commit_strategy, concurrency);
+            info!("Running in branch mode (one update at a time, direct commits)");
         } else if interactive {
             info!("Running in interactive mode (single-threaded)");
         } else {
@@ -494,8 +527,11 @@ impl UpdaterServiceConfig {
             None
         };
 
-        // Mutex to serialize git operations in branch mode (concurrent builds
-        // modify different files, but git add/commit must not race)
+        let concurrency = updater_concurrency(commit_strategy, concurrency);
+
+        // Serializes git operations in branch mode. Updates are serialized
+        // there too (see `updater_concurrency`); the mutex stays as a
+        // second guard for the git commands themselves.
         let git_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         let mut join_set: JoinSet<TaskOutput> = JoinSet::new();
@@ -597,6 +633,20 @@ impl UpdaterServiceConfig {
 mod tests {
     use super::super::types::UpdateResult;
     use super::*;
+
+    #[test]
+    fn branch_mode_runs_updates_one_at_a_time() {
+        for requested in [0, 1, 2, 8] {
+            assert_eq!(updater_concurrency(CommitStrategy::Branch, requested), 1);
+        }
+    }
+
+    #[test]
+    fn worktree_mode_keeps_requested_concurrency() {
+        assert_eq!(updater_concurrency(CommitStrategy::Worktrees, 0), 1);
+        assert_eq!(updater_concurrency(CommitStrategy::Worktrees, 1), 1);
+        assert_eq!(updater_concurrency(CommitStrategy::Worktrees, 8), 8);
+    }
 
     #[test]
     fn updater_stats_count_outcomes() {

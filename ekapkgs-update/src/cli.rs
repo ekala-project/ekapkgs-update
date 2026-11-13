@@ -119,7 +119,8 @@ pub enum Commands {
         /// Check for updates without rewriting, building, committing, or creating PRs
         #[arg(long)]
         dry_run: bool,
-        /// Maximum number of concurrent package updates (default: CPU cores / 4)
+        /// Maximum number of concurrent package updates (default: CPU cores / 4).
+        /// Branch commit strategy always runs one update at a time.
         #[arg(long)]
         concurrent_updates: Option<usize>,
         /// Skip packages with 'unstable' in their version
@@ -537,7 +538,8 @@ pub enum Commands {
         /// Check for updates without performing them
         #[arg(long)]
         dry_run: bool,
-        /// Maximum number of concurrent package updates
+        /// Maximum number of concurrent package updates.
+        /// Branch commit strategy always runs one update at a time.
         #[arg(long)]
         concurrent_updates: Option<usize>,
         /// Strategy for committing updates

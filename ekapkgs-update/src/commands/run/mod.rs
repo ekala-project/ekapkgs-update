@@ -6,5 +6,5 @@ pub mod preservation;
 mod types;
 mod updater;
 
-pub use config::{RunConfig, UpdaterServiceConfig};
+pub use config::{RunConfig, UpdaterServiceConfig, warn_if_branch_concurrency_ignored};
 pub use types::UpdateRequest;
