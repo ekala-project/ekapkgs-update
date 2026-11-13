@@ -80,25 +80,21 @@ impl PrEnhancementsConfig {
         use anyhow::Context;
         use tracing::{debug, info};
 
-        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+        use crate::commands::update::build_and_get_outputs;
 
         info!(
             "{}: Building for Cachix push to '{}'",
             attr_path, cache_name
         );
 
-        // Run the build from inside the worktree so any worktree-local Nix
-        // imports resolve correctly. The Nix store deduplicates with any
-        // build performed earlier (e.g. by `update_from_file_path` or the
-        // directory-diff pass), so this is typically near-instant.
-        std::env::set_current_dir(worktree_path)?;
-
-        let outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
+        // Build in the worktree (never via `set_current_dir`: updates run
+        // concurrently and the cwd is process-wide). The Nix store
+        // deduplicates with any build performed earlier (e.g. by
+        // `update_from_file_path` or the directory-diff pass), so this is
+        // typically near-instant.
+        let outputs = build_and_get_outputs(Some(worktree_path), eval_entry_point, attr_path, None)
             .await
             .with_context(|| format!("Failed to build {attr_path} for Cachix push"))?;
-
-        // Best-effort symlink cleanup; not fatal if it fails.
-        cleanup_result_symlinks().ok();
 
         debug!(
             "{}: Built {} output(s) for Cachix push",
@@ -136,23 +132,22 @@ impl PrEnhancementsConfig {
         use tokio::process::Command;
         use tracing::{debug, info};
 
-        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+        use crate::commands::update::build_and_get_outputs;
         use crate::directory_diff::{DiffConfig, compare_build_outputs, format_for_pr_body};
 
         info!("{}: Performing directory diff in worktree", attr_path);
 
-        // Change to worktree directory for all git operations
-        std::env::set_current_dir(worktree_path)?;
+        // Every build and git command below runs in `worktree_path`
+        // explicitly; the process cwd is shared by concurrent updates.
 
         // Step 1: Build new version (current HEAD)
         debug!("{}: Building new version", attr_path);
-        let new_outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
-            .await
-            .with_context(|| {
-                format!("Failed to build new version of {attr_path} for directory diff")
-            })?;
-
-        cleanup_result_symlinks()?;
+        let new_outputs =
+            build_and_get_outputs(Some(worktree_path), eval_entry_point, attr_path, None)
+                .await
+                .with_context(|| {
+                    format!("Failed to build new version of {attr_path} for directory diff")
+                })?;
 
         // Step 2: Check out previous commit
         debug!("{}: Checking out previous commit (HEAD~1)", attr_path);
@@ -169,9 +164,8 @@ impl PrEnhancementsConfig {
 
         // Step 3: Build old version
         debug!("{}: Building old version", attr_path);
-        let old_outputs_result = build_and_get_outputs(eval_entry_point, attr_path, None).await;
-
-        cleanup_result_symlinks().ok();
+        let old_outputs_result =
+            build_and_get_outputs(Some(worktree_path), eval_entry_point, attr_path, None).await;
 
         // Step 4: Check back to new version (return to branch HEAD)
         debug!("{}: Restoring to current commit", attr_path);
@@ -224,17 +218,13 @@ impl PrEnhancementsConfig {
 
         use crate::commands::audit::types::AuditConfig;
         use crate::commands::audit::{checks, report};
-        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+        use crate::commands::update::build_and_get_outputs;
 
         info!("{}: Running package audit", attr_path);
 
-        std::env::set_current_dir(worktree_path)?;
-
-        let outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
+        let outputs = build_and_get_outputs(Some(worktree_path), eval_entry_point, attr_path, None)
             .await
             .with_context(|| format!("Failed to build {attr_path} for audit"))?;
-
-        cleanup_result_symlinks().ok();
 
         let config = AuditConfig {
             check_security: !self.skip_security,
@@ -280,18 +270,16 @@ impl PrEnhancementsConfig {
         use tokio::process::Command;
         use tracing::{debug, info};
 
-        use crate::commands::update::{build_and_get_outputs, cleanup_result_symlinks};
+        use crate::commands::update::build_and_get_outputs;
         use crate::directory_diff::{DiffConfig, compare_build_outputs, format_for_pr_body};
 
         info!("Performing directory diff for {}", attr_path);
 
         // Step 1: Build the new version (files are already updated)
         debug!("Building new version");
-        let new_outputs = build_and_get_outputs(eval_entry_point, attr_path, None)
+        let new_outputs = build_and_get_outputs(None, eval_entry_point, attr_path, None)
             .await
             .context("Failed to build new version for directory diff")?;
-
-        cleanup_result_symlinks()?;
 
         // Step 2: Stash changes to access the old version
         debug!("Stashing changes to access old version");
@@ -313,9 +301,8 @@ impl PrEnhancementsConfig {
 
         // Step 3: Build the old version
         debug!("Building old version");
-        let old_outputs_result = build_and_get_outputs(eval_entry_point, attr_path, None).await;
-
-        let _ = cleanup_result_symlinks();
+        let old_outputs_result =
+            build_and_get_outputs(None, eval_entry_point, attr_path, None).await;
 
         // Step 4: Restore changes (pop stash)
         debug!("Restoring changes");

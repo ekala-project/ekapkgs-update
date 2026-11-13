@@ -483,6 +483,7 @@ API integrations (via reqwest):
 3. **Git mutex** — In branch mode, all git operations go through `Arc<Mutex<()>>`. Do not bypass.
 4. **Extra nix-build args** — Set once via `OnceLock` in `commands/update/build.rs`. Second call is a no-op.
 5. **Database pool** — `Database` is `Clone` (shared pool). Safe to pass across async tasks.
+6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only single-shot CLI commands (`retry`, `apply`) change the cwd.
 
 ## Extension Recipes
 
