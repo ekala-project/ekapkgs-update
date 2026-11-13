@@ -27,9 +27,12 @@
 //! ## Connection Pool and Cleanup
 //!
 //! [`Database::new`] establishes a connection pool and runs schema migrations via
-//! `sqlx::migrate!`. After migrations, it opportunistically cleans up expired cache
-//! entries for both CVE and Repology data by calling their respective `cleanup_cache`
-//! functions. Cleanup failures are logged but do not fail database initialization.
+//! `sqlx::migrate!`. After migrations, it repairs package state the SQL migrations
+//! cannot derive (`repair_derived_state`: stale proposals and missing failure
+//! summaries in databases upgraded from before the dashboard data model), then
+//! opportunistically cleans up expired cache entries for both CVE and Repology data
+//! by calling their respective `cleanup_cache` functions. Repair and cleanup failures
+//! are logged but do not fail database initialization.
 //!
 //! The connection pool remains alive as long as the `Database` struct is in scope.
 //! `Database` is `Clone`, so multiple handles can share the same underlying pool.
@@ -48,7 +51,7 @@ use chrono::{DateTime, Utc};
 pub use sessions::{PhaseRecord, SessionCounter, SessionMode, SessionStatus, UpdateSession};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
 pub use types::{FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus};
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
@@ -172,6 +175,17 @@ impl Database {
             .context("Failed to run database migrations")?;
 
         debug!("Database migrations completed");
+
+        let db = Self { pool };
+
+        // State the SQL migrations can't derive (needs Rust version comparison).
+        // Best effort: a failure here must not stop the CLI or the dashboard.
+        match db.repair_derived_state().await {
+            Ok(0) => {},
+            Ok(n) => info!("Repaired derived state of {} package row(s)", n),
+            Err(e) => warn!("Failed to repair derived package state: {:#}", e),
+        }
+        let pool = db.pool;
 
         // Cleanup expired CVE cache entries
         if let Err(e) = crate::cve::cleanup_cache(&pool).await {

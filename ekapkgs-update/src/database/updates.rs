@@ -261,6 +261,85 @@ impl Database {
         Ok(())
     }
 
+    /// Repair state that the SQL migrations cannot derive, because it needs
+    /// the Rust version comparison or error summary. Runs after every
+    /// migration in [`Database::new`]. It is idempotent: on a database the
+    /// current code has kept up to date it finds nothing to change.
+    ///
+    /// - A `proposed` row whose tree has reached or passed the proposed
+    ///   version is merged, by the same rule as [`Self::upsert_package_info`]:
+    ///   `up_to_date`, proposal cleared, PR kept as history. Databases
+    ///   upgraded from before 20261111 can hold these, because that migration
+    ///   only compared the versions for equality.
+    /// - A `failed` row with no `last_error` (backfilled by
+    ///   20261113_legacy_failure_backfill) gets the summary of its newest
+    ///   failure log.
+    ///
+    /// Returns the number of rows changed.
+    pub(crate) async fn repair_derived_state(&self) -> Result<u64> {
+        let mut changed = 0;
+
+        let proposals: Vec<(String, String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT repo_name, attr_path, current_version, proposed_version FROM updates
+            WHERE status = 'proposed' AND current_version IS NOT NULL
+              AND proposed_version IS NOT NULL AND proposed_version != current_version
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list proposals to reconcile")?;
+        for (repo_name, attr_path, current, proposed) in proposals {
+            if !version_at_least(&current, &proposed) {
+                continue;
+            }
+            changed += sqlx::query(
+                r#"
+                UPDATE updates SET status = 'up_to_date', proposed_version = NULL
+                WHERE repo_name = ? AND attr_path = ? AND status = 'proposed'
+                  AND proposed_version = ?
+                "#,
+            )
+            .bind(&repo_name)
+            .bind(&attr_path)
+            .bind(&proposed)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("reconcile proposal for {repo_name}:{attr_path}"))?
+            .rows_affected();
+        }
+
+        let missing_errors: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT u.repo_name, u.attr_path,
+                   (SELECT l.error_log FROM update_logs l
+                    WHERE l.repo_name = u.repo_name AND l.attr_path = u.attr_path
+                      AND l.status = 'failed'
+                    ORDER BY julianday(l.timestamp) DESC LIMIT 1) AS error_log
+            FROM updates u
+            WHERE u.status = 'failed' AND u.last_error IS NULL AND error_log IS NOT NULL
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list failures without a summary")?;
+        for (repo_name, attr_path, error_log) in missing_errors {
+            changed += sqlx::query(
+                "UPDATE updates SET last_error = ? \
+                 WHERE repo_name = ? AND attr_path = ? AND last_error IS NULL",
+            )
+            .bind(summarize_error(&error_log))
+            .bind(&repo_name)
+            .bind(&attr_path)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("summarize failure for {repo_name}:{attr_path}"))?
+            .rows_affected();
+        }
+
+        Ok(changed)
+    }
+
     /// Write a reconciled observation. `next_attempt` is written verbatim.
     async fn write_observation(
         &self,
@@ -734,6 +813,138 @@ mod tests {
             last_attempted: None,
             next_attempt: None,
         }
+    }
+
+    /// Apply the migrations in `range` by executing their SQL directly.
+    async fn apply_migrations(pool: &sqlx::SqlitePool, range: impl std::ops::RangeBounds<i64>) {
+        use sqlx::Executor;
+        for m in sqlx::migrate!("./migrations").iter() {
+            if range.contains(&m.version) {
+                pool.execute(&*m.sql).await.unwrap();
+            }
+        }
+    }
+
+    /// A database created before the dashboard data model (20261111), with
+    /// the rows the old CLI wrote, upgraded through every later migration
+    /// and then repaired as `Database::new` does.
+    #[tokio::test]
+    async fn legacy_database_is_upgraded_and_repaired() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        apply_migrations(&pool, ..20261111).await;
+        sqlx::query(
+            r#"
+            INSERT INTO updates (attr_path, last_attempted, next_attempt, current_version,
+                                 proposed_version, latest_upstream_version, pr_url, pr_number)
+            VALUES
+              -- open proposal with a PR: stays proposed
+              ('hello', '2026-11-01T00:00:00+00:00', NULL, '2.12', '2.12.1', '2.12.1',
+               'https://github.com/o/r/pull/5', 5),
+              -- tree moved past the proposal: merged
+              ('jq', '2026-11-01T00:00:00+00:00', NULL, '1.8', '1.7', '1.8', NULL, NULL),
+              -- dated versions, tree past the proposal: merged
+              ('nightly', '2026-11-01T00:00:00+00:00', NULL, '0-unstable-2026-02-01',
+               '0-unstable-2026-01-15', NULL, NULL, NULL),
+              -- failed twice after its last check: failed
+              ('curl', '2026-11-01T00:00:00+00:00', '2026-11-09T00:00:00+00:00', '8.9', NULL,
+               '8.10', NULL, NULL),
+              -- failed, then a later check found it up to date: not failed
+              ('zlib', '2026-11-05T00:00:00+00:00', NULL, '1.3', NULL, '1.3', NULL, NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO update_logs (drv_path, attr_path, timestamp, status, error_log,
+                                     old_version, new_version, session_id)
+            VALUES
+              ('/nix/store/a-curl.drv', 'curl', '2026-11-02T00:00:00+00:00', 'failed',
+               'building' || char(10) || 'error: old failure', '8.9', '8.10', 's1'),
+              ('/nix/store/b-curl.drv', 'curl', '2026-11-03T00:00:00+00:00', 'failed',
+               'building' || char(10) || 'error: hash mismatch' || char(10) || 'note: x', '8.9', '8.10', 's2'),
+              ('/nix/store/c-zlib.drv', 'zlib', '2026-11-04T00:00:00+00:00', 'failed',
+               'error: boom', '1.2', '1.3', 's1')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        apply_migrations(&pool, 20261111..).await;
+
+        let db = Database::from(pool);
+        assert_eq!(db.repair_derived_state().await.unwrap(), 3);
+        // Idempotent.
+        assert_eq!(db.repair_derived_state().await.unwrap(), 0);
+
+        let get = |attr: &'static str| {
+            let db = db.clone();
+            async move { db.get_update_record("", attr).await.unwrap().unwrap() }
+        };
+
+        let hello = get("hello").await;
+        assert_eq!(hello.status, UpdateStatus::Proposed);
+        assert_eq!(hello.proposed_version.as_deref(), Some("2.12.1"));
+
+        for attr in ["jq", "nightly"] {
+            let r = get(attr).await;
+            assert_eq!(r.status, UpdateStatus::UpToDate, "{attr}");
+            assert_eq!(r.proposed_version, None, "{attr}");
+        }
+
+        let curl = get("curl").await;
+        assert_eq!(curl.status, UpdateStatus::Failed);
+        assert_eq!(curl.failure_count, 2);
+        assert_eq!(curl.failed_version.as_deref(), Some("8.10"));
+        assert_eq!(curl.last_error.as_deref(), Some("error: hash mismatch"));
+        // The legacy backoff is kept.
+        assert_eq!(
+            curl.next_attempt.map(|t| t.to_rfc3339()).as_deref(),
+            Some("2026-11-09T00:00:00+00:00")
+        );
+        let session: Option<String> =
+            sqlx::query_scalar("SELECT last_session_id FROM updates WHERE attr_path = 'curl'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(session.as_deref(), Some("s2"));
+
+        let zlib = get("zlib").await;
+        assert_eq!(zlib.status, UpdateStatus::UpToDate);
+        assert_eq!(zlib.failure_count, 0);
+    }
+
+    /// Failures and proposals the current code writes are left alone.
+    #[tokio::test]
+    async fn repair_leaves_current_state_alone() {
+        let db = setup_db().await;
+        let session = db
+            .create_session(super::super::SessionMode::Run, None)
+            .await
+            .unwrap();
+        db.record_failed_update(&FailedUpdate {
+            repo_name: "",
+            attr_path: "curl",
+            drv_path: None,
+            error_log: "error: boom",
+            old_version: Some("8.9"),
+            new_version: Some("8.10"),
+            session_id: Some(&session),
+            phase: Some("build"),
+            error_type: None,
+        })
+        .await
+        .unwrap();
+        // Proposal ahead of the tree: still open.
+        db.record_successful_update("", "hello", "2.12", "2.13", None, Some(&session))
+            .await
+            .unwrap();
+
+        assert_eq!(db.repair_derived_state().await.unwrap(), 0);
+        let curl = db.get_update_record("", "curl").await.unwrap().unwrap();
+        assert_eq!(curl.last_error.as_deref(), Some("build: error: boom"));
+        assert_eq!(curl.failure_count, 1);
     }
 
     #[test]

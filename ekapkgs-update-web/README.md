@@ -15,9 +15,13 @@ trends over time. Pages update live while the CLI works.
   `elm.js` with uglify-js, and every response (assets and JSON) is
   gzip-compressed when the client accepts it
 
-The dashboard never writes update state. On startup, `Database::new` creates
-the database file if it is missing and applies the CLI's migrations, so the
-portal can start before the CLI has ever run.
+The dashboard never writes update state while it runs. On startup,
+`Database::new` creates the database file if it is missing and applies the
+CLI's migrations, so the portal can start before the CLI has ever run. It
+then repairs state the SQL migrations cannot derive in databases upgraded
+from before the dashboard data model: proposals the tree has already passed
+are marked merged, and backfilled failures get their error summary. On a
+database the current CLI maintains, this changes nothing.
 
 ## Running
 
