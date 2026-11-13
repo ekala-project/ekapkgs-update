@@ -55,6 +55,15 @@ impl FailureArtifacts {
             .join(package_dir_name(repo_name, attr_path));
         Ok(path)
     }
+
+    /// The package's artifact directory (`failed/{session_id}/[{repo}-]{attr}/`),
+    /// holding the manifest, logs, diff and the `worktree/` copy. This is the
+    /// path recorded as `update_phases.artifacts_path` / `autofix_queue.artifacts_path`.
+    pub fn package_dir(&self) -> &Path {
+        self.worktree_path
+            .parent()
+            .unwrap_or(self.worktree_path.as_path())
+    }
 }
 
 fn package_dir_name(repo_name: &str, attr_path: &str) -> String {
@@ -451,6 +460,18 @@ mod tests {
         );
 
         assert!(find_preserved(&list, "missing", None).is_err());
+    }
+
+    #[test]
+    fn package_dir_is_the_per_package_directory() {
+        let mut a = artifact("core", "foo", "s1");
+        a.worktree_path = PathBuf::from("/cache/failed/s1/core-foo/worktree");
+        assert_eq!(a.package_dir(), Path::new("/cache/failed/s1/core-foo"));
+
+        // Two failures in one session must not share a directory.
+        let mut b = artifact("core", "bar", "s1");
+        b.worktree_path = PathBuf::from("/cache/failed/s1/core-bar/worktree");
+        assert_ne!(a.package_dir(), b.package_dir());
     }
 
     #[test]
