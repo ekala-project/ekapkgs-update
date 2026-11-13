@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::Context;
@@ -148,12 +148,43 @@ pub fn detect_reversed_patch(stderr: &str) -> Option<String> {
         })
 }
 
+/// Temporary directory holding `nix-build` out-links, removed on drop.
+///
+/// Every build gets its own directory so concurrent builds (run/watch
+/// update many packages at once) never share or clobber `result*` links.
+struct OutLinkDir(PathBuf);
+
+impl OutLinkDir {
+    fn create() -> anyhow::Result<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("ekapkgs-update-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create out-link directory {}", dir.display()))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for OutLinkDir {
+    fn drop(&mut self) {
+        // Removing the links only drops their GC roots; the outputs stay in
+        // the store until the next garbage collection.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Build a Nix expression and return all output paths
 ///
 /// Builds the package and returns a list of (output_name, store_path) tuples
-/// for all outputs (e.g., "out", "dev", "lib", etc.)
+/// for all outputs (e.g., "out", "dev", "lib", etc.), with "out" first.
+///
+/// This never reads or changes the process working directory: `nix-build`
+/// runs in `work_dir` (when given, so a relative `eval_entry_point`
+/// resolves against it) and its out-links go to a private temporary
+/// directory that is removed before returning. It is safe to call
+/// concurrently.
 ///
 /// # Arguments
+/// * `work_dir` - Directory to run `nix-build` in (`None`: inherit the cwd)
 /// * `eval_entry_point` - Path to the Nix file to evaluate
 /// * `attr_path` - Attribute path to build
 /// * `attr_suffix` - Optional suffix to append
@@ -161,6 +192,7 @@ pub fn detect_reversed_patch(stderr: &str) -> Option<String> {
 /// # Returns
 /// A vector of (output_name, store_path) tuples, or an error if the build failed
 pub async fn build_and_get_outputs(
+    work_dir: Option<&Path>,
     eval_entry_point: &str,
     attr_path: &str,
     attr_suffix: Option<&str>,
@@ -173,13 +205,18 @@ pub async fn build_and_get_outputs(
 
     debug!("Building {} and extracting outputs", full_attr);
 
-    // Build with nix-build, creating result symlinks
+    let links = OutLinkDir::create()?;
+    let out_link = links.0.join("result");
+
     let mut cmd = Command::new("nix-build");
     cmd.arg(eval_entry_point)
         .arg("-A")
         .arg(&full_attr)
         .arg("-o")
-        .arg("result");
+        .arg(&out_link);
+    if let Some(dir) = work_dir {
+        cmd.current_dir(dir);
+    }
     for arg in get_extra_nix_build_args() {
         cmd.arg(arg);
     }
@@ -190,48 +227,74 @@ pub async fn build_and_get_outputs(
         anyhow::bail!("Build failed for {full_attr}: {stderr}");
     }
 
-    // Get all output paths by reading result symlinks
+    collect_out_links(&links.0)
+}
+
+/// Read the `result` / `result-<output>` links `nix-build -o <dir>/result`
+/// created, as (output_name, store_path) with "out" first and the rest
+/// sorted by name.
+fn collect_out_links(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let mut outputs = Vec::new();
-
-    // Check for the main "result" symlink
-    if std::path::Path::new("result").exists() {
-        let store_path = std::fs::canonicalize("result")?;
-        outputs.push(("out".to_owned(), store_path));
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let output_name = match name.strip_prefix("result") {
+            Some("") => "out",
+            Some(rest) => match rest.strip_prefix('-') {
+                Some(suffix) if !suffix.is_empty() => suffix,
+                _ => continue,
+            },
+            None => continue,
+        };
+        let store_path = std::fs::canonicalize(entry.path())
+            .with_context(|| format!("resolve build output link {name}"))?;
+        outputs.push((output_name.to_owned(), store_path));
     }
-
-    // Check for additional outputs (result-dev, result-lib, etc.)
-    let output_suffixes = ["dev", "lib", "debug", "doc", "man", "info", "bin"];
-    for suffix in &output_suffixes {
-        let link_name = format!("result-{suffix}");
-        if std::path::Path::new(&link_name).exists() {
-            let store_path = std::fs::canonicalize(&link_name)?;
-            outputs.push((suffix.to_string(), store_path));
-        }
-    }
-
+    outputs.sort_by(|(a, _), (b, _)| (a != "out", a).cmp(&(b != "out", b)));
     Ok(outputs)
 }
 
-/// Clean up result symlinks created by nix-build
-///
-/// Removes result, result-dev, result-lib, etc. symlinks from the current directory
-pub fn cleanup_result_symlinks() -> anyhow::Result<()> {
-    let symlinks = [
-        "result",
-        "result-dev",
-        "result-lib",
-        "result-debug",
-        "result-doc",
-        "result-man",
-        "result-info",
-        "result-bin",
-    ];
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
 
-    for link in &symlinks {
-        if std::path::Path::new(link).exists() {
-            std::fs::remove_file(link).with_context(|| format!("remove build symlink {link}"))?;
+    use super::*;
+
+    #[test]
+    fn collect_out_links_names_outputs_out_first() {
+        let links = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        for name in ["out", "dev", "lib", "man"] {
+            std::fs::create_dir(store.path().join(name)).unwrap();
         }
+        symlink(store.path().join("man"), links.path().join("result-man")).unwrap();
+        symlink(store.path().join("out"), links.path().join("result")).unwrap();
+        symlink(store.path().join("dev"), links.path().join("result-dev")).unwrap();
+        symlink(store.path().join("lib"), links.path().join("result-lib")).unwrap();
+        // Not out-links.
+        std::fs::write(links.path().join("resultx"), "").unwrap();
+        std::fs::write(links.path().join("result-"), "").unwrap();
+        std::fs::write(links.path().join("other"), "").unwrap();
+
+        let outputs = collect_out_links(links.path()).unwrap();
+        let names: Vec<_> = outputs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["out", "dev", "lib", "man"]);
+        let store = std::fs::canonicalize(store.path()).unwrap();
+        assert_eq!(outputs[0].1, store.join("out"));
+        assert_eq!(outputs[3].1, store.join("man"));
     }
 
-    Ok(())
+    #[test]
+    fn out_link_dirs_are_unique_and_removed_on_drop() {
+        let a = OutLinkDir::create().unwrap();
+        let b = OutLinkDir::create().unwrap();
+        assert_ne!(a.0, b.0);
+        let path = a.0.clone();
+        assert!(path.is_dir());
+        drop(a);
+        assert!(!path.exists());
+    }
 }

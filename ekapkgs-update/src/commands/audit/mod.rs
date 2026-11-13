@@ -146,10 +146,8 @@ async fn resolve_attr_path(
 ) -> anyhow::Result<(Vec<(String, PathBuf)>, Option<String>)> {
     info!("Building {} from {}", attr_path, file);
 
-    let outputs = crate::commands::update::build_and_get_outputs(file, attr_path, None).await?;
-
-    // Clean up result symlinks
-    crate::commands::update::cleanup_result_symlinks().ok();
+    let outputs =
+        crate::commands::update::build_and_get_outputs(None, file, attr_path, None).await?;
 
     if outputs.is_empty() {
         anyhow::bail!("Build produced no outputs for {attr_path}");
