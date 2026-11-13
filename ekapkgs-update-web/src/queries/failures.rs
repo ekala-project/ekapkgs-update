@@ -19,7 +19,7 @@ pub struct LogRow {
     pub session_id: Option<String>,
     pub phase: Option<String>,
     pub error_type: Option<String>,
-    /// Last [`super::LOG_TAIL_CHARS`] characters of `error_log`.
+    /// Last 6,000 characters of `error_log`.
     pub log_tail: String,
     /// Full length of `error_log` in characters.
     pub log_len: i64,

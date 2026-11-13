@@ -265,232 +265,181 @@ async fn get(app: &Router, uri: &str) -> Reply {
     .await
 }
 
-/// GET `uri`, assert 200 and that every needle occurs in the body.
-async fn expect_ok(app: &Router, uri: &str, needles: &[&str]) -> String {
+/// GET a JSON endpoint, assert 200 and return the parsed body.
+async fn api(app: &Router, uri: &str) -> Value {
     let reply = get(app, uri).await;
     assert_eq!(reply.status, StatusCode::OK, "{uri}: {}", reply.body);
-    let missing: Vec<&str> = needles
-        .iter()
-        .copied()
-        .filter(|needle| !reply.body.contains(needle))
-        .collect();
     assert!(
-        missing.is_empty(),
-        "{uri}: missing {missing:?} in body:\n{}",
-        reply.body
+        reply.content_type().starts_with("application/json"),
+        "{uri}: {}",
+        reply.content_type()
     );
-    reply.body
+    reply.json()
 }
 
-// ── Pages ───────────────────────────────────────────────────────────────
+/// The `attr_path` of every row in `value[key]`.
+fn attrs(value: &Value, key: &str) -> Vec<String> {
+    value[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} is not an array: {value}"))
+        .iter()
+        .map(|row| row["attr_path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn len(value: &Value) -> usize {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("not an array: {value}"))
+        .len()
+}
+
+// ── App shell ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn pages_render_seeded_content() {
+async fn page_routes_serve_the_app_shell() {
     let app = seeded_app().await;
     let run_done = format!("/sessions/{RUN_DONE}");
-    let watch_done = format!("/sessions/{WATCH_DONE}");
-    let cases: Vec<(&str, Vec<&str>)> = vec![
-        (
-            "/",
-            vec![
-                "Running sessions",
-                "Recent activity",
-                "b2c3d4e5",
-                "href=\"/packages/ripgrep?repo=default\"",
-                "Success rate · 30 days",
-                "BuildError",
-                "Latest PRs",
-                "#42",
-                "review the backlog",
-            ],
-        ),
-        (
-            "/packages",
-            vec![
-                "python3Packages.requests",
-                "href=\"/packages/ripgrep?repo=default\"",
-                "outdated · backlog",
-                "upstream error",
-                "#42",
-                "8 results",
-            ],
-        ),
-        (
-            "/packages/ripgrep",
-            vec![
-                "14.1.0",
-                "#42",
-                "BurntSushi/ripgrep",
-                "Fast line-oriented search",
-                "Update history",
-                "a1b2c3d4",
-                "archive/14.0.0.tar.gz",
-            ],
-        ),
-        (
-            "/packages/python3Packages.requests",
-            vec![
-                "BuildError",
-                "hash mismatch in fixed-output derivation",
-                ">escalated<",
-                "still fails after patch",
-                "/var/lib/ekapkgs-update/preserved/requests",
-                "backoff",
-            ],
-        ),
-        (
-            "/packages/hello",
-            vec![
-                "This attribute exists in 2 repositories",
-                "?repo=extra",
-                "2.12",
-            ],
-        ),
-        (
-            "/packages/hello?repo=extra",
-            vec!["2.10", "HashError", "showing the last"],
-        ),
-        (
-            "/sessions",
-            vec![
-                "a1b2c3d4",
-                "b2c3d4e5",
-                "1 finished watch session that attempted nothing is hidden",
-                "Show it",
-            ],
-        ),
-        (
-            run_done.as_str(),
-            vec![
-                "BuildError",
-                "python3Packages.requests",
-                "&quot;concurrency&quot;",
-                "Failure logs",
-                "Raw phases",
-            ],
-        ),
-        (
-            watch_done.as_str(),
-            vec!["Watch poll cycle #3", "curl", "extra"],
-        ),
-        (
-            "/failures",
-            vec![
-                "python3Packages.requests",
-                "HashError",
-                "hash mismatch",
-                // Long logs keep their tail.
-                "final line: HashError",
-                "showing the last 6,000 characters",
-            ],
-        ),
-        (
-            "/watch",
-            vec![
-                "extra",
-                "jqlang/jq",
-                "HTTP 404 Not Found",
-                "nix-eval-jobs exited with status 1",
-                "network unreachable",
-                "deadbeef",
-                "bootstrap",
-                "BurntSushi/ripgrep",
-            ],
-        ),
-        (
-            "/analytics",
-            vec![
-                "Daily outcomes",
-                "BuildError",
-                "Build",
-                "Status by repository",
-                "github",
-                "Largest rebuilds",
-                ">build failed<",
-                "Table view",
-            ],
-        ),
-        ("/analytics?range=7d", vec!["7 days"]),
-        ("/analytics?range=all", vec!["All time"]),
-    ];
-    for (uri, needles) in &cases {
-        let body = expect_ok(&app, uri, needles).await;
-        assert!(
-            !body.contains("START-OF-LOG"),
-            "{uri}: log head was not truncated"
-        );
-        assert!(
-            body.starts_with("<!DOCTYPE html>"),
-            "{uri}: not a full page"
-        );
-        assert!(
-            body.contains("aria-current=\"page\""),
-            "{uri}: no active nav item"
-        );
+    for uri in [
+        "/",
+        "/packages",
+        "/packages?status=failed&page=2",
+        "/packages/python3Packages.requests",
+        "/sessions",
+        run_done.as_str(),
+        "/failures",
+        "/watch",
+        "/analytics?range=7d",
+    ] {
+        let reply = get(&app, uri).await;
+        assert_eq!(reply.status, StatusCode::OK, "{uri}");
+        assert!(reply.content_type().starts_with("text/html"), "{uri}");
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-cache", "{uri}");
+        assert!(reply.body.contains("/static/js/elm.js?v="), "{uri}");
+        assert!(reply.body.contains("/static/js/app.js?v="), "{uri}");
+        assert!(reply.body.contains("/static/css/styles.css?v="), "{uri}");
+    }
+
+    // Unknown paths get the shell too (the frontend renders its 404 page),
+    // but with a 404 status. The shell does not check that a package or
+    // session exists; the API does.
+    for uri in ["/no/such/page", "/fragments/stats", "/packages/a/b"] {
+        let reply = get(&app, uri).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{uri}");
+        assert!(reply.content_type().starts_with("text/html"), "{uri}");
+        assert!(reply.body.contains("/static/js/elm.js?v="), "{uri}");
     }
 }
 
+// ── JSON API ────────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn pages_escape_database_content() {
+async fn api_stats_and_dashboard() {
     let app = seeded_app().await;
-    let body = expect_ok(
-        &app,
-        "/packages/jq",
-        &["Lightweight &lt;b&gt;JSON&lt;/b&gt; processor"],
-    )
-    .await;
-    assert!(!body.contains("<b>JSON</b>"));
+
+    let stats = api(&app, "/api/stats").await;
+    assert_eq!(stats["total_packages"], 8);
+    // Watch sessions that attempted nothing are not counted.
+    assert_eq!(stats["total_sessions"], 3);
+    assert_eq!(stats["running_sessions"], 1);
+    assert!(stats["packages"].is_object());
+    assert!(stats["outcomes_30d"].is_object());
+
+    let dash = api(&app, "/api/dashboard").await;
+    assert_eq!(dash["window_days"], 30);
+    assert_eq!(dash["counts"]["total"], 8);
+    assert!(dash["current"].is_object());
+    assert!(dash["previous"].is_object());
+    let running = dash["running"].as_array().unwrap();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0]["id"], RUN_LIVE);
+    assert!(
+        attrs(&dash, "running_phases").contains(&"fd".to_owned()),
+        "{dash}"
+    );
+    assert_eq!(len(&dash["watch"]["repos"]), 2);
+    assert!(dash["watch"]["last_poll"].is_object());
+    assert!(!dash["activity"].as_array().unwrap().is_empty());
+    let prs = attrs(&dash, "recent_prs");
+    assert!(prs.contains(&"ripgrep".to_owned()), "{prs:?}");
 }
 
 #[tokio::test]
-async fn package_filters_and_status_chips() {
+async fn api_packages_filters_and_sorts() {
     let app = seeded_app().await;
 
-    let backlog = expect_ok(
-        &app,
-        "/packages?status=backlog",
-        &["/packages/fd?repo=default"],
-    )
-    .await;
-    assert!(!backlog.contains("/packages/ripgrep?repo=default"));
+    let all = api(&app, "/api/packages").await;
+    assert_eq!(all["total"], 8);
+    assert_eq!(all["all_total"], 8);
+    assert_eq!(all["page"], 1);
+    assert_eq!(all["per_page"], 50);
+    assert!(all["status_counts"].is_object());
+    assert!(!all["sorts"].as_array().unwrap().is_empty());
+    assert_eq!(len(&all["repos"]), 2);
+    assert!(!all["upstream_types"].as_array().unwrap().is_empty());
 
-    let extra = expect_ok(&app, "/packages?repo=extra", &["/packages/curl?repo=extra"]).await;
-    assert!(!extra.contains("/packages/ripgrep?repo=default"));
+    let failed = api(&app, "/api/packages?status=failed").await;
+    assert_eq!(failed["total"], 1);
+    assert_eq!(attrs(&failed, "packages"), ["python3Packages.requests"]);
+    // Facet counts follow the filter; the overall total does not.
+    assert_eq!(failed["all_total"], 8);
 
-    let search = expect_ok(&app, "/packages?q=requ", &["python3Packages.requests"]).await;
-    assert!(!search.contains("/packages/fd?repo=default"));
+    let backlog = attrs(&api(&app, "/api/packages?status=backlog").await, "packages");
+    assert!(backlog.contains(&"fd".to_owned()), "{backlog:?}");
+    assert!(!backlog.contains(&"ripgrep".to_owned()), "{backlog:?}");
 
-    let upstream = expect_ok(
-        &app,
-        "/packages?upstream=pypi",
-        &["python3Packages.requests"],
-    )
-    .await;
-    assert!(!upstream.contains("/packages/ripgrep?repo=default"));
+    let extra = api(&app, "/api/packages?repo=extra").await;
+    let extra_attrs = attrs(&extra, "packages");
+    assert!(extra_attrs.contains(&"curl".to_owned()), "{extra_attrs:?}");
+    assert!(!extra_attrs.contains(&"ripgrep".to_owned()));
+    for row in extra["packages"].as_array().unwrap() {
+        assert_eq!(row["repo_name"], "extra");
+    }
+    // `default` names the unnamed repository.
+    let default = attrs(&api(&app, "/api/packages?repo=default").await, "packages");
+    assert!(default.contains(&"ripgrep".to_owned()));
+    assert!(!default.contains(&"curl".to_owned()));
 
-    expect_ok(
-        &app,
-        "/packages?q=nothing-matches",
-        &["No matching packages"],
-    )
-    .await;
+    let search = attrs(&api(&app, "/api/packages?q=requ").await, "packages");
+    assert_eq!(search, ["python3Packages.requests"]);
+
+    let upstream = attrs(&api(&app, "/api/packages?upstream=pypi").await, "packages");
+    assert!(upstream.contains(&"python3Packages.requests".to_owned()));
+    assert!(!upstream.contains(&"ripgrep".to_owned()));
+
+    let none = api(&app, "/api/packages?q=nothing-matches").await;
+    assert_eq!(none["total"], 0);
+    assert_eq!(len(&none["packages"]), 0);
 
     // Unknown values and every sort fall back gracefully.
     for uri in [
-        "/packages?status=bogus",
-        "/packages?sort=bogus&page=abc",
-        "/packages?sort=status",
-        "/packages?sort=checked",
-        "/packages?sort=rebuilds",
-        "/packages?sort=failures",
-        "/packages?sort=attr",
+        "/api/packages?status=bogus",
+        "/api/packages?sort=bogus&page=abc&limit=zzz",
+        "/api/packages?sort=status",
+        "/api/packages?sort=checked",
+        "/api/packages?sort=rebuilds",
+        "/api/packages?sort=failures",
+        "/api/packages?sort=attr",
     ] {
-        expect_ok(&app, uri, &["ripgrep"]).await;
+        let body = api(&app, uri).await;
+        assert_eq!(body["total"], 8, "{uri}");
+        assert!(
+            attrs(&body, "packages").contains(&"ripgrep".to_owned()),
+            "{uri}"
+        );
     }
+    let bogus = api(&app, "/api/packages?sort=bogus").await;
+    assert_eq!(bogus["sort"], all["sort"]);
+    let by_attr = api(&app, "/api/packages?sort=attr").await;
+    assert_eq!(by_attr["sort"], "attr");
+    let sorted = attrs(&by_attr, "packages");
+    let mut expected = sorted.clone();
+    expected.sort();
+    assert_eq!(sorted, expected);
 }
 
 #[tokio::test]
-async fn packages_paginate() {
+async fn api_packages_paginate() {
     let pool = seeded_pool().await;
     sqlx::Executor::execute(
         &pool,
@@ -502,195 +451,52 @@ async fn packages_paginate() {
     .unwrap();
     let app = app(pool);
 
-    let first = expect_ok(
-        &app,
-        "/packages?sort=attr",
-        &["Page 1 of 2", "rel=\"next\""],
-    )
-    .await;
-    assert!(first.contains("bulk01"));
-    assert!(!first.contains("/packages/ripgrep?repo=default"));
+    let first = api(&app, "/api/packages?sort=attr").await;
+    assert_eq!(first["total"], 68);
+    assert_eq!(len(&first["packages"]), 50);
+    assert!(attrs(&first, "packages").contains(&"bulk01".to_owned()));
+    assert!(!attrs(&first, "packages").contains(&"ripgrep".to_owned()));
 
-    let second = expect_ok(
-        &app,
-        "/packages?sort=attr&page=2",
-        &["Page 2 of 2", "rel=\"prev\""],
-    )
-    .await;
-    assert!(second.contains("/packages/ripgrep?repo=default"));
-    assert!(!second.contains("bulk01"));
+    let second = api(&app, "/api/packages?sort=attr&page=2").await;
+    assert_eq!(second["page"], 2);
+    assert_eq!(len(&second["packages"]), 18);
+    assert!(attrs(&second, "packages").contains(&"ripgrep".to_owned()));
 
-    // Out-of-range pages clamp to the last page.
-    expect_ok(&app, "/packages?sort=attr&page=99", &["Page 2 of 2"]).await;
+    let limited = api(&app, "/api/packages?limit=10&page=2").await;
+    assert_eq!(len(&limited["packages"]), 10);
+    assert_eq!(limited["per_page"], 10);
 
-    let json = get(&app, "/api/packages?limit=10&page=2").await.json();
-    assert_eq!(json["packages"].as_array().unwrap().len(), 10);
-    assert_eq!(json["total"], 68);
-    assert_eq!(json["page"], 2);
+    // Past the end is an empty page, not an error.
+    let beyond = api(&app, "/api/packages?page=99").await;
+    assert_eq!(len(&beyond["packages"]), 0);
+    assert_eq!(beyond["total"], 68);
 }
 
 #[tokio::test]
-async fn session_filters() {
+async fn api_package_detail() {
     let app = seeded_app().await;
 
-    let running = expect_ok(&app, "/sessions?status=running", &["b2c3d4e5"]).await;
-    assert!(!running.contains(&format!("/sessions/{RUN_DONE}")));
-
-    let watch = expect_ok(&app, "/sessions?mode=watch", &["d4e5f6a7", "Show it"]).await;
-    assert!(!watch.contains(&format!("/sessions/{RUN_DONE}")));
-    assert!(!watch.contains(&format!("/sessions/{WATCH_EMPTY}")));
-
-    expect_ok(
-        &app,
-        "/sessions?mode=watch&show_empty=1",
-        &["c3d4e5f6", "Hide them"],
-    )
-    .await;
-
-    expect_ok(
-        &app,
-        "/sessions?status=cancelled",
-        &["No matching sessions"],
-    )
-    .await;
-
-    // The rollup can be filtered by outcome.
-    let failed = expect_ok(
-        &app,
-        &format!("/sessions/{RUN_DONE}?outcome=failed"),
-        &["python3Packages.requests"],
-    )
-    .await;
-    assert!(!failed.contains("/packages/ripgrep?repo=default"));
-}
-
-#[tokio::test]
-async fn failure_filters() {
-    let app = seeded_app().await;
-    let hash = expect_ok(
-        &app,
-        "/failures?error_type=HashError",
-        &["extra:hello@2.12"],
-    )
-    .await;
-    assert!(!hash.contains("/nix/store/abc-python3.12-requests-2.32.0.drv"));
-
-    let repo = expect_ok(
-        &app,
-        "/failures?repo=default",
-        &["python3Packages.requests"],
-    )
-    .await;
-    assert!(!repo.contains("extra:hello@2.12"));
-
-    let phase = expect_ok(
-        &app,
-        "/failures?phase=build&q=requests",
-        &["requests-2.32.0.drv"],
-    )
-    .await;
-    assert!(!phase.contains("extra:hello@2.12"));
-
-    expect_ok(&app, "/failures?q=zzz", &["No matching failures"]).await;
-}
-
-#[tokio::test]
-async fn watch_cycle_filter() {
-    let app = seeded_app().await;
-    let index = expect_ok(&app, "/watch?kind=index", &["#1"]).await;
-    assert!(!index.contains("network unreachable"));
-    expect_ok(&app, "/watch?kind=poll", &["network unreachable"]).await;
-}
-
-// ── Fragments ───────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn fragments_render_without_layout() {
-    let app = seeded_app().await;
-    let live = format!("/fragments/sessions/{RUN_LIVE}");
-    let done = format!("/fragments/sessions/{RUN_DONE}");
-    let cases: Vec<(&str, Vec<&str>)> = vec![
-        ("/fragments/stats", vec!["Success rate", "tile"]),
-        (
-            "/fragments/active",
-            vec!["b2c3d4e5", "/packages/fd?repo=default"],
-        ),
-        ("/fragments/watch", vec!["Last poll", "extra"]),
-        ("/fragments/activity", vec!["ripgrep", "Latest PRs"]),
-        ("/fragments/sessions", vec!["a1b2c3d4", "b2c3d4e5"]),
-        ("/fragments/sessions?status=running", vec!["b2c3d4e5"]),
-        (
-            live.as_str(),
-            vec!["id=\"session-live\"", "hx-get=", "In flight"],
-        ),
-        (done.as_str(), vec!["id=\"session-live\"", "BuildError"]),
-    ];
-    for (uri, needles) in &cases {
-        let body = expect_ok(&app, uri, needles).await;
-        assert!(
-            !body.contains("<html"),
-            "{uri}: fragment rendered the full layout"
-        );
-    }
-
-    // A finished session's live fragment stops polling.
-    let done_body = get(&app, &done).await.body;
-    assert!(!done_body.contains("hx-get="));
-}
-
-// ── JSON API ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn api_endpoints() {
-    let app = seeded_app().await;
-
-    let stats = get(&app, "/api/stats").await;
-    assert_eq!(stats.status, StatusCode::OK);
-    assert!(stats.content_type().starts_with("application/json"));
-    let stats = stats.json();
-    assert_eq!(stats["total_packages"], 8);
-    // Watch sessions that attempted nothing are not counted.
-    assert_eq!(stats["total_sessions"], 3);
-    assert_eq!(stats["running_sessions"], 1);
-    assert!(stats["packages"].is_object());
-    assert!(stats["outcomes_30d"].is_object());
-
-    let sessions = get(&app, "/api/sessions?status=completed").await.json();
-    assert_eq!(
-        sessions["total"], 2,
-        "empty watch sessions are hidden: {sessions}"
-    );
-    let sessions = get(&app, "/api/sessions?show_empty=1").await.json();
-    assert_eq!(sessions["total"], 4);
-    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 4);
-
-    let phases = get(&app, &format!("/api/sessions/{RUN_DONE}/phases"))
-        .await
-        .json();
-    let phases = phases.as_array().unwrap();
-    assert_eq!(phases.len(), 7);
-    assert_eq!(phases[0]["phase"], "metadata_extraction");
-
-    let packages = get(&app, "/api/packages?status=failed").await.json();
-    assert_eq!(packages["total"], 1);
-    assert_eq!(
-        packages["packages"][0]["attr_path"],
-        "python3Packages.requests"
-    );
-    assert!(packages["status_counts"].is_object());
-
-    let package = get(&app, "/api/packages/python3Packages.requests")
-        .await
-        .json();
+    let package = api(&app, "/api/packages/python3Packages.requests").await;
     assert_eq!(package["attr_path"], "python3Packages.requests");
+    assert_eq!(package["repo_name"], "");
     assert_eq!(package["update"]["status"], "failed");
-    assert_eq!(package["phases"].as_array().unwrap().len(), 2);
-    assert_eq!(package["logs"].as_array().unwrap().len(), 1);
-    assert_eq!(package["autofix"]["queue"].as_array().unwrap().len(), 1);
-    assert_eq!(package["autofix"]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(len(&package["phases"]), 2);
+    assert_eq!(len(&package["logs"]), 1);
+    assert_eq!(len(&package["autofix"]["queue"]), 1);
+    assert_eq!(len(&package["autofix"]["attempts"]), 2);
+    assert!(package["index"].is_array());
+    assert!(package["sources"].is_array());
 
-    let multi = get(&app, "/api/packages/hello?repo=extra").await.json();
+    // Database content is returned verbatim; the frontend escapes it.
+    let jq = api(&app, "/api/packages/jq").await;
+    assert_eq!(
+        jq["update"]["description"],
+        "Lightweight <b>JSON</b> processor"
+    );
+
+    let multi = api(&app, "/api/packages/hello?repo=extra").await;
     assert_eq!(multi["repo_name"], "extra");
+    assert_eq!(len(&multi["repos"]), 2);
     // Autofix rows are scoped by repository, like everything else.
     let queue = multi["autofix"]["queue"].as_array().unwrap();
     assert_eq!(queue.len(), 1);
@@ -698,81 +504,242 @@ async fn api_endpoints() {
     let attempts = multi["autofix"]["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0]["error_message"], "extra repo attempt");
-    let unscoped = get(&app, "/api/packages/hello?repo=default").await.json();
-    assert!(unscoped["autofix"]["queue"].as_array().unwrap().is_empty());
-    assert_eq!(multi["repos"].as_array().unwrap().len(), 2);
 
-    let watch = get(&app, "/api/watch").await.json();
-    assert_eq!(watch["repos"].as_array().unwrap().len(), 2);
+    let unscoped = api(&app, "/api/packages/hello?repo=default").await;
+    assert_eq!(unscoped["repo_name"], "");
+    assert_eq!(len(&unscoped["autofix"]["queue"]), 0);
+}
+
+#[tokio::test]
+async fn api_sessions() {
+    let app = seeded_app().await;
+
+    let visible = api(&app, "/api/sessions").await;
+    assert_eq!(visible["total"], 3);
+    assert_eq!(visible["hidden_empty"], 1);
+    assert!(!visible["facets"].as_array().unwrap().is_empty());
+
+    let completed = api(&app, "/api/sessions?status=completed").await;
+    assert_eq!(completed["total"], 2, "empty watch sessions are hidden");
+
+    let all = api(&app, "/api/sessions?show_empty=1").await;
+    assert_eq!(all["total"], 4);
+    assert_eq!(len(&all["sessions"]), 4);
+    assert_eq!(all["hidden_empty"], 0);
+    assert!(
+        all["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == WATCH_EMPTY)
+    );
+
+    let running = api(&app, "/api/sessions?status=running").await;
+    let ids: Vec<&str> = running["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [RUN_LIVE]);
+
+    let watch = api(&app, "/api/sessions?mode=watch").await;
+    let ids: Vec<&str> = watch["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [WATCH_DONE]);
+
+    let cancelled = api(&app, "/api/sessions?status=cancelled").await;
+    assert_eq!(cancelled["total"], 0);
+
+    let detail = api(&app, &format!("/api/sessions/{RUN_DONE}")).await;
+    assert_eq!(detail["session"]["id"], RUN_DONE);
+    assert!(detail["session"].get("config_json").is_some());
+    assert_eq!(len(&detail["phases"]), 7);
+    let logs = attrs(&detail, "logs");
+    assert_eq!(logs, ["python3Packages.requests"]);
+    assert!(detail["cycle"].is_null());
+
+    let from_watch = api(&app, &format!("/api/sessions/{WATCH_DONE}")).await;
+    assert_eq!(from_watch["cycle"]["id"], 3);
+
+    let phases = api(&app, &format!("/api/sessions/{RUN_DONE}/phases")).await;
+    assert_eq!(len(&phases), 7);
+    assert_eq!(phases[0]["phase"], "metadata_extraction");
+}
+
+#[tokio::test]
+async fn api_failures() {
+    let app = seeded_app().await;
+
+    let all = api(&app, "/api/failures").await;
+    assert_eq!(all["total"], 2);
+    assert_eq!(all["per_page"], 25);
+    assert!(all["facets"]["repos"].is_array());
+    assert!(all["facets"]["phases"].is_array());
+    assert!(all["facets"]["error_types"].is_array());
+
+    let drvs = |body: &Value| -> Vec<String> {
+        body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["drv_path"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let hash = api(&app, "/api/failures?error_type=HashError").await;
+    assert_eq!(drvs(&hash), ["extra:hello@2.12"]);
+    // Long logs are cut to their tail.
+    let tail = hash["logs"][0]["log_tail"].as_str().unwrap();
+    assert!(tail.ends_with("final line: HashError"), "{tail}");
+    assert!(!tail.contains("START-OF-LOG"));
+    assert!(hash["logs"][0]["log_len"].as_i64().unwrap() > 6000);
+
+    let repo = api(&app, "/api/failures?repo=default").await;
+    assert_eq!(attrs(&repo, "logs"), ["python3Packages.requests"]);
+
+    let phase = api(&app, "/api/failures?phase=build&q=requests").await;
+    assert_eq!(
+        drvs(&phase),
+        ["/nix/store/abc-python3.12-requests-2.32.0.drv"]
+    );
+
+    let none = api(&app, "/api/failures?q=zzz").await;
+    assert_eq!(none["total"], 0);
+}
+
+#[tokio::test]
+async fn api_watch() {
+    let app = seeded_app().await;
+
+    let watch = api(&app, "/api/watch").await;
+    assert_eq!(len(&watch["repos"]), 2);
+    assert!(watch["kind"].is_null());
     assert_eq!(watch["cycle_total"], 4);
+    assert_eq!(watch["cycle_counts"]["all"], 4);
+    assert_eq!(watch["cycle_counts"]["poll"], 3);
+    assert_eq!(watch["cycle_counts"]["index"], 1);
+    assert!(watch["last_poll"].is_object());
+    assert!(!watch["source_types"].as_array().unwrap().is_empty());
     assert!(!watch["failing_sources"].as_array().unwrap().is_empty());
+    assert!(watch["recent_releases"].is_array());
+
+    let index = api(&app, "/api/watch?kind=index").await;
+    assert_eq!(index["kind"], "index");
+    assert_eq!(index["cycle_total"], 1);
+    assert_eq!(index["cycles"][0]["id"], 1);
+
+    let poll = api(&app, "/api/watch?kind=poll&limit=1").await;
+    assert_eq!(poll["cycle_total"], 3);
+    assert_eq!(len(&poll["cycles"]), 1);
+    assert_eq!(poll["cycles"][0]["error"], "network unreachable");
+
+    // An unknown kind means every kind.
+    let bogus = api(&app, "/api/watch?kind=bogus").await;
+    assert!(bogus["kind"].is_null());
+    assert_eq!(bogus["cycle_total"], 4);
+}
+
+#[tokio::test]
+async fn api_analytics_ranges() {
+    let app = seeded_app().await;
+
+    let default = api(&app, "/api/analytics").await;
+    assert_eq!(default["range"], "30d");
+    assert_eq!(default["days"], 30);
+    assert_eq!(default["trend_days"], 30);
+    for key in [
+        "daily",
+        "error_types",
+        "phase_stats",
+        "phase_percentiles",
+        "status_by_repo",
+        "upstream_types",
+        "rebuild_bucket_order",
+        "rebuild_buckets",
+        "top_rebuilds",
+        "autofix_attempts",
+        "top_failing",
+    ] {
+        assert!(default[key].is_array(), "{key}: {}", default[key]);
+    }
+    assert!(default["outcomes"].is_object());
+    assert_eq!(
+        default["rebuild_bucket_order"].as_array().unwrap().last(),
+        Some(&Value::from("unknown"))
+    );
+    assert!(!default["phase_stats"].as_array().unwrap().is_empty());
+
+    let week = api(&app, "/api/analytics?range=7d").await;
+    assert_eq!(week["range"], "7d");
+    assert_eq!(week["trend_days"], 7);
+
+    let all = api(&app, "/api/analytics?range=all").await;
+    assert_eq!(all["range"], "all");
+    assert_eq!(all["days"], 0);
+    assert_eq!(all["trend_days"], 90);
+
+    let bogus = api(&app, "/api/analytics?range=1y").await;
+    assert_eq!(bogus["range"], "30d");
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn unknown_things_are_404() {
+async fn api_unknown_things_are_json_404() {
     let app = seeded_app().await;
     for uri in [
-        "/sessions/does-not-exist",
-        "/fragments/sessions/does-not-exist",
-        "/packages/does-not-exist",
-        "/packages/ripgrep?repo=extra",
-        "/no/such/page",
-        "/static/css/nope.css",
-    ] {
-        let reply = get(&app, uri).await;
-        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{uri}");
-        assert!(reply.content_type().starts_with("text/html"), "{uri}");
-        assert!(reply.body.contains("404"), "{uri}: {}", reply.body);
-    }
-    for uri in [
+        "/api/sessions/does-not-exist",
         "/api/sessions/does-not-exist/phases",
         "/api/packages/does-not-exist",
+        "/api/packages/ripgrep?repo=extra",
+        "/api/no/such/endpoint",
+        "/api",
     ] {
         let reply = get(&app, uri).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{uri}");
-        assert_eq!(reply.json()["status"], 404, "{uri}");
+        assert!(
+            reply.content_type().starts_with("application/json"),
+            "{uri}: {}",
+            reply.content_type()
+        );
+        let body = reply.json();
+        assert_eq!(body["status"], 404, "{uri}");
+        assert!(!body["error"].as_str().unwrap().is_empty(), "{uri}");
     }
 }
 
 // ── Empty database ──────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn empty_database_renders_every_page() {
+async fn empty_database_serves_every_endpoint() {
     let app = empty_app().await;
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "/",
-            &[
-                "No packages tracked yet",
-                "No session is running",
-                "Watch mode has not run",
-            ],
-        ),
-        ("/packages", &["No packages tracked yet"]),
-        ("/sessions", &["No sessions yet"]),
-        ("/failures", &["No failures recorded"]),
-        ("/watch", &["Watch mode has not run yet"]),
-        (
-            "/analytics",
-            &["No finished sessions", "No packages tracked yet"],
-        ),
-        ("/analytics?range=all", &["No phases recorded"]),
-        ("/fragments/stats", &["No packages tracked yet"]),
-        ("/fragments/active", &["No session is running"]),
-        ("/fragments/watch", &["Watch mode has not run"]),
-        ("/fragments/activity", &["No update activity"]),
-        ("/fragments/sessions", &["No sessions yet"]),
-    ];
-    for (uri, needles) in cases {
-        expect_ok(&app, uri, needles).await;
+    for uri in [
+        "/api/stats",
+        "/api/dashboard",
+        "/api/packages",
+        "/api/sessions",
+        "/api/failures",
+        "/api/watch",
+        "/api/analytics",
+        "/api/analytics?range=all",
+    ] {
+        api(&app, uri).await;
     }
-    for uri in ["/api/stats", "/api/sessions", "/api/packages", "/api/watch"] {
-        let reply = get(&app, uri).await;
-        assert_eq!(reply.status, StatusCode::OK, "{uri}: {}", reply.body);
-        reply.json();
-    }
+    let dash = api(&app, "/api/dashboard").await;
+    assert_eq!(dash["counts"]["total"], 0);
+    assert_eq!(len(&dash["running"]), 0);
+    assert!(dash["watch"]["last_poll"].is_null());
+    assert_eq!(api(&app, "/api/packages").await["total"], 0);
+    assert_eq!(api(&app, "/api/sessions").await["total"], 0);
+    assert_eq!(api(&app, "/api/failures").await["total"], 0);
+    assert_eq!(api(&app, "/api/watch").await["cycle_total"], 0);
+
+    let reply = get(&app, "/").await;
+    assert_eq!(reply.status, StatusCode::OK);
 }
 
 // ── Static assets ───────────────────────────────────────────────────────
@@ -782,8 +749,8 @@ async fn static_assets_are_embedded_and_cacheable() {
     let app = empty_app().await;
     let cases = [
         ("/static/css/styles.css", "text/css"),
-        ("/static/js/htmx.min.js", "text/javascript"),
-        ("/static/js/live.js", "text/javascript"),
+        ("/static/js/elm.js", "text/javascript"),
+        ("/static/js/app.js", "text/javascript"),
     ];
     for (uri, content_type) in cases {
         let reply = get(&app, uri).await;
@@ -823,12 +790,17 @@ async fn static_assets_are_embedded_and_cacheable() {
         assert_eq!(stale.status, StatusCode::OK, "{uri}");
     }
 
-    // Pages reference assets with the cache-busting version.
-    let page = get(&app, "/").await.body;
-    assert!(page.contains(&format!(
-        "/static/css/styles.css?v={}",
-        crate::assets::version()
-    )));
+    // The compiled frontend is the real thing, and the shell boots it.
+    let elm = get(&app, "/static/js/elm.js").await.body;
+    assert!(elm.contains("Elm"), "elm.js does not look like Elm output");
+    let app_js = get(&app, "/static/js/app.js").await.body;
+    assert!(app_js.contains("Elm.Main.init"));
+    assert!(app_js.contains("/ws/live"));
+
+    for uri in ["/static/css/nope.css", "/static/js/htmx.min.js"] {
+        let reply = get(&app, uri).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{uri}");
+    }
 }
 
 // ── Live channel ────────────────────────────────────────────────────────

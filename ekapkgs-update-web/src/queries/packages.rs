@@ -211,22 +211,6 @@ pub struct StatusCounts {
     pub open_prs: i64,
 }
 
-impl StatusCounts {
-    /// Count for a status value (or `backlog`).
-    pub fn get(&self, status: &str) -> i64 {
-        match status {
-            "pending" => self.pending,
-            "up_to_date" => self.up_to_date,
-            "outdated" => self.outdated,
-            "backlog" => self.backlog,
-            "proposed" => self.proposed,
-            "failed" => self.failed,
-            "upstream_error" => self.upstream_error,
-            _ => 0,
-        }
-    }
-}
-
 /// Status counts for packages matching `filter`, ignoring its status part
 /// (so the status chips always show every bucket).
 pub async fn status_counts(

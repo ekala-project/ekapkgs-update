@@ -54,7 +54,7 @@ macro_rules! session_columns {
 }
 
 /// Columns of `update_logs l` decoded by [`failures::LogRow`]. Only the tail
-/// of `error_log` is fetched (see [`LOG_TAIL_CHARS`]).
+/// of `error_log` is fetched (the frontend's log view says so).
 macro_rules! log_columns {
     () => {
         "l.drv_path, l.repo_name, l.attr_path, l.timestamp, l.status, l.old_version, \
@@ -93,9 +93,6 @@ pub mod sessions;
 pub mod stats;
 pub mod watch;
 
-/// Characters of `update_logs.error_log` fetched for display (the tail).
-pub const LOG_TAIL_CHARS: i64 = 6000;
-
 /// Every `updates.status` value, in display order.
 pub const PACKAGE_STATUSES: [&str; 6] = [
     "pending",
@@ -105,44 +102,6 @@ pub const PACKAGE_STATUSES: [&str; 6] = [
     "failed",
     "upstream_error",
 ];
-
-/// Every `UpdatePhase`, in workflow order.
-pub const PHASES: [&str; 10] = [
-    "metadata_extraction",
-    "source_discovery",
-    "version_selection",
-    "source_hash_update",
-    "dependency_hash_update",
-    "build",
-    "patch_recovery",
-    "testing",
-    "agent_fix",
-    "pr_creation",
-];
-
-/// Workflow position of a phase (unknown phases sort last).
-pub fn phase_rank(phase: &str) -> usize {
-    PHASES
-        .iter()
-        .position(|p| *p == phase)
-        .unwrap_or(PHASES.len())
-}
-
-/// Short label for a phase chip: `dependency_hash_update` → `dep hash`.
-pub fn phase_short(phase: &str) -> String {
-    match phase {
-        "metadata_extraction" => "metadata".to_owned(),
-        "source_discovery" => "discovery".to_owned(),
-        "version_selection" => "version".to_owned(),
-        "source_hash_update" => "src hash".to_owned(),
-        "dependency_hash_update" => "dep hash".to_owned(),
-        "patch_recovery" => "patches".to_owned(),
-        "testing" => "tests".to_owned(),
-        "agent_fix" => "agent fix".to_owned(),
-        "pr_creation" => "PR".to_owned(),
-        other => crate::format::humanize(other),
-    }
-}
 
 /// Build a `LIKE` pattern matching `q` anywhere, escaping wildcards.
 /// Use with `ESCAPE '\'`.
@@ -167,14 +126,5 @@ mod tests {
     fn like_pattern_escapes_wildcards() {
         assert_eq!(like_pattern("foo"), "%foo%");
         assert_eq!(like_pattern("50%_off\\"), "%50\\%\\_off\\\\%");
-    }
-
-    #[test]
-    fn phases_have_ranks_and_labels() {
-        assert_eq!(phase_rank("metadata_extraction"), 0);
-        assert_eq!(phase_rank("pr_creation"), 9);
-        assert_eq!(phase_rank("unknown"), PHASES.len());
-        assert_eq!(phase_short("dependency_hash_update"), "dep hash");
-        assert_eq!(phase_short("build"), "build");
     }
 }

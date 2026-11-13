@@ -6,11 +6,12 @@ package's update state is, why things failed, how watch mode is doing, and
 trends over time. Pages update live while the CLI works.
 
 - **Backend:** Rust, Axum 0.7, raw `sqlx` queries
-- **Templates:** Askama (compiled into the binary), HTMX for partial refresh
+- **Frontend:** an Elm 0.19 single-page application (`frontend/`) over the
+  JSON API. `build.rs` compiles it, and the result is embedded in the binary
 - **Live updates:** one WebSocket per tab that signals "something changed";
-  panels re-fetch their own HTML fragment
-- **Assets:** CSS and JS embedded with `include_str!`, so the binary is
-  self-contained
+  the app re-fetches the current page's JSON
+- **Assets:** CSS, the compiled `elm.js` and `app.js` embedded with
+  `include_str!`, so the binary is self-contained
 
 The dashboard never writes update state. On startup, `Database::new` creates
 the database file if it is missing and applies the CLI's migrations, so the
@@ -54,8 +55,10 @@ watch is shown, and selected, as `default`.
 | `/watch` | Watched repositories (sync and index state, HEAD), poll and index cycles (filter `kind`), source health by type, failing sources, recently changed releases |
 | `/analytics` | For `range` = `7d`, `30d` (default), `90d`, `all`: daily outcomes, phase failure rates and durations, error types, most failing packages, status by repository, upstream types, rebuild impact, autofix outcomes |
 
-Unknown pages, sessions and packages return a styled 404; database errors
-return a 500 page (JSON for `/api/*`).
+Every page route returns the same HTML shell, and the Elm app routes on the
+client from the path. Unknown paths return the shell with status 404, and the
+app shows its "not found" page. Unknown sessions and packages are 404s from
+the API, which the app shows the same way. Database errors are JSON 500s.
 
 ## Live updates
 
@@ -65,17 +68,12 @@ session counters, latest session, repository updates) and sends
 `{"type":"live","v":"<hash>"}` when it changes. It pings after 30 seconds of
 silence to keep proxies from closing the connection.
 
-`static/js/live.js` turns a changed value into a `live-update` event on
-`<body>`. Panels declare `hx-trigger="live-update from:body, every 60s"` and
-re-fetch their fragment. The 60-second timer is the fallback when the socket
-is down. The header indicator shows `connecting`, `live` or `offline`, and
-the client reconnects with exponential backoff (1 to 30 seconds).
-
-Fragments (HTML without the layout):
-
-- `/fragments/stats`, `/fragments/active`, `/fragments/watch`, `/fragments/activity`
-- `/fragments/sessions` (accepts the `/sessions` filters)
-- `/fragments/sessions/:id` (stops polling once the session finishes)
+`static/js/app.js` owns the socket. It sends a changed value to the Elm
+`liveUpdate` port, and the app re-fetches the JSON for the page on screen.
+A 60-second timer in the app is the fallback when the socket is down. The
+header indicator (fed through the `liveStatus` port) shows `connecting`,
+`live` or `offline`, and the client reconnects with exponential backoff
+(1 to 30 seconds).
 
 ## JSON API
 
@@ -85,31 +83,43 @@ endpoints take `limit` (default 50, max 500) and `page`.
 | Endpoint | Returns |
 |---|---|
 | `GET /api/stats` | `total_packages`, `success_rate`, `active_updates`, `total_sessions`, `running_sessions`, `packages` (status counts), `outcomes_30d`, `upstream_sources` |
-| `GET /api/sessions` | `{sessions, total, page, per_page}`. Accepts the `/sessions` filters |
+| `GET /api/dashboard` | `counts`, `current` / `previous` (30-day outcomes), `running`, `running_phases`, `watch.{repos, last_poll, source_types}`, `activity`, `recent_prs` |
+| `GET /api/packages` | `{packages, total, all_total, page, per_page, sort, sorts, status_counts, repos, upstream_types}`. Accepts the `/packages` filters |
+| `GET /api/packages/:attr?repo=` | `attr_path`, `repo_name`, `update`, `repos`, `index`, `sources`, `phases`, `logs`, `autofix.{queue, attempts}` |
+| `GET /api/sessions` | `{sessions, total, page, per_page, hidden_empty, facets}`. Accepts the `/sessions` filters |
+| `GET /api/sessions/:id` | `session` (including `config_json`), `phases`, `logs`, `cycle` |
 | `GET /api/sessions/:id/phases` | The session's phase rows, in execution order |
-| `GET /api/packages` | `{packages, total, page, per_page, sort, status_counts}`. Accepts the `/packages` filters |
-| `GET /api/packages/:attr?repo=` | `update`, `repos`, `index`, `sources`, `phases`, `logs`, `autofix.{queue, attempts}` |
-| `GET /api/watch` | `repos`, `cycles`, `cycle_total`, `source_types`, `failing_sources`, `recent_releases` |
+| `GET /api/failures` | `{logs, total, page, per_page, facets.{repos, phases, error_types}}`. Accepts the `/failures` filters |
+| `GET /api/watch` | `repos`, `kind`, `cycles`, `cycle_total`, `cycle_counts`, `page`, `per_page`, `last_poll`, `source_types`, `failing_sources`, `recent_releases` |
+| `GET /api/analytics?range=` | Outcomes, daily trend, error types, phase stats and percentiles, status by repository, upstream types, rebuild buckets, autofix outcomes, top failing packages |
 
-`/api/sessions` used to return a bare array. It now returns an object so
-that it can carry the total and page.
+Unknown `/api` paths, sessions and packages return
+`404 {"error", "status"}`.
 
 ## Layout
 
 ```
 ekapkgs-update-web/
+├── build.rs             # Compiles frontend/ with `elm make --optimize` into OUT_DIR
+├── frontend/            # Elm application
+│   ├── elm.json
+│   └── src/
+│       ├── Main.elm     # Browser.application, fetch/refresh, layout, ports
+│       ├── Route.elm    # Path → Route, Route → /api URL
+│       ├── Api.elm      # Shared JSON decoders and HTTP error handling
+│       ├── Format.elm   # Times, durations, numbers, badges, URLs
+│       ├── View.elm     # Shared view helpers (chips, pager, bars, filters)
+│       ├── Ctx.elm, Msg.elm
+│       └── Page/        # One module per page: Data, decoder, view
 ├── src/
 │   ├── main.rs          # CLI options, database, router, CORS/trace layers
 │   ├── state.rs         # AppState (wraps Database)
-│   ├── error.rs         # AppError: HTML or JSON 404/500, fallback handler
-│   ├── assets.rs        # Embedded static files, ETag + Cache-Control
-│   ├── format.rs        # Relative times, durations, numbers, badges, pager, URLs
+│   ├── error.rs         # AppError → JSON 404/500
+│   ├── params.rs        # Query-parameter helpers (repo labels, pages, ratios)
+│   ├── assets.rs        # App shell, embedded static files, ETag + Cache-Control
 │   ├── queries/         # Raw sqlx reads, one module per area (+ live fingerprint)
-│   ├── views/           # Row → display view models; charts.rs builds bar/column data
-│   ├── templates.rs     # Askama template structs
-│   └── routes/          # Page, fragment, API and WebSocket handlers; tests.rs
-├── templates/           # base, pages, macros.html, error.html, fragments/
-└── static/              # css/styles.css, js/htmx.min.js, js/live.js
+│   └── routes/          # Page routes (shell), JSON API, WebSocket; tests.rs
+└── static/              # css/styles.css, js/app.js (elm.js comes from build.rs)
 ```
 
 ## Development
@@ -119,14 +129,28 @@ nix develop --command cargo test -p ekapkgs-update-web
 nix develop --command cargo clippy -p ekapkgs-update-web --all-targets
 ```
 
-`src/routes/tests.rs` runs every page, fragment and API endpoint against an
-in-memory database with the real migrations. It does this once with a
-fixture that covers every table and once with an empty database. It also
-checks 404s, HTML escaping, pagination, asset caching and the live
-fingerprint.
+Building the crate needs `elm` on `PATH` (the dev shell provides it on
+x86_64-linux). `build.rs` runs `elm make --optimize` whenever a file under
+`frontend/` changes. To skip that, set `EKAPKGS_WEB_ELM_JS` to an
+already-compiled `elm.js`. The Nix package does this, building the frontend
+in a separate derivation (`nix/package-web-frontend.nix`) with dependencies
+pinned in `nix/web-frontend/`. After changing `frontend/elm.json`, run
+`nix/web-frontend/update.sh` to refresh those pins.
 
-Templates and assets are compiled in. After editing them, rebuild; there
-is nothing to install next to the binary.
+For a quick type check of the frontend alone:
+
+```bash
+cd ekapkgs-update-web/frontend && elm make src/Main.elm --output=/dev/null
+```
+
+`src/routes/tests.rs` drives every API endpoint against an in-memory
+database with the real migrations. It does this once with a fixture that
+covers every table and once with an empty database. It also checks filters,
+pagination, JSON 404s, the app shell on page and unknown routes, asset
+caching and the live fingerprint.
+
+Assets are compiled in, so rebuild after editing them. There is nothing
+to install next to the binary.
 
 See [WEB-SERVER.md](./WEB-SERVER.md) for implementation notes and
 [NIXOS-MODULE.md](./NIXOS-MODULE.md) for deployment.

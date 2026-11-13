@@ -3,5 +3,7 @@ final: prev: with final; {
 
   ekapkgs-update = callPackage ./package.nix { };
 
+  ekapkgs-update-web-frontend = callPackage ./package-web-frontend.nix { };
+
   ekapkgs-update-web = callPackage ./package-web.nix { };
 }

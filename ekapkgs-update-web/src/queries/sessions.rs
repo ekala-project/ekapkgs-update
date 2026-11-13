@@ -30,11 +30,6 @@ impl SessionRow {
             - self.packages_skipped)
             .max(0)
     }
-
-    /// Updates with an outcome.
-    pub fn finished(&self) -> i64 {
-        self.packages_succeeded + self.packages_failed + self.packages_skipped
-    }
 }
 
 /// One row of `update_phases`.

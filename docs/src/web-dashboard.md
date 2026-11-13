@@ -183,7 +183,7 @@ Each open tab holds one WebSocket to `/ws/live`.
 
 - The server checks a cheap database fingerprint every 2 seconds and
   notifies the tab only when it changes.
-- The tab then re-fetches just the panels on screen as HTML fragments.
+- The tab then re-fetches the JSON for the page on screen and redraws it.
 - The indicator in the header shows `live`, `connecting` or `offline`.
   While offline, the client reconnects with backoff up to 30 seconds, and
   panels refresh once a minute.
@@ -197,17 +197,21 @@ timestamps. List endpoints accept `limit` (default 50, maximum 500) and
 | Endpoint | Returns |
 |---|---|
 | `GET /api/stats` | Package status counts, 30-day outcomes and success rate, running sessions, upstream source totals |
-| `GET /api/sessions` | `{sessions, total, page, per_page}` |
+| `GET /api/dashboard` | Everything on the overview page: counts, current and previous 30-day outcomes, running sessions and their phases, watch summary, recent activity and PRs |
+| `GET /api/sessions` | `{sessions, total, page, per_page, hidden_empty, facets}` |
+| `GET /api/sessions/<id>` | `session` (with `config_json`), `phases`, `logs`, `cycle` |
 | `GET /api/sessions/<id>/phases` | Phase rows in execution order |
-| `GET /api/packages` | `{packages, total, page, per_page, sort, status_counts}` |
+| `GET /api/packages` | `{packages, total, all_total, page, per_page, sort, sorts, status_counts, repos, upstream_types}` |
 | `GET /api/packages/<attr>?repo=` | `update`, `repos`, `index`, `sources`, `phases`, `logs`, `autofix` |
-| `GET /api/watch` | `repos`, `cycles`, `cycle_total`, `source_types`, `failing_sources`, `recent_releases` |
+| `GET /api/failures` | `{logs, total, page, per_page, facets}` |
+| `GET /api/watch` | `repos`, `cycles`, `cycle_total`, `cycle_counts`, `last_poll`, `source_types`, `failing_sources`, `recent_releases` |
+| `GET /api/analytics?range=` | The aggregates behind the analytics page |
 
 ```bash
 curl -s 'http://127.0.0.1:3000/api/packages?status=failed&limit=10' | jq '.packages[].attr_path'
 ```
 
-Unknown sessions and packages return `404` with `{"error": ..., "status": 404}`.
+Unknown sessions, packages and `/api` paths return `404` with `{"error": ..., "status": 404}`.
 
 ## Security
 
@@ -218,7 +222,8 @@ Unknown sessions and packages return `404` with `{"error": ..., "status": 404}`.
   the dashboard behind a proxy that authenticates (for example nginx
   `basicAuthFile`, or an SSO proxy). Build logs and repository paths are
   visible to anyone who can reach it.
-- All output is HTML-escaped and all queries are parameterised.
+- The frontend renders database text as text (never as HTML), and all
+  queries are parameterised.
 
 ## Troubleshooting
 

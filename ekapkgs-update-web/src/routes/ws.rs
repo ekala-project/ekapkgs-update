@@ -2,8 +2,9 @@
 //!
 //! Each connection polls a cheap database fingerprint every
 //! [`POLL_INTERVAL`] and sends `{"type":"live","v":"<hash>"}` only when it
-//! changes (plus once on connect). The page's `live.js` turns a changed value
-//! into a `live-update` DOM event that HTMX panels refresh on.
+//! changes (plus once on connect). `static/js/app.js` forwards a changed
+//! value to the Elm app (the `liveUpdate` port), which re-fetches the data
+//! of the page on screen.
 
 use std::time::Duration;
 

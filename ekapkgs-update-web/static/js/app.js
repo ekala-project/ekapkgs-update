@@ -1,29 +1,30 @@
-// Live updates for the ekapkgs-update dashboard.
+// Starts the Elm dashboard (elm.js) and feeds it live-update notifications.
 //
 // The server pushes {"type":"live","v":"<fingerprint>"} on /ws/live when
-// the database changes. When the fingerprint differs from the last one seen,
-// a `live-update` event is dispatched on <body>; panels that should refresh
-// declare `hx-trigger="live-update from:body"` and re-fetch their fragment.
+// the database changes. A fingerprint different from the last one seen is
+// sent to the `liveUpdate` port, and the app re-fetches the page's data.
+// Connection state goes to the `liveStatus` port for the header indicator.
 // The last fingerprint survives reconnects, so a reconnect only refreshes
-// panels if something changed while the socket was down.
+// the page if something changed while the socket was down.
 (function () {
   "use strict";
 
   var MIN_DELAY = 1000;
   var MAX_DELAY = 30000;
 
+  var app = window.Elm.Main.init({ flags: { now: Date.now() } });
+
   var lastVersion = null;
   var delay = MIN_DELAY;
   var socket = null;
   var retryTimer = null;
 
+  function send(port, value) {
+    if (app.ports && app.ports[port]) app.ports[port].send(value);
+  }
+
   function setState(state, label) {
-    var el = document.getElementById("live-status");
-    if (!el) return;
-    el.setAttribute("data-state", state);
-    el.setAttribute("title", "Live updates: " + label);
-    var text = el.querySelector(".live-label");
-    if (text) text.textContent = label;
+    send("liveStatus", { state: state, label: label });
   }
 
   function scheduleReconnect() {
@@ -45,15 +46,13 @@
       return;
     }
     if (!msg || msg.type !== "live" || typeof msg.v !== "string") return;
-    if (lastVersion !== null && msg.v !== lastVersion) {
-      document.body.dispatchEvent(new CustomEvent("live-update", { detail: { version: msg.v } }));
-    }
+    if (lastVersion !== null && msg.v !== lastVersion) send("liveUpdate", msg.v);
     lastVersion = msg.v;
   }
 
   function connect() {
     if (!("WebSocket" in window)) {
-      setState("offline", "unsupported; panels refresh every minute");
+      setState("offline", "unsupported; data refreshes every minute");
       return;
     }
     setState("connecting", "connecting");
@@ -73,9 +72,6 @@
       socket = null;
       scheduleReconnect();
     });
-    socket.addEventListener("error", function () {
-      // A close event always follows; reconnect is handled there.
-    });
   }
 
   // Reconnect immediately when the tab becomes visible again after an outage.
@@ -88,9 +84,5 @@
     }
   });
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", connect);
-  } else {
-    connect();
-  }
+  connect();
 })();

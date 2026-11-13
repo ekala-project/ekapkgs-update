@@ -16,7 +16,7 @@ pub struct OutcomeWindow {
 impl OutcomeWindow {
     /// Succeeded / (succeeded + failed), in percent.
     pub fn success_rate(&self) -> Option<f64> {
-        crate::format::ratio_pct(self.succeeded, self.succeeded + self.failed)
+        crate::params::ratio_pct(self.succeeded, self.succeeded + self.failed)
     }
 }
 

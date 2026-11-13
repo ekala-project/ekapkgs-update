@@ -13,32 +13,40 @@ summary of routes, options and the API.
   query in `src/queries/` that maps into row structs owned by this crate. A
   CLI refactor therefore breaks the dashboard only if the schema changes, and
   the in-memory tests catch that because they run the real migrations.
-- **Pre-formatted views.** Templates do not compute anything. `src/views/`
-  and the route modules turn rows into view models whose fields are display
-  strings: relative and absolute times, durations, thousands separators,
-  badges with a tone, hrefs. Formatting rules live in `src/format.rs`, which
-  has table-driven tests.
+- **Raw API, formatting in the client.** The server returns raw values
+  (RFC 3339 timestamps, integer milliseconds, unformatted counts). The Elm
+  frontend does all display work: relative and absolute times, durations,
+  thousands separators, badges and tones, hrefs (`frontend/src/Format.elm`).
+  One page is one `GET /api/…` request, so every response carries
+  everything its page shows, including filter facets and counts.
 - **Lenient input.** Query strings are parsed into a `HashMap` and each
-  parameter is validated by hand. An unknown `status`, `sort` or `range` falls
-  back to the default, and an out-of-range `page` clamps to the last page, so
-  a stale bookmark never produces an error.
+  parameter is validated by hand. An unknown `status`, `sort`, `kind` or
+  `range` falls back to the default, and an out-of-range `page` returns an
+  empty list (the frontend's pager clamps), so a stale bookmark never
+  produces an error.
 
 ## Request flow
 
 ```
 Router (routes/mod.rs)
-  ├── pages       routes/{dashboard,packages,sessions,failures,watch,analytics}.rs
-  │                 → queries/* → views/* → templates.rs (Askama) → HTML
-  ├── fragments   same handlers' data, rendered without base.html
-  ├── /api/*      routes/api.rs → queries/* → serde_json (raw values)
+  ├── page paths  /, /packages[/:attr], /sessions[/:id], /failures, /watch,
+  │               /analytics → assets::index_response (the app shell, 200)
+  ├── /api/*      routes/api.rs → queries/* → serde_json (raw values);
+  │               its own fallback is a JSON 404
   ├── /ws/live    routes/ws.rs  → queries/live.rs fingerprint
-  ├── /static/*   assets.rs (embedded)
-  └── fallback    error.rs (404 page)
+  ├── /static/*   assets.rs (embedded css, elm.js, app.js)
+  └── fallback    the app shell with status 404
+
+Browser
+  index.html → elm.js (Browser.application) + app.js (ports, WebSocket)
+  Main.elm: URL → Route → GET /api/… → Page.X.decoder → Page.X.view
 ```
 
-`AppError` (`src/error.rs`) has `NotFound` and `Internal`. Pages render
-`templates/error.html`; `/api/*` returns `{"error", "status"}`. Internal
-errors are logged with `tracing` and shown without the SQL text.
+`AppError` (`src/error.rs`) has `NotFound` and `Internal`, and always
+responds with `{"error", "status"}`. Internal errors are logged with
+`tracing` and returned without the SQL text. The frontend shows a 404 or
+500 page using the `error` message. When a refresh fails after data has
+loaded, it keeps the last data and shows a notice instead.
 
 ## Data sources
 
@@ -79,28 +87,29 @@ Each `/ws/live` connection runs its own loop:
 3. It pings after 30 s without sending anything, and exits when the client
    goes away.
 
-`static/js/live.js` remembers the last value across reconnects and dispatches
-`live-update` on `<body>` only when it changes. HTMX regions use
-`hx-trigger="live-update from:body, every 60s"`. A running session's detail
-fragment polls every 30 s as well. When the session finishes, the swapped-in
-fragment no longer carries `hx-get`, so polling stops.
+`static/js/app.js` remembers the last value across reconnects and sends it
+to the Elm `liveUpdate` port only when it changes. Main then re-fetches the
+current page's JSON. Responses are numbered, and only the latest one is
+applied, so a slow response cannot overwrite a newer one. Main also
+re-fetches every 60 s as a fallback, and ticks the clock every 15 s so that
+relative times stay current. Connection state reaches the header indicator
+through the `liveStatus` port.
 
-The socket only says that something changed and carries no data.
-Fragments are ordinary GET handlers, so every live panel also works with
-JavaScript off (the content is just as fresh as the page load).
+The socket only says that something changed and carries no data. The
+dashboard needs JavaScript. The shell's `<noscript>` points at `/api`.
 
 ## Charts
 
 Charts are plain HTML and CSS. There is no chart library and no canvas.
 
-- **Segmented bars** (`segbar` macro) for status mixes. Segments use
+- **Segmented bars** (`View.segbar`) for status mixes. Segments use
   `flex-grow`, a 2px surface gap and rounded ends.
-- **Horizontal bars** (`hbars` macro) for ranked categories such as error
+- **Horizontal bars** (`View.hbars`) for ranked categories such as error
   types, upstream types and autofix outcomes. The list is folded to an
   "Other" row after the top entries.
 - **Column chart** on `/analytics` for daily outcomes. Columns are stacked
   succeeded/failed, gaps are filled with empty days, and the axis uses nice
-  ticks (`views/charts.rs`).
+  ticks (`Page/Analytics.elm`).
 - **Meters** for phase failure rates.
 
 Every chart has a legend or a title naming the series, a `data-tip` tooltip
@@ -111,31 +120,38 @@ Dark mode applies under `prefers-color-scheme` unless
 reserved for status: good, warn, serious and critical. The single data
 series uses blue. `forced-colors` and print rules keep marks visible.
 
-## Templates
+## Frontend
 
-- `base.html` holds the layout, nav (`aria-current="page"`) and live
-  indicator. `macros.html` holds shared helpers. `fragments/` holds the
-  partials that HTMX swaps in. Pages include fragments so the first render
-  and later refreshes share markup.
-- Askama 0.12 quirks:
-  - Macro arguments are bound by name, so a parameter that shares its name
-    with a template field shadows that field. Every macro parameter
-    therefore has a unique name.
-  - `{% for x in a.b %}` inside a macro moves the value, so macros always
-    loop over `.iter()`.
-- Askama escapes all output by default. The tests check this against a
-  description containing markup.
+- `frontend/` is an Elm 0.19 application (`elm.json`). `Main.elm` owns the
+  model, the fetch/refresh cycle, layout and the error pages. Each page
+  module under `Page/` exposes `Data`, `decoder` and
+  `view : Ctx -> Data -> Ctx.Page` and decodes its own endpoint. Shared
+  decoders live in `Api.elm` and shared view helpers in `View.elm`.
+- Routing uses path URLs (`Route.elm`). `Route.apiUrl` maps a page and its
+  query string to the endpoint, passing the query through unchanged, so the
+  page's URL and the API share one set of filter parameters.
+- Filter forms keep unsent input as drafts in the model (`Msg.Draft`).
+  Submitting pushes a new URL (`Msg.Submit`) and resets `page`.
+- Elm renders database text as text nodes, so descriptions and logs cannot
+  inject markup. URLs from the database go through `Format.safeUrl`.
+- `build.rs` runs `elm make src/Main.elm --optimize` into `OUT_DIR`, and
+  `assets.rs` embeds the result. If `EKAPKGS_WEB_ELM_JS` is set, that file
+  is used instead. The Nix package sets it to the output of
+  `nix/package-web-frontend.nix`, which builds offline from the pins in
+  `nix/web-frontend/` (`elm-srcs.nix`, `registry.dat`). Regenerate them with
+  `nix/web-frontend/update.sh` after changing `elm.json`.
 
 ## Static assets
 
-`assets.rs` embeds `css/styles.css`, `js/htmx.min.js` and `js/live.js` with
-`include_str!`. Responses carry:
+`assets.rs` embeds `css/styles.css`, `js/app.js` and the compiled
+`js/elm.js` with `include_str!`. Responses carry:
 
 - an `ETag` (FNV-1a of the content), with `If-None-Match` answered by 304;
 - `Cache-Control: public, max-age=86400`.
 
-Pages reference assets as `?v=<hash of all assets>`, so a new build busts
-the cache. Nothing is installed next to the binary, and `nix/package-web.nix`
+The shell (`index.html`, served for every page path) references assets as
+`?v=<hash of all assets>`, so a new build busts the cache. The shell itself
+is sent with `Cache-Control: no-cache`. Nothing is installed next to the binary, and `nix/package-web.nix`
 has no `postInstall`.
 
 ## Testing
@@ -146,29 +162,30 @@ has no `postInstall`.
 
 - A fixture covers every table the dashboard reads. Timestamps are written as
   `AGO(minutes)` and expanded relative to now, so relative times are stable.
-- One test requests every page, fragment and API endpoint against the
-  fixture, and another does the same against an empty database (empty
-  states).
+- Each API endpoint has a test against the fixture, and one test requests
+  every endpoint against an empty database.
 - Further tests cover:
-  - filters, sorting and pagination (including clamping and bad input);
-  - 404s (HTML and JSON) and HTML escaping;
-  - asset ETag/304 and the cache-busting query;
+  - filters, sorting and pagination (including bad input);
+  - JSON 404s, and the app shell on page routes (200) and unknown paths (404);
+  - asset ETag/304, cache headers, and that `elm.js` and `app.js` are present;
   - the live fingerprint changing after a write, and `/ws/live` rejecting
     a non-upgrade request.
 
-Formatting, chart scaling and query helpers have unit tests next to their
-code.
+Query and parameter helpers have unit tests next to their code. The Elm
+code has no unit tests (`elm-test` needs node). It is type-checked by every
+build.
 
 ## Known limitations
 
 - There is no authentication. Bind to localhost or put the portal behind a
   proxy that provides auth.
-- `autofix_queue` has no `repo_name`, so the autofix section on a package
-  page matches by attribute path across all repositories.
 - `/failures` lists `update_logs`. The error-type breakdown on `/analytics`
   counts failed `update_phases`. The two can differ when a failure was
   recorded in only one of them.
-- A repository actually named `default` would be indistinguishable from the
-  `''` repository in URLs.
+- A repository may not be named `default`, because the dashboard uses that
+  name for the `''` repository in URLs. The CLI config and the NixOS module
+  reject it.
+- ekapkgs packages `elm` only for x86_64-linux, so on aarch64-linux the dev
+  shell has no `elm` and the web package cannot be built there.
 - The portal and the CLI must be built from the same migration set: an
   older portal refuses to start against a database migrated by a newer CLI.
