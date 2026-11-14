@@ -668,7 +668,7 @@ fn test_script_source_properties() {
         "Custom script: /nix/store/abc-list-versions"
     );
     assert!(source.instance().is_none());
-    assert!(source.feed_url().is_none());
+    assert!(source.feed_urls().is_empty());
 }
 
 #[tokio::test]

@@ -105,56 +105,104 @@ pub fn infer_strategy_from_attr_path(attr_path: &str) -> Option<AttrPathStrategy
     }
 }
 
-/// Determine the semver strategy used for automatic updates of a package.
+/// Outcome of deciding how far an automated update may move a package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStrategyInference {
+    /// Set explicitly via `passthru.ekapkgs-update.semver-strategy`.
+    Explicit(SemverStrategy),
+    /// Inferred from a variant attribute (`foo.v1_2`) or a version-suffixed
+    /// attr path (`foo_3_3`).
+    Inferred(SemverStrategy),
+    /// The attr path names an exact version (`foo.v1_2_3`, `foo_2_5_39`); the
+    /// package must not be auto-updated.
+    Pinned,
+    /// No signal. Callers fall back to `Minor` for mkManyVariants packages and
+    /// `Latest` otherwise.
+    Unknown,
+}
+
+impl UpdateStrategyInference {
+    /// Resolve to a concrete strategy, applying the default for packages
+    /// without a signal (`Minor` for mkManyVariants packages, else `Latest`).
+    /// Returns `None` for pinned packages.
+    pub fn resolve(self, is_many_variants: bool) -> Option<SemverStrategy> {
+        match self {
+            Self::Explicit(strategy) | Self::Inferred(strategy) => Some(strategy),
+            Self::Pinned => None,
+            Self::Unknown if is_many_variants => Some(SemverStrategy::Minor),
+            Self::Unknown => Some(SemverStrategy::Latest),
+        }
+    }
+}
+
+/// Decide the semver strategy for `attr_path`.
 ///
-/// Precedence:
-/// 1. `passthru.ekapkgs-update.semver-strategy` (`explicit`)
-/// 2. A version-like attr_path suffix (`libffi_3_3` → Patch, `flex_2_5_39` → pinned)
-/// 3. mkManyVariants packages default to Minor
-/// 4. Latest
+/// Precedence: explicit passthru strategy, then the variant name when the attr
+/// path selects a mkManyVariants variant (`cmake.v4` → Minor, `foo.v1_2` →
+/// Patch, `foo.v1_2_3` → pinned), then a numeric attr-path suffix
+/// (`libffi_3_3` → Patch).
+pub fn infer_update_strategy(
+    explicit: Option<SemverStrategy>,
+    attr_path: &str,
+) -> UpdateStrategyInference {
+    if let Some(strategy) = explicit {
+        return UpdateStrategyInference::Explicit(strategy);
+    }
+
+    // Only treat the last segment as a variant when it is nested under a
+    // package (`cmake.v4`); a top-level package can legitimately be called
+    // `v8`.
+    if let Some((_, last)) = attr_path.rsplit_once('.') {
+        if is_variant_name(last) {
+            return match infer_strategy_from_variant(last) {
+                Some(strategy) => UpdateStrategyInference::Inferred(strategy),
+                None => UpdateStrategyInference::Pinned,
+            };
+        }
+    }
+
+    match infer_strategy_from_attr_path(attr_path) {
+        Some(AttrPathStrategy::Strategy(strategy)) => UpdateStrategyInference::Inferred(strategy),
+        Some(AttrPathStrategy::Pinned) => UpdateStrategyInference::Pinned,
+        None => UpdateStrategyInference::Unknown,
+    }
+}
+
+/// Whether `segment` looks like a versioned variant name (`v4`, `v1_2`, `v0_20_1`).
+fn is_variant_name(segment: &str) -> bool {
+    segment
+        .strip_prefix('v')
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        && parse_variant_components(segment).is_some()
+}
+
+/// Determine the semver strategy used for automatic updates of a package,
+/// evaluating `pkg ? variants` only when [`infer_update_strategy`] has no
+/// signal.
 ///
 /// Returns `None` when the package is pinned and must not be auto-updated.
-/// Shared by the `run` checker and the `watch` indexer so both pick the same
-/// release for a package.
+/// Used where no batch evaluation has already reported mkManyVariants (the
+/// watch indexer gets that from its `nix-eval-jobs --apply` pass instead), so
+/// every caller picks the same release for a package.
 pub async fn effective_strategy(
     eval_entry_point: &str,
     attr_path: &str,
     explicit: Option<SemverStrategy>,
 ) -> Option<SemverStrategy> {
-    if let Some(strategy) = explicit {
-        return Some(strategy);
-    }
-    match infer_strategy_from_attr_path(attr_path) {
-        Some(AttrPathStrategy::Pinned) => {
-            tracing::debug!(
-                "{}: attr_path version suffix indicates pinned package",
-                attr_path
-            );
-            return None;
-        },
-        Some(AttrPathStrategy::Strategy(s)) => {
-            tracing::debug!(
-                "{}: Inferred {} strategy from attr_path version suffix",
-                attr_path,
-                s
-            );
-            return Some(s);
-        },
-        None => {},
-    }
-    if crate::nix::is_many_variants_package(eval_entry_point, attr_path)
-        .await
-        .unwrap_or(false)
-    {
-        tracing::debug!(
-            "{}: Defaulting to minor strategy (mkManyVariants package)",
-            attr_path
-        );
-        return Some(SemverStrategy::Minor);
-    }
-    Some(SemverStrategy::Latest)
+    let inference = infer_update_strategy(explicit, attr_path);
+    let many_variants = inference == UpdateStrategyInference::Unknown
+        && crate::nix::is_many_variants_package(eval_entry_point, attr_path)
+            .await
+            .unwrap_or(false);
+    let strategy = inference.resolve(many_variants);
+    tracing::debug!(
+        "{}: semver strategy {:?} ({:?})",
+        attr_path,
+        strategy,
+        inference
+    );
+    strategy
 }
-
 /// Extract version constraint pattern from variant name for matching
 ///
 /// Examples:
@@ -262,6 +310,48 @@ pub fn keep_component_count(keep: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_infer_update_strategy() {
+        use UpdateStrategyInference::{Explicit, Inferred, Pinned, Unknown};
+
+        let cases: &[(Option<SemverStrategy>, &str, UpdateStrategyInference)] = &[
+            // Explicit passthru strategy always wins.
+            (
+                Some(SemverStrategy::Major),
+                "cmake.v4",
+                Explicit(SemverStrategy::Major),
+            ),
+            // Variant attributes.
+            (None, "cmake.v4", Inferred(SemverStrategy::Minor)),
+            (
+                None,
+                "abseil-cpp.v20230802",
+                Inferred(SemverStrategy::Minor),
+            ),
+            (None, "foo.v1_2", Inferred(SemverStrategy::Patch)),
+            (None, "foo.v1_2_3", Pinned),
+            // Numeric attr-path suffixes.
+            (None, "libffi_3_3", Inferred(SemverStrategy::Patch)),
+            (None, "flex_2_5_39", Pinned),
+            // No signal.
+            (None, "zlib", Unknown),
+            (None, "python3.v3_12.pkgs.requests", Unknown),
+            // A top-level package named like a variant is not a variant.
+            (None, "v8", Unknown),
+            // Non-version suffixes are not variants.
+            (None, "valgrind.light", Unknown),
+            (None, "foo.vendor", Unknown),
+        ];
+
+        for (explicit, attr_path, expected) in cases {
+            assert_eq!(
+                infer_update_strategy(*explicit, attr_path),
+                *expected,
+                "{attr_path} (explicit: {explicit:?})"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_variant_components() {

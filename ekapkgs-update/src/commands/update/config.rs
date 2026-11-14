@@ -471,8 +471,9 @@ impl UpdateParams {
         } else {
             debug!("Attempting to locate package definition...");
             let normalized_entry = normalize_entry_point(&file);
-            let position_expr =
-                format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
+            let position_expr = format!(
+                "let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.meta.position"
+            );
 
             eval_nix_expr(&position_expr).await.and_then(|position| {
                 if position.is_empty() {

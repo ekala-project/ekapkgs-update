@@ -8,6 +8,8 @@
 //!    nothing (observe-only bootstrap). Later releases newer than the
 //!    baseline are dispatched to the updater service.
 //! 4. An update session is created only for poll cycles that dispatch work.
+//!    The affected managed checkouts are fast-forwarded first, so update
+//!    worktrees (created from `HEAD`) start from the current upstream branch.
 //! 5. Repos are re-synced and re-indexed every `index_refresh_interval`.
 
 use std::collections::{HashMap, HashSet};
@@ -20,14 +22,15 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
-use super::feeds::{poll_source, upstream_source_from_index};
+use super::feeds::{poll_source, update_version_for_entry, upstream_source_from_index};
+use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
 use crate::database::{
     Database, IndexOutcome, SessionMode, SessionStatus, SourcePoll, UpdateRecord,
     UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
 };
-use crate::vcs_sources::{Release, compare_version_components, find_best_release};
+use crate::vcs_sources::{Release, compare_version_components};
 
 /// Concurrent feed / API fetches per poll cycle.
 const POLL_CONCURRENCY: usize = 8;
@@ -102,7 +105,14 @@ async fn load_sources(
 ) -> Vec<UpstreamIndexEntry> {
     match db.get_all_upstream_sources().await {
         Ok(sources) => {
-            info!("Watching {} unique upstream sources", sources.len());
+            if sources.is_empty() {
+                warn!(
+                    "Watching 0 upstream sources: no package could be indexed. Check the index \
+                     log lines above (entry point, select expression, nix-eval-jobs errors)."
+                );
+            } else {
+                info!("Watching {} unique upstream sources", sources.len());
+            }
             sources
         },
         Err(e) => {
@@ -134,7 +144,13 @@ async fn index_repo(repo: &ResolvedRepo, db: &Database) {
     }
 
     let started = Instant::now();
-    let stats = index::build_upstream_index(&repo.name, &repo.eval_entry_point, db, None).await;
+    let target = IndexTarget {
+        repo_name: &repo.name,
+        enumerate_file: &repo.enumerate_entry_point,
+        select: repo.select.as_deref(),
+        repo_dir: Some(&repo.repo_dir),
+    };
+    let stats = index::build_upstream_index(target, db, None).await;
     let outcome = IndexOutcome {
         error: stats.stream_error.clone(),
         duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
@@ -287,23 +303,7 @@ fn newest_stable(releases: &[Release]) -> Option<&Release> {
 /// Best release for one package (its strategy / regex / prerelease
 /// settings). `current` when nothing newer is compatible.
 fn best_for_package(releases: &[Release], entry: &UpstreamIndexEntry, current: &str) -> String {
-    let regex = entry.version_regex.as_deref();
-    find_best_release(
-        releases.to_vec(),
-        current,
-        entry.strategy(),
-        None,
-        None,
-        regex,
-        entry.include_prereleases,
-    )
-    .map_or_else(
-        |_| current.to_owned(),
-        |r| {
-            r.resolved_version(regex)
-                .unwrap_or_else(|_| r.version().to_owned())
-        },
-    )
+    update_version_for_entry(entry, releases).unwrap_or_else(|| current.to_owned())
 }
 
 /// Result of polling one source.
@@ -563,7 +563,7 @@ async fn poll_cycle(
             );
             Some(UpdateRequest {
                 attr_path: o.entry.attr_path.clone(),
-                drv_path: None,
+                drv_path: o.entry.drv_path.clone(),
                 current_version: o.current.clone(),
                 new_version: o.latest.clone(),
                 repo_name: Some(repo.name.clone()),
@@ -587,6 +587,17 @@ async fn poll_cycle(
     }
     requests.sort_by(|a, b| (a.repo(), &a.attr_path).cmp(&(b.repo(), &b.attr_path)));
     stats.dispatched = requests.len();
+
+    // Base the update worktrees on the current upstream branch. Nothing else
+    // touches the checkouts while this runs: the loop handles one event at a
+    // time and waits for the batch to finish. (Fast-forward only; unmanaged
+    // checkouts are never touched.)
+    if !updater_config.dry_run {
+        let affected: HashSet<&str> = requests.iter().map(UpdateRequest::repo).collect();
+        for repo in repos.iter().filter(|r| affected.contains(r.name.as_str())) {
+            sync::sync_repo(repo, db).await;
+        }
+    }
 
     // Lazy session: only cycles that dispatch work get one.
     let mut config = session_config.clone();
@@ -703,6 +714,7 @@ mod tests {
                 instance: None,
                 current_version: Some(current.into()),
                 src_url: None,
+                drv_path: None,
                 pname: None,
                 semver_strategy: None,
                 version_regex: None,

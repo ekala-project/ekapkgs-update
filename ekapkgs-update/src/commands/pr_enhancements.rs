@@ -64,6 +64,8 @@ impl PrEnhancementsConfig {
     /// Returns `Ok(())` when the feature is disabled or no cache is
     /// configured. Returns `Err(_)` only for build failures, which the
     /// caller logs but does not propagate.
+    ///
+    /// `eval_entry_point` must be the worktree's copy of the entry point.
     pub async fn perform_worktree_cachix_push(
         &self,
         worktree_path: &Path,
@@ -203,6 +205,8 @@ impl PrEnhancementsConfig {
     ///
     /// Returns `Ok(None)` when the feature is disabled or no findings were
     /// produced.
+    ///
+    /// `eval_entry_point` must be the worktree's copy of the entry point.
     pub async fn perform_worktree_audit(
         &self,
         worktree_path: &Path,

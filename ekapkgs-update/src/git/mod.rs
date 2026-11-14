@@ -65,6 +65,56 @@ fn decode_git_stdout(output: Output, what: &str) -> anyhow::Result<String> {
         .with_context(|| format!("git produced non-UTF-8 output ({what})"))
 }
 
+/// Return the top-level directory of the git repository containing `dir`.
+///
+/// Entry points often live in a subdirectory (`ci/packages.nix`), so the repo
+/// root cannot be derived from the entry point's parent directory.
+///
+/// # Errors
+///
+/// Returns an error if `dir` is not inside a git repository.
+pub async fn repo_toplevel(dir: &Path) -> anyhow::Result<PathBuf> {
+    let output = run_git(Some(dir), ["rev-parse", "--show-toplevel"]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{} is not inside a git repository: {stderr}", dir.display());
+    }
+    Ok(PathBuf::from(
+        decode_git_stdout(output, "rev-parse --show-toplevel")?.trim(),
+    ))
+}
+
+/// GitHub owner of `remote` as configured in the repository at `repo_dir`.
+///
+/// Used to address PRs from a fork (`<fork-owner>:<branch>`).
+///
+/// # Errors
+///
+/// Returns an error if the remote does not exist or does not point at GitHub.
+pub async fn remote_github_owner(repo_dir: &Path, remote: &str) -> anyhow::Result<String> {
+    let output = run_git(Some(repo_dir), ["remote", "get-url", remote]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to get URL for remote '{remote}': {stderr}");
+    }
+    let url = decode_git_stdout(output, "remote get-url")?;
+    parse_github_url(url.trim())
+        .map(|r| r.owner)
+        .ok_or_else(|| anyhow::anyhow!("Remote '{remote}' is not a GitHub URL: {}", url.trim()))
+}
+
+/// The `head` value for a GitHub pull request.
+///
+/// A branch pushed to the base repository itself is addressed by name; one
+/// pushed to a fork must be qualified with the fork owner, or GitHub rejects
+/// the PR with "head invalid".
+pub fn pr_head(base_owner: &str, push_owner: Option<&str>, branch: &str) -> String {
+    match push_owner {
+        Some(owner) if !owner.eq_ignore_ascii_case(base_owner) => format!("{owner}:{branch}"),
+        _ => branch.to_owned(),
+    }
+}
+
 /// Create a git worktree for an isolated update
 ///
 /// # Arguments
@@ -267,10 +317,16 @@ impl PrConfig {
     /// `git remote show`. Errors when the remote URL does not point at GitHub
     /// or when any underlying git invocation fails.
     pub async fn from_remote(remote: &str) -> anyhow::Result<Self> {
+        Self::from_remote_in(None, remote).await
+    }
+
+    /// Like [`PrConfig::from_remote`], but inspects the repository at `cwd`
+    /// (the process working directory when `None`).
+    pub async fn from_remote_in(cwd: Option<&Path>, remote: &str) -> anyhow::Result<Self> {
         debug!("Getting PR configuration from remote: {}", remote);
 
         // Get remote URL
-        let remote_url = get_remote_url(remote).await?;
+        let remote_url = get_remote_url(cwd, remote).await?;
         debug!("Remote URL: {}", remote_url);
 
         // Parse GitHub owner/repo from URL
@@ -279,7 +335,7 @@ impl PrConfig {
         })?;
 
         // Get default/base branch
-        let base_branch = get_default_branch(remote).await?;
+        let base_branch = get_default_branch(cwd, remote).await?;
         debug!("Base branch: {}", base_branch);
 
         Ok(Self {
@@ -293,17 +349,23 @@ impl PrConfig {
     /// tracking ref back to the configured remote, then deferring to
     /// [`PrConfig::from_remote`].
     pub async fn from_git_upstream() -> anyhow::Result<Self> {
+        Self::from_git_upstream_in(None).await
+    }
+
+    /// Like [`PrConfig::from_git_upstream`], but inspects the repository at
+    /// `cwd` (the process working directory when `None`).
+    pub async fn from_git_upstream_in(cwd: Option<&Path>) -> anyhow::Result<Self> {
         debug!("Auto-detecting PR configuration from git upstream");
 
         // Get current branch
-        let current_branch = get_current_branch().await?;
+        let current_branch = get_current_branch(cwd).await?;
         debug!("Current branch: {}", current_branch);
 
         // Get upstream remote name
-        let remote = get_upstream_remote(&current_branch).await?;
+        let remote = get_upstream_remote(cwd, &current_branch).await?;
         debug!("Upstream remote: {}", remote);
 
-        Self::from_remote(&remote).await
+        Self::from_remote_in(cwd, &remote).await
     }
 }
 
@@ -342,8 +404,8 @@ pub async fn get_pr_config_from_git() -> anyhow::Result<PrConfig> {
 }
 
 /// Get the current git branch name
-async fn get_current_branch() -> anyhow::Result<String> {
-    let output = run_git(None, ["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+async fn get_current_branch(cwd: Option<&Path>) -> anyhow::Result<String> {
+    let output = run_git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -364,9 +426,9 @@ async fn get_current_branch() -> anyhow::Result<String> {
 }
 
 /// Get the upstream remote name for a branch
-async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
+async fn get_upstream_remote(cwd: Option<&Path>, branch: &str) -> anyhow::Result<String> {
     let key = format!("branch.{branch}.remote");
-    let output = run_git(None, ["config", &key]).await?;
+    let output = run_git(cwd, ["config", &key]).await?;
 
     if output.status.success() {
         let remote = decode_git_stdout(output, "config branch.<name>.remote")?
@@ -386,8 +448,8 @@ async fn get_upstream_remote(branch: &str) -> anyhow::Result<String> {
 }
 
 /// Get the URL for a git remote
-async fn get_remote_url(remote: &str) -> anyhow::Result<String> {
-    let output = run_git(None, ["remote", "get-url", remote]).await?;
+async fn get_remote_url(cwd: Option<&Path>, remote: &str) -> anyhow::Result<String> {
+    let output = run_git(cwd, ["remote", "get-url", remote]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -400,10 +462,10 @@ async fn get_remote_url(remote: &str) -> anyhow::Result<String> {
 }
 
 /// Get the default branch for a remote
-async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
+async fn get_default_branch(cwd: Option<&Path>, remote: &str) -> anyhow::Result<String> {
     // First try: local cached symbolic ref (fast, no network)
     let symref_path = format!("refs/remotes/{remote}/HEAD");
-    let output = run_git(None, ["symbolic-ref", &symref_path]).await?;
+    let output = run_git(cwd, ["symbolic-ref", &symref_path]).await?;
 
     if output.status.success() {
         let full_ref = decode_git_stdout(output, "symbolic-ref refs/remotes/<remote>/HEAD")?
@@ -421,7 +483,7 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     debug!("Local symbolic ref not found, querying remote");
 
     // Second try: query remote directly (requires network)
-    let output = run_git(None, ["ls-remote", "--symref", remote, "HEAD"]).await?;
+    let output = run_git(cwd, ["ls-remote", "--symref", remote, "HEAD"]).await?;
 
     if output.status.success() {
         let stdout = decode_git_stdout(output, "ls-remote --symref")?;
@@ -443,7 +505,7 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     debug!("Could not determine default branch from remote, trying fallbacks");
 
     for candidate in DEFAULT_BRANCH_FALLBACKS {
-        let output = run_git(None, ["ls-remote", "--heads", remote, candidate]).await?;
+        let output = run_git(cwd, ["ls-remote", "--heads", remote, candidate]).await?;
 
         if output.status.success() && !output.stdout.is_empty() {
             debug!("Using fallback branch: {}", candidate);
@@ -452,4 +514,46 @@ async fn get_default_branch(remote: &str) -> anyhow::Result<String> {
     }
 
     anyhow::bail!("Could not determine default branch for remote '{remote}'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_head_qualifies_fork_branches() {
+        let branch = "update/zlib/1.3.2";
+        // Pushed to the base repository itself.
+        assert_eq!(pr_head("ekala-project", None, branch), branch);
+        assert_eq!(
+            pr_head("ekala-project", Some("ekala-project"), branch),
+            branch
+        );
+        assert_eq!(
+            pr_head("ekala-project", Some("Ekala-Project"), branch),
+            branch
+        );
+        // Pushed to a fork.
+        assert_eq!(
+            pr_head("ekala-project", Some("jonringer"), branch),
+            "jonringer:update/zlib/1.3.2"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_toplevel_from_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let sub = root.join("ci");
+        std::fs::create_dir_all(&sub).unwrap();
+        let init = run_git(Some(&root), ["init", "-q"]).await.unwrap();
+        assert!(init.status.success());
+
+        let top = repo_toplevel(&sub).await.unwrap();
+        assert_eq!(
+            std::fs::canonicalize(top).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        assert!(repo_toplevel(tmp.path()).await.is_err());
+    }
 }

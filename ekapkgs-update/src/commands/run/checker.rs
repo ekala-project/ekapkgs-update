@@ -20,10 +20,15 @@ const PROGRESS_INTERVAL: usize = 250;
 /// Service that monitors packages for new upstream releases, with optional
 /// concurrency and eval-worker limits.
 ///
+/// `file` is enumerated with nix-eval-jobs (optionally through `select`);
+/// `eval_file` is the entry point attr paths are evaluated against.
+///
 /// Returns `(checked, skipped_by_backoff, eval_errors)`. When `session_id`
 /// is set, progress is written to the session periodically.
 pub async fn release_checker_service_with_limits(
     file: String,
+    select: Option<String>,
+    eval_file: String,
     db: Database,
     tx: mpsc::UnboundedSender<UpdateRequest>,
     skip_unstable: bool,
@@ -32,7 +37,14 @@ pub async fn release_checker_service_with_limits(
     max_eval_workers: Option<usize>,
     session_id: Option<String>,
 ) -> (usize, usize, usize) {
-    let stream = nix::run_eval::run_nix_eval_jobs_with_workers(file.clone(), max_eval_workers);
+    let stream = nix::run_eval::run_nix_eval_jobs_with_options(
+        file,
+        nix::run_eval::EvalJobsOptions {
+            max_workers: max_eval_workers,
+            select,
+            apply: None,
+        },
+    );
     pin_mut!(stream);
 
     // Create Repology client for cross-distribution version checking
@@ -95,7 +107,7 @@ pub async fn release_checker_service_with_limits(
                 let db_clone = db.clone();
                 let drv_clone = drv.clone();
                 let attr_path_clone = attr_path.clone();
-                let file_clone = file.clone();
+                let file_clone = eval_file.clone();
                 let tx_clone = tx.clone();
                 let repology_client_clone = repology_client.clone();
                 let semaphore_clone = semaphore.clone();
@@ -192,8 +204,14 @@ async fn check_for_update(
         return Ok(());
     }
 
-    // Determine upstream source
-    let upstream_source = match metadata.resolve_upstream_source() {
+    // Determine upstream source. Guessing a PyPI project from the pname is
+    // only allowed for Python packages (checked lazily: it costs an eval).
+    let needs_pypi_guess = metadata.src_url.is_none()
+        && metadata.github_repo.is_none()
+        && metadata.update_script.is_none();
+    let allow_pypi_fallback =
+        !needs_pypi_guess || crate::nix::is_python_package(eval_entry_point, attr_path).await;
+    let upstream_source = match metadata.resolve_upstream_source_with(allow_pypi_fallback) {
         Ok(source) => source,
         Err(e) => {
             debug!("{}: {}", attr_path, e);

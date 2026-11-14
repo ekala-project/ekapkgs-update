@@ -74,9 +74,24 @@ pub struct RepoConfig {
     /// GitHub) or a full URL like `github.com/owner/repo`.
     pub upstream: String,
 
-    /// Nix file to evaluate within the repo's working directory.
+    /// Nix file (relative to the repo root) enumerated with `nix-eval-jobs`
+    /// to discover packages.
     #[serde(default = "default_entrypoint")]
     pub entrypoint: String,
+
+    /// Optional nix-eval-jobs `--select` function applied to `entrypoint`
+    /// before traversal, e.g. `x: x.buildable` when the entry point returns
+    /// `{ buildable = { ... }; }` instead of the packages themselves. Dotted
+    /// keys in the selected set (`"cmake.v4"`) are treated as attribute paths.
+    #[serde(default)]
+    pub select: Option<String>,
+
+    /// Nix file (relative to the repo root) used to evaluate, locate and build
+    /// individual packages. Attribute paths reported by enumeration must
+    /// resolve against it. Defaults to `entrypoint`; required when `select` is
+    /// set, because attribute paths are then relative to the selected set.
+    #[serde(default)]
+    pub eval_entrypoint: Option<String>,
 
     /// Git remote name to push update branches to for PR creation.
     #[serde(default = "default_fork")]
@@ -102,8 +117,17 @@ pub struct ConfigFile {
     /// Path to the SQLite database.
     pub database: Option<String>,
 
-    /// Nix file to evaluate (e.g., `default.nix`).
+    /// Nix file to evaluate (e.g., `default.nix`). Default for every
+    /// command's `--file`.
     pub file: Option<String>,
+
+    /// Default `--select` for `run`/`watch` enumeration (see
+    /// [`RepoConfig::select`]).
+    pub select: Option<String>,
+
+    /// Default `--eval-file` for `run`/`watch` (see
+    /// [`RepoConfig::eval_entrypoint`]).
+    pub eval_file: Option<String>,
 
     /// LLM server configuration.
     pub llm: LlmConfig,
@@ -274,6 +298,14 @@ impl ConfigFile {
             }
             if repo.upstream.is_empty() {
                 bail!("repos.{}: upstream cannot be empty", repo.name);
+            }
+            if repo.select.is_some() && repo.eval_entrypoint.is_none() {
+                bail!(
+                    "repos.{}: `select` requires `eval_entrypoint` (attribute paths from the \
+                     selected set must be evaluated against a file where they resolve, e.g. \
+                     \"default.nix\")",
+                    repo.name
+                );
             }
         }
 
@@ -483,6 +515,40 @@ path = "/var/lib/ekapkgs-update/repos/ekapkgs"
         assert_eq!(config.repos[1].name, "ekapkgs");
         assert_eq!(config.repos[1].fork, "origin"); // default
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_repos_select_and_eval_entrypoint() {
+        let toml_str = r#"
+[[repos]]
+name = "corepkgs"
+upstream = "github.com/ekala-project/corepkgs"
+entrypoint = "ci/packages.nix"
+select = "x: x.buildable"
+eval_entrypoint = "default.nix"
+path = "/var/lib/ekapkgs-update/repos/corepkgs"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.repos[0].select.as_deref(), Some("x: x.buildable"));
+        assert_eq!(
+            config.repos[0].eval_entrypoint.as_deref(),
+            Some("default.nix")
+        );
+    }
+
+    #[test]
+    fn test_repos_select_without_eval_entrypoint_rejected() {
+        let toml_str = r#"
+[[repos]]
+name = "corepkgs"
+upstream = "github.com/ekala-project/corepkgs"
+entrypoint = "ci/packages.nix"
+select = "x: x.buildable"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("eval_entrypoint"), "{err}");
     }
 
     #[test]

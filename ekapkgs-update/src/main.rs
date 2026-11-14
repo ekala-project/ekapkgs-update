@@ -45,24 +45,38 @@ async fn main() -> anyhow::Result<()> {
         .with_timer(tracing_subscriber::fmt::time())
         .init();
 
-    let args = parse_args();
+    let choice = preparse_color_choice(std::env::args_os().skip(1));
+    let args = parse_args(cli::Args::command().color(choice));
 
     // Load config file (validated at startup)
     let config_file = config::ConfigFile::load(args.config_file.as_deref())?;
 
+    // Re-parse with config-file values as argument defaults, so the precedence
+    // is CLI flag > config file > built-in default (e.g. `database`, `file`).
+    let args = if config_file.database.is_some()
+        || config_file.file.is_some()
+        || config_file.select.is_some()
+        || config_file.eval_file.is_some()
+    {
+        parse_args(cli::apply_config_defaults(
+            cli::Args::command().color(choice),
+            &config_file,
+        ))
+    } else {
+        args
+    };
+
     args.command.execute(config_file).await
 }
 
-/// Parse CLI args, applying `--color <when>` to clap's help/usage rendering.
+/// Parse CLI args with `cmd`, exiting on `--help` or invalid input.
 ///
 /// Clap's `Command::color()` controls ANSI emission for help/usage and error
 /// output. We pre-scan `argv` for `--color` so the choice is honored even when
 /// the user passes `--help` (which clap handles before our code sees the parsed
 /// `Args`). The same flag is also declared on `Args`, so it appears in
 /// `--help` and is validated against the `ColorWhen` enum during full parsing.
-fn parse_args() -> cli::Args {
-    let choice = preparse_color_choice(std::env::args_os().skip(1));
-    let cmd = cli::Args::command().color(choice);
+fn parse_args(cmd: clap::Command) -> cli::Args {
     let matches = cmd.get_matches();
     match cli::Args::from_arg_matches(&matches) {
         Ok(args) => args,

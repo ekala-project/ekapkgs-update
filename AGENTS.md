@@ -45,7 +45,7 @@ ekapkgs-update/                     # Main CLI crate
     cli.rs                          # Clap definitions, Commands enum, thin dispatch
     init.rs                         # Process bootstrap (increase_fd_limit)
     paths.rs                        # Centralized XDG cache/data paths
-    config.rs                       # TOML config file (LLM, autofix, nix, watch settings)
+    config.rs                       # TOML config file (LLM, autofix, nix, watch settings); values become CLI defaults
     database/                       # SQLite via sqlx (shared with the web dashboard)
       mod.rs                        #   Database pool, rebuild stats, upstream_index
       types.rs                      #   UpdateStatus, UpdateRecord, PackageInfo, FailedUpdate, UpdateLog
@@ -94,9 +94,9 @@ ekapkgs-update/                     # Main CLI crate
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
       watch/                          # RSS/event-driven passive update mode (multi-repo)
         mod.rs                      #   WatchConfig, ResolvedRepo, repo provisioning (clone/fork)
-        sync.rs                     #   Fast-forward-only checkout sync before each index
-        index.rs                    #   Per-repo upstream index builder (nix-eval-jobs → upstream_index)
-        feeds.rs                    #   Feed polling (RSS/Atom/API), UpstreamSource reconstruction
+        sync.rs                     #   Fast-forward-only checkout sync (startup, re-index, before update batches)
+        index.rs                    #   Per-repo upstream index: one nix-eval-jobs pass with --apply → upstream_index
+        feeds.rs                    #   Feed polling (RSS/Atom/API), per-entry version policy, UpstreamSource reconstruction
         listener.rs                 #   Event loop: poll cycles, observe-only bootstrap, dispatch decisions
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
@@ -110,7 +110,7 @@ ekapkgs-update/                     # Main CLI crate
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
-    nix/                            # Nix eval helpers, nix-eval-jobs, eval cache
+    nix/                            # Nix eval helpers, nix-eval-jobs (run_eval.rs: --select/--apply, exit status), eval cache
     git/                            # Git worktree/branch/PR operations
     cve/                            # OSV.dev CVE analysis (24h cache)
     repology/                       # Repology cross-distro version check (72h cache)
@@ -119,7 +119,7 @@ ekapkgs-update/                     # Main CLI crate
     variant_strategy.rs             # Semver strategy inference (effective_strategy, mkManyVariants)
   tests/
     migrate_tests.rs                # Integration tests with fixture files
-    watch_tests.rs                  # Watch index/feed/dispatch integration tests
+    watch_tests.rs                  # Watch index/feed/dispatch integration tests (in-memory SQLite)
 
 ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + Elm SPA)
   Cargo.toml
@@ -204,37 +204,36 @@ Every phase is wrapped with `PhaseTracker::run` / `start` (`commands/update/inst
 The `watch` command is an event-driven alternative to `run`. Instead of evaluating all packages on every cycle, it builds a reverse index and polls upstream feeds. Supports **multi-repo mode** for poly-repo package sets:
 
 ```
-Config: [[repos]] (name, upstream, entrypoint, path)
+Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, path)
         │
         ▼
-  Repo provisioning ──── auto-clone if missing, auto-fork via GitHub API
+  Repo provisioning ──── auto-clone if missing, auto-fork via GitHub API,
+        │                 sync managed checkout to origin/<base>
+        ▼
+  Per-repo nix-eval-jobs ──── one pass: --select (enumeration) + --apply (metadata);
+        │                      re-sync + re-index periodically (default: 24h)
+        ▼
+  upstream_index table (atomically replaced per repo)
+  (repo_name, upstream_type, upstream_key → attr_path, version, drv_path, version policy)
         │
         ▼
-  Per-repo nix-eval-jobs ──── periodic re-index (default: 24h)
-        │
-        ▼
-  upstream_index table
-  (repo_name, upstream_type, upstream_key → attr_path)
-        │
-        ▼
-  Feed Poller ────────────── RSS/Atom (GitHub, PyPI) + API (GitLab, SourceHut)
-  (Semaphore-limited, deduplicated across repos)
+  Feed Poller ────────────── RSS/Atom (GitHub releases → tags, PyPI) + API (GitLab, SourceHut, directories)
+  (Semaphore-limited)         per-entry VersionPolicy, backoff, open-PR guard, alias dedup
         │ new version detected
         ▼
-  mpsc::unbounded_channel ──── UpdateRequest carries per-repo routing
-        │
-        ▼
-  UpdaterServiceConfig::run_service ──── uses per-request overrides for
-                                         eval_entry_point, pr_config, fork
+  sync affected checkouts, create session, run_service ──── per-request overrides for
+                                                              eval_entry_point, pr_config, fork
 ```
 
-**Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist and creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig` (`managed = true`; legacy single-repo mode is `managed = false`, name `''`). Then it closes out state left by a killed process (`recover_interrupted_watch_state`), registers repos in `watched_repos` and forgets repos removed from the config (`retain_watched_repos`).
+**Entry points: enumeration vs evaluation.** `entrypoint` (+ optional `select`, a nix-eval-jobs `--select` function such as `x: x.buildable`) is only used to *enumerate* packages. Dotted keys in a selected flat set (`"cmake.v4"`) are split into attr paths (`NixEvalItem::flatten_dotted_attrs`). `eval_entrypoint` (defaults to `entrypoint`, required with `select`) is what attr paths are evaluated, located (`meta.position`) and built against — e.g. the repo's `default.nix`. Never evaluate per-package queries through an eager set like corepkgs' `buildable`: it forces every `drvPath`, so each query becomes a full CI eval. The `run` command has the same split via `--select`/`--eval-file`.
 
-**Sync** (`commands/watch/sync.rs`): Before every index build, managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten. Worktrees are created from `HEAD`, so this is what keeps updates current.
+**Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist and creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig` (`managed = true`; legacy single-repo mode is `managed = false`, name `''`, the user's own working copy). Then it closes out state left by a killed process (`recover_interrupted_watch_state`), registers repos in `watched_repos` and forgets repos removed from the config (`retain_watched_repos`, which also drops their `upstream_index` rows).
 
-**Index builder** (`commands/watch/index.rs`): Scans packages via `nix-eval-jobs` per-repo (tasks in a `JoinSet`, Semaphore(8)). It extracts `PackageMetadata`, determines `UpstreamSource` and the effective strategy, and stores them in `upstream_index` with `version_regex` / `include_prereleases`. It also registers the package in `updates`. Stale rows are pruned unless the evaluation looks incomplete.
+**Sync** (`commands/watch/sync.rs`): At startup, before every index build and before every batch of updates (only the repos the batch touches), managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten, and unmanaged checkouts are never fetched or merged. Worktrees are created from `HEAD`, so this is what keeps updates current.
 
-**Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub and PyPI (cheaper than API), falls back to existing `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing. GitHub tags come from the `/releases/tag/<tag>` link, not the entry title (the title is the release name).
+**Index builder** (`commands/watch/index.rs`): One `nix-eval-jobs` pass per repo with an `--apply` function (`INDEX_APPLY_EXPR`) that extracts version, pname, description, homepage, source URLs, `meta.position`, variants/Python flags and `passthru.ekapkgs-update` settings — no per-package `nix-instantiate` (that took hours). Skips packages defined outside the repo (`meta.position` in the Nix store), pinned variants, opt-outs and packages without a recognizable upstream (the pname→PyPI guess is only allowed for Python packages). The strategy comes from `infer_update_strategy(...).resolve(has_variants)`. Entries (with `drv_path` and the `VersionPolicy`) are written in one transaction by `replace_upstream_index`, which also prunes the repo's stale rows unless the evaluation looks incomplete (stream error, nothing evaluated, or under half the previous count; `prune_decision`). Every indexed package is registered in `updates` (`upsert_package_info`).
+
+**Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub (`releases.atom`, then `tags.atom` for tags-only projects) and PyPI (cheaper than API), falls back to `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing. GitHub tags come from the `/releases/tag/<tag>` link, not the entry title (the title is the release name). `update_version_for_entry` applies the entry's stored `VersionPolicy`.
 
 **Event loop** (`commands/watch/listener.rs`):
 
@@ -243,9 +242,14 @@ Config: [[repos]] (name, upstream, entrypoint, path)
 - **Observe-only bootstrap:** the first observation of a package records `baseline_version` and dispatches nothing. Only releases newer than the baseline are dispatched; the backlog is left to `run`.
 - `dispatch_decision` (pure, unit-tested) evaluates, in order: Baseline, UpToDate, Backlog, AlreadyProposed, Backoff (same failed version only), Dispatch.
 - `resolve_siblings` collapses aliases (same repo, current and target version) to the shortest attr path.
-- **Lazy sessions:** an update session (`SessionMode::Watch`) is created only when a cycle dispatches at least one update.
+- **Lazy sessions:** an update session (`SessionMode::Watch`) is created only when a cycle dispatches at least one update. Dispatched requests carry the indexed `drv_path` and the repo's `eval_entry_point`, `pr_config` and `fork`.
+- Polling volume: one feed request per source per cycle (~5k sources for corepkgs+ekapkgs), so keep the poll interval in the tens of minutes or more.
 
-**NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database, `Restart=always`. `watch.repos` option configures multi-repo mode.
+**NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database (`/var/lib/ekapkgs-update/updates.db` via the generated config file), `Restart=always`. `watch.repos` option configures multi-repo mode (`select`, `evalEntrypoint`). Module notes:
+
+- `run.enable` (default true) / `run.startAt`: the batch `run` service is a one-shot; give it a timer or disable it when watch covers the same repos. `packagesFile` is only required when it is enabled.
+- `extraPackages`: added to the run/watch services' `PATH` (e.g. `pkgs.claude-code` for `--claude-fix`; `environment.systemPackages` is not visible to services).
+- `git.userName`/`git.userEmail`/`git.githubTokenCredentialHelper`: a generated git config (`GIT_CONFIG_SYSTEM`) with the commit identity and a credential helper that answers github.com HTTPS auth with `GITHUB_TOKEN` from `environmentFile`.
 
 ## Key Patterns
 
@@ -289,6 +293,10 @@ Some packages use a `mkManyVariants` pattern with multiple version variants (e.g
 ### Platform-Specific Hashes
 
 Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system strings like `["x86_64-linux" "aarch64-linux"]`) get per-platform hash discovery. After the version is bumped, the tool evaluates `src.url` with `--system <platform>` to get each platform's download URL, then prefetches it with `nix store prefetch-file --json` to compute the SRI hash. This avoids needing to build for foreign platforms.
+
+### Config File Values as CLI Defaults (`main.rs`, `cli.rs`)
+
+`main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments). `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
 
 ### Explicit Upstream Source
 
@@ -454,7 +462,12 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `WatchConfig` | `commands/watch/mod.rs` | Watch (passive/RSS-driven) mode configuration |
 | `ResolvedRepo` | `commands/watch/mod.rs` | Runtime-resolved repo with paths, PrConfig, fork remote |
 | `RepoConfig` | `config.rs` | TOML config for a watched repo (name, upstream, entrypoint, path) |
-| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (repo_name + source → attr_path, strategy/regex/prereleases) |
+| `UpstreamIndexEntry` | `database/mod.rs` | Row from upstream_index table (repo_name + source → attr_path, drv_path, strategy/regex/prereleases → `version_policy()`) |
+| `NewUpstreamIndexEntry` | `database/mod.rs` | Entry passed to `Database::replace_upstream_index` |
+| `IndexTarget` | `commands/watch/index.rs` | What to index: repo name, enumeration file, select, repo dir |
+| `VersionPolicy` | `vcs_sources/mod.rs` | Semver strategy + prerelease + regex; `best_release` picks the target |
+| `UpdateStrategyInference` | `variant_strategy.rs` | Shared strategy decision (explicit / variant / attr suffix / pinned) for `run` and `watch` |
+| `EvalJobsOptions` | `nix/run_eval.rs` | nix-eval-jobs `--workers`/`--select`/`--apply` |
 | `ReviewConfig` | `commands/review.rs` | PR review configuration (repo, PR#, tests, best-practices flags) |
 | `RepoCoords` | `commands/review.rs` | Parsed repository owner/repo coordinates |
 
@@ -486,7 +499,7 @@ API integrations (via reqwest):
 
 - **Unit tests**: `#[test]` with inline assertions. Located in same file or `tests_*.rs` siblings.
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
-- **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`.
+- **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`; `tests/watch_tests.rs` for the upstream index, version policy and dispatch guards (in-memory SQLite).
 - **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database), including response compression. The Elm frontend has table-driven tests in `frontend/tests/` (Format, Route, Session/Item); run them with `nix develop --command ekapkgs-update-web/frontend/test-runner/run.sh` (elm + QuickJS, no node) or `nix build .#checks.x86_64-linux.web-frontend-tests`.
 - **Web crate frontend**: `build.rs` compiles `frontend/` with `elm`, which the dev shell provides on x86_64-linux and aarch64-linux (`nix/overlay.nix` adds upstream's aarch64 binary, which ekapkgs lacks). `EKAPKGS_WEB_ELM_JS` can point at a prebuilt `elm.js` instead; a missing file there is an error. Without either, the build warns and embeds a stub `elm.js` (a "frontend not built" notice), so `cargo build/test --workspace` work without `elm`. An Elm compile error always fails the build. `EKAPKGS_WEB_REQUIRE_ELM=1` makes a missing `elm` fatal too. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
 - **Run**: `cargo test --workspace`; Elm: `ekapkgs-update-web/frontend/test-runner/run.sh` (`nix flake check` runs it in the sandbox)
@@ -499,6 +512,9 @@ API integrations (via reqwest):
 4. **Extra nix-build args** — Set once via `OnceLock` in `commands/update/build.rs`. Second call is a no-op.
 5. **Database pool** — `Database` is `Clone` (shared pool). Safe to pass across async tasks.
 6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only single-shot CLI commands (`retry`, `apply`) change the cwd.
+7. **Managed checkout sync** — `sync::sync_repo` only runs from the watch loop between events (startup, re-index, before an update batch), never while update worktrees are being created. Do not call it concurrently with `perform_update`.
+8. **Worktree paths** — `perform_update` resolves the repo root with `git rev-parse --show-toplevel` and maps both the entry point and the package file into the worktree relative to it. Files outside the repository (e.g. `meta.position` in the Nix store) are skipped, never edited.
+9. **Package attribute expressions** — select packages as `let pkgs = import <entry> { }; in pkgs.<attr>`, never `with import <entry> { }; <attr>`. Attr paths can be quoted (`"389-ds-base"`), which is not an expression under `with`, and bare names under `with` lose to builtins such as `map` or `toString`.
 
 ## Extension Recipes
 

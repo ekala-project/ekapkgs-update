@@ -534,7 +534,7 @@ pub async fn update_platform_hashes(
 
         // Step 1: Evaluate the current (stale) hash for this platform
         let hash_expr = format!(
-            "with import {} {{ }}; {}.src.outputHash",
+            "let pkgs = import {} {{ }}; in pkgs.{}.src.outputHash",
             normalized_entry, attr_path
         );
         let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {
@@ -550,7 +550,7 @@ pub async fn update_platform_hashes(
 
         // Step 2: Evaluate the source URL for this platform
         let url_expr = format!(
-            "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+            "let pkgs = import {} {{ }}; in pkgs.{}.src.url or (builtins.head pkgs.{}.src.urls)",
             normalized_entry, attr_path, attr_path
         );
         let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {

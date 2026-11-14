@@ -56,6 +56,8 @@ pub use watch::{
     IndexOutcome, RepoSyncStatus, SourcePoll, WatchCycleKind, WatchCycleStats, WatchedRepoInfo,
 };
 
+use crate::vcs_sources::{SemverStrategy, VersionPolicy};
+
 /// Parse an optional RFC 3339 timestamp string into UTC, ignoring parse errors.
 ///
 /// Used by row-mapping code where invalid stored timestamps degrade to `None`
@@ -347,9 +349,89 @@ impl Database {
 
     // ── Upstream index (watch command) ──────────────────────────────
 
+    /// Store `entries` as the upstream index of `repo_name`, in one
+    /// transaction so pollers never observe a half-written index.
+    ///
+    /// With `prune`, the repo's entries not in `entries` are deleted too
+    /// (packages that disappeared), making this an atomic replacement.
+    /// Without it, they are kept: the indexer passes `false` when the
+    /// evaluation looks incomplete. Returns the number of entries pruned.
+    pub async fn replace_upstream_index(
+        &self,
+        repo_name: &str,
+        entries: &[NewUpstreamIndexEntry],
+        prune: bool,
+    ) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin upstream_index transaction")?;
+
+        for entry in entries {
+            sqlx::query(
+                r#"
+                INSERT INTO upstream_index
+                    (repo_name, attr_path, upstream_type, upstream_key, instance,
+                     current_version, src_url, indexed_at, pname, drv_path, semver_strategy,
+                     include_prereleases, version_regex)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo_name, attr_path, upstream_type, upstream_key)
+                DO UPDATE SET
+                    instance = excluded.instance,
+                    current_version = excluded.current_version,
+                    src_url = excluded.src_url,
+                    indexed_at = excluded.indexed_at,
+                    pname = excluded.pname,
+                    drv_path = excluded.drv_path,
+                    semver_strategy = excluded.semver_strategy,
+                    include_prereleases = excluded.include_prereleases,
+                    version_regex = excluded.version_regex
+                "#,
+            )
+            .bind(repo_name)
+            .bind(&entry.attr_path)
+            .bind(&entry.upstream_type)
+            .bind(&entry.upstream_key)
+            .bind(&entry.instance)
+            .bind(&entry.current_version)
+            .bind(&entry.src_url)
+            .bind(&now)
+            .bind(&entry.pname)
+            .bind(&entry.drv_path)
+            .bind(entry.policy.strategy.to_string())
+            .bind(entry.policy.include_prereleases)
+            .bind(&entry.policy.version_regex)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("insert upstream_index entry {}", entry.attr_path))?;
+        }
+
+        let pruned = if prune {
+            sqlx::query("DELETE FROM upstream_index WHERE repo_name = ? AND indexed_at != ?")
+                .bind(repo_name)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await
+                .context("prune upstream_index for repo")?
+                .rows_affected()
+        } else {
+            0
+        };
+
+        tx.commit()
+            .await
+            .context("commit upstream_index transaction")?;
+        Ok(pruned)
+    }
+
     /// Insert or update an upstream index entry mapping an attr_path to its
-    /// upstream source (without version-selection settings).
-    #[allow(dead_code)] // used by integration tests; the indexer uses upsert_indexed_package
+    /// upstream source (with the default `latest` version policy).
+    ///
+    /// The watch indexer uses [`Database::replace_upstream_index`]; this is
+    /// kept for incremental callers and tests.
+    #[allow(dead_code)] // public API used by tests/watch_tests.rs
     pub async fn upsert_upstream_index(
         &self,
         repo_name: &str,
@@ -424,7 +506,7 @@ impl Database {
         let rows = sqlx::query(
             r#"
             SELECT repo_name, attr_path, upstream_type, upstream_key, instance, current_version,
-                   src_url, pname, semver_strategy, version_regex, include_prereleases
+                   src_url, pname, drv_path, semver_strategy, version_regex, include_prereleases
             FROM upstream_index
             WHERE upstream_type = ? AND upstream_key = ?
               AND (instance IS ? OR (instance IS NOT NULL AND instance = ?))
@@ -489,19 +571,6 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a repo's index entries that were not refreshed since `since`
-    /// (i.e. packages that disappeared from the repo). Returns rows removed.
-    pub async fn prune_upstream_index(&self, repo_name: &str, since: &str) -> Result<u64> {
-        let result =
-            sqlx::query("DELETE FROM upstream_index WHERE repo_name = ? AND indexed_at < ?")
-                .bind(repo_name)
-                .bind(since)
-                .execute(&self.pool)
-                .await
-                .context("prune upstream_index")?;
-        Ok(result.rows_affected())
-    }
-
     /// Count entries in the upstream index (all repos, or one repo).
     pub async fn upstream_index_count(&self, repo_name: Option<&str>) -> Result<i64> {
         let count: i64 = match repo_name {
@@ -553,6 +622,8 @@ pub struct UpstreamIndexEntry {
     pub src_url: Option<String>,
     #[allow(dead_code)] // informational; read by tests and library users
     pub pname: Option<String>,
+    /// Derivation path from the index evaluation (keys failure logs).
+    pub drv_path: Option<String>,
     /// Effective semver strategy recorded at index time (`None` = latest).
     pub semver_strategy: Option<String>,
     pub version_regex: Option<String>,
@@ -569,21 +640,48 @@ impl UpstreamIndexEntry {
             instance: row.get("instance"),
             current_version: row.get("current_version"),
             src_url: row.get("src_url"),
-            pname: row.get("pname"),
-            semver_strategy: row.get("semver_strategy"),
-            version_regex: row.get("version_regex"),
+            pname: row.try_get("pname").unwrap_or_default(),
+            drv_path: row.try_get("drv_path").unwrap_or_default(),
+            semver_strategy: row.try_get("semver_strategy").unwrap_or_default(),
+            version_regex: row.try_get("version_regex").unwrap_or_default(),
             include_prereleases: row
-                .get::<Option<i64>, _>("include_prereleases")
+                .try_get::<Option<i64>, _>("include_prereleases")
+                .ok()
+                .flatten()
                 .unwrap_or(0)
                 != 0,
         }
     }
 
     /// The effective semver strategy for release selection.
-    pub fn strategy(&self) -> crate::vcs_sources::SemverStrategy {
+    pub fn strategy(&self) -> SemverStrategy {
         self.semver_strategy
             .as_deref()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(crate::vcs_sources::SemverStrategy::Latest)
+            .unwrap_or(SemverStrategy::Latest)
     }
+
+    /// The version policy recorded for this entry when it was indexed.
+    pub fn version_policy(&self) -> VersionPolicy {
+        VersionPolicy {
+            strategy: self.strategy(),
+            include_prereleases: self.include_prereleases,
+            version_regex: self.version_regex.clone(),
+        }
+    }
+}
+
+/// A package to store in the upstream index (see
+/// [`Database::replace_upstream_index`]).
+#[derive(Debug, Clone)]
+pub struct NewUpstreamIndexEntry {
+    pub attr_path: String,
+    pub pname: Option<String>,
+    pub upstream_type: String,
+    pub upstream_key: String,
+    pub instance: Option<String>,
+    pub current_version: String,
+    pub src_url: Option<String>,
+    pub drv_path: Option<String>,
+    pub policy: VersionPolicy,
 }
