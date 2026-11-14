@@ -41,6 +41,7 @@ pub(super) use variants::{
 };
 
 use crate::package::PackageMetadata;
+use crate::vcs_sources::UpstreamSource;
 
 /// Update a package from a specific file path.
 /// Returns removed patches and the test result.
@@ -121,6 +122,10 @@ pub async fn update_from_file_path(
                 new_version,
                 metadata.output_hash.as_deref(),
                 Some(&best_release.tag_name),
+                match &upstream_source {
+                    UpstreamSource::PyPI { pname } => Some(pname.as_str()),
+                    _ => None,
+                },
             )
             .await?;
 

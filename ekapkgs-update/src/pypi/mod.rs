@@ -6,6 +6,8 @@ use anyhow::Context;
 use serde::Deserialize;
 use tracing::debug;
 
+pub mod sdist;
+
 /// PyPI release information from the API
 #[derive(Debug, Deserialize)]
 pub struct PypiResponse {
@@ -70,6 +72,46 @@ pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
         .await
         .with_context(|| format!("decode JSON from {url}"))?;
     Ok(pypi_response)
+}
+
+/// A file published for one PyPI release
+#[derive(Debug, Deserialize)]
+pub struct PypiFile {
+    pub filename: String,
+    /// `sdist` or `bdist_wheel` (older releases may have other `bdist_*` kinds)
+    pub packagetype: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiReleaseResponse {
+    urls: Vec<PypiFile>,
+}
+
+/// Fetch the files published for one release of a PyPI project
+///
+/// Uses `https://pypi.org/pypi/{pname}/{version}/json`, whose `urls` field
+/// lists that release's files.
+pub async fn fetch_release_files(pname: &str, version: &str) -> anyhow::Result<Vec<PypiFile>> {
+    let url = format!("https://pypi.org/pypi/{pname}/{version}/json");
+
+    debug!("Fetching PyPI release files from {}", url);
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("User-Agent", "ekapkgs-update")
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("PyPI API request failed with status: {}", response.status());
+    }
+
+    let release: PypiReleaseResponse = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))?;
+    Ok(release.urls)
 }
 
 #[cfg(test)]
