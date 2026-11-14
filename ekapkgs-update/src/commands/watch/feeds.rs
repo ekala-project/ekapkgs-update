@@ -1,35 +1,57 @@
 //! Feed polling for upstream release detection.
 //!
 //! Supports two strategies:
-//! - **RSS/Atom feeds** (GitHub releases, PyPI) — parsed with `feed-rs`
+//! - **RSS/Atom feeds** (GitHub releases then tags, PyPI) — parsed with `feed-rs`
 //! - **API polling** (GitLab, SourceHut, DirectoryListing) — reuses existing
 //!   platform clients via [`UpstreamSource::fetch_all_releases`]
+
+use std::cmp::Ordering;
 
 use anyhow::Context;
 use tracing::{debug, warn};
 
-use crate::vcs_sources::{Release, UpstreamSource};
+use crate::database::UpstreamIndexEntry;
+use crate::vcs_sources::{Release, UpstreamSource, compare_version_components};
+
+/// Decide whether an indexed package should be updated, given the releases
+/// polled for its upstream source.
+///
+/// Applies the entry's recorded version policy (semver strategy, prerelease
+/// handling, version regex) and returns the target version only when it is
+/// strictly newer than the indexed version.
+pub fn update_version_for_entry(
+    entry: &UpstreamIndexEntry,
+    releases: &[Release],
+) -> Option<String> {
+    let current = entry.current_version.as_deref().filter(|v| !v.is_empty())?;
+    let (_, version) = entry
+        .version_policy()
+        .best_release(releases.to_vec(), current)?;
+    (compare_version_components(&version, current) == Ordering::Greater).then_some(version)
+}
 
 /// Poll a single upstream source for its releases.
 ///
 /// Uses RSS/Atom feeds when available (GitHub, PyPI) and falls back to API
 /// polling for platforms without feed support.
 pub async fn poll_source(source: &UpstreamSource) -> anyhow::Result<Vec<Release>> {
-    if let Some(feed_url) = source.feed_url() {
+    for feed_url in source.feed_urls() {
         match poll_feed(&feed_url).await {
             Ok(releases) if !releases.is_empty() => return Ok(releases),
             Ok(_) => {
                 debug!(
-                    "{}/{}: RSS feed returned no entries, falling back to API",
+                    "{}/{}: feed {} returned no entries",
                     source.source_type(),
-                    source.source_key()
+                    source.source_key(),
+                    feed_url
                 );
             },
             Err(e) => {
                 debug!(
-                    "{}/{}: RSS feed failed ({}), falling back to API",
+                    "{}/{}: feed {} failed: {}",
                     source.source_type(),
                     source.source_key(),
+                    feed_url,
                     e
                 );
             },
@@ -185,11 +207,15 @@ pub fn upstream_source_from_index(
             pname: upstream_key.to_owned(),
         }),
         "directory" => {
-            // upstream_key is the base_url; we need the pname from the URL
-            let pname = upstream_key
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
+            // upstream_key is the base_url; recover the pname from it. GNU
+            // listings end in `/<pname>/`, SourceForge ones in
+            // `/projects/<pname>/files/` (see `UpstreamSource::from_url`).
+            let trimmed = upstream_key.trim_end_matches('/');
+            let pname = trimmed
+                .strip_suffix("/files")
+                .and_then(|rest| rest.rsplit_once("/projects/"))
+                .map(|(_, pname)| pname)
+                .or_else(|| trimmed.rsplit('/').next())
                 .unwrap_or(upstream_key);
             Some(UpstreamSource::DirectoryListing {
                 base_url: upstream_key.to_owned(),
@@ -256,8 +282,11 @@ mod tests {
         assert_eq!(reconstructed.source_type(), "github");
         assert_eq!(reconstructed.source_key(), "BurntSushi/ripgrep");
         assert_eq!(
-            reconstructed.feed_url().unwrap(),
-            "https://github.com/BurntSushi/ripgrep/releases.atom"
+            reconstructed.feed_urls(),
+            vec![
+                "https://github.com/BurntSushi/ripgrep/releases.atom".to_owned(),
+                "https://github.com/BurntSushi/ripgrep/tags.atom".to_owned(),
+            ]
         );
     }
 
@@ -277,7 +306,7 @@ mod tests {
         assert_eq!(reconstructed.source_type(), "gitlab");
         assert_eq!(reconstructed.source_key(), "mesa/mesa");
         assert_eq!(reconstructed.instance(), Some("gitlab.freedesktop.org"));
-        assert!(reconstructed.feed_url().is_none());
+        assert!(reconstructed.feed_urls().is_empty());
     }
 
     #[test]
@@ -294,8 +323,8 @@ mod tests {
         assert_eq!(reconstructed.source_type(), "pypi");
         assert_eq!(reconstructed.source_key(), "requests");
         assert_eq!(
-            reconstructed.feed_url().unwrap(),
-            "https://pypi.org/rss/project/requests/releases.xml"
+            reconstructed.feed_urls(),
+            vec!["https://pypi.org/rss/project/requests/releases.xml".to_owned()]
         );
     }
 
@@ -337,5 +366,103 @@ mod tests {
     #[test]
     fn unknown_type_returns_none() {
         assert!(upstream_source_from_index("bitbucket", "foo/bar", None).is_none());
+    }
+
+    #[test]
+    fn roundtrip_sourceforge_directory_keeps_pname() {
+        let source = UpstreamSource::DirectoryListing {
+            base_url: "https://sourceforge.net/projects/libpng/files/".to_owned(),
+            pname: "libpng".to_owned(),
+        };
+        let reconstructed = upstream_source_from_index(
+            source.source_type(),
+            &source.source_key(),
+            source.instance(),
+        )
+        .unwrap();
+        assert_eq!(
+            reconstructed.description(),
+            source.description(),
+            "pname must survive the index round-trip"
+        );
+
+        let explicit = upstream_source_from_index(
+            "directory",
+            "https://sourceforge.net/projects/libpng/files/",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.description(),
+            "Directory listing: libpng (https://sourceforge.net/projects/libpng/files/)"
+        );
+    }
+
+    #[test]
+    fn tag_from_release_link_cases() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "https://github.com/madler/zlib/releases/tag/v1.3.2",
+                Some("v1.3.2"),
+            ),
+            (
+                "https://github.com/o/r/releases/tag/v1.0%2Bbuild.1",
+                Some("v1.0+build.1"),
+            ),
+            ("https://github.com/o/r/releases/tag/", None),
+            ("https://pypi.org/project/requests/2.32.3/", None),
+            // Invalid escapes are kept verbatim.
+            ("https://github.com/o/r/releases/tag/100%zz", Some("100%zz")),
+        ];
+        for (href, expected) in cases {
+            assert_eq!(tag_from_release_link(href).as_deref(), *expected, "{href}");
+        }
+    }
+
+    #[test]
+    fn github_releases_feed_uses_tag_not_release_name() -> anyhow::Result<()> {
+        // Trimmed from https://github.com/madler/zlib/releases.atom
+        let feed = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/madler/zlib/releases</id>
+  <title>Release notes from zlib</title>
+  <updated>2026-02-17T00:00:00Z</updated>
+  <entry>
+    <id>tag:github.com,2008:Repository/1/v1.3.2</id>
+    <updated>2026-02-17T00:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/madler/zlib/releases/tag/v1.3.2"/>
+    <title>zlib 1.3.2</title>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/1/v1.3.1</id>
+    <updated>2024-01-22T00:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/madler/zlib/releases/tag/v1.3.1"/>
+    <title>zlib 1.3.1</title>
+  </entry>
+</feed>"#;
+        let releases = parse_feed_bytes(feed)?;
+        let tags: Vec<&str> = releases.iter().map(|r| r.tag_name.as_str()).collect();
+        assert_eq!(tags, vec!["v1.3.2", "v1.3.1"]);
+        Ok(())
+    }
+
+    #[test]
+    fn pypi_feed_uses_title() -> anyhow::Result<()> {
+        let feed = br#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>PyPI recent updates for requests</title>
+    <link>https://pypi.org/project/requests/</link>
+    <description>Recent updates to the Python Package Index for requests</description>
+    <item>
+      <title>2.32.3</title>
+      <link>https://pypi.org/project/requests/2.32.3/</link>
+    </item>
+  </channel>
+</rss>"#;
+        let releases = parse_feed_bytes(feed)?;
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].tag_name, "2.32.3");
+        Ok(())
     }
 }

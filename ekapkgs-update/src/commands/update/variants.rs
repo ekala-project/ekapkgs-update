@@ -49,7 +49,8 @@ fn detect_hash_attr_name(content: &str) -> &'static str {
 pub async fn get_default_variant(file: &str, attr_path: &str) -> anyhow::Result<String> {
     // Get the version of the base package (which is the default variant)
     let normalized_entry = normalize_entry_point(file);
-    let base_version_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.version");
+    let base_version_expr =
+        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.version");
     let base_version = eval_nix_expr(&base_version_expr).await?;
     debug!("Base package version: {}", base_version);
 
@@ -181,7 +182,7 @@ pub async fn update_single_variant(
 
             // Evaluate the stale hash for this platform
             let hash_expr = format!(
-                "with import {} {{ }}; {}.src.outputHash",
+                "let pkgs = import {} {{ }}; in pkgs.{}.src.outputHash",
                 normalized_entry, variant_attr_path
             );
             let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {
@@ -197,7 +198,7 @@ pub async fn update_single_variant(
 
             // Evaluate the source URL for this platform
             let url_expr = format!(
-                "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+                "let pkgs = import {} {{ }}; in pkgs.{}.src.url or (builtins.head pkgs.{}.src.urls)",
                 normalized_entry, variant_attr_path, variant_attr_path
             );
             let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {
@@ -299,7 +300,8 @@ pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<S
     let normalized_entry = normalize_entry_point(file);
 
     // First try: look for variants.nix next to meta.position
-    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
+    let position_expr =
+        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.meta.position");
     let position = eval_nix_expr(&position_expr).await?;
     let (file_path, _) = position
         .rsplit_once(':')
@@ -323,7 +325,7 @@ pub async fn find_variants_file(file: &str, attr_path: &str) -> anyhow::Result<S
         dir.display()
     );
     let variant_pos_expr = format!(
-        "with import {normalized_entry} {{ }}; let va = {attr_path}.variantArgs; pos = builtins.unsafeGetAttrPos \"version\" va; in pos.file"
+        "let pkgs = import {normalized_entry} {{ }}; in let va = pkgs.{attr_path}.variantArgs; pos = builtins.unsafeGetAttrPos \"version\" va; in pos.file"
     );
     if let Ok(variant_file) = eval_nix_expr(&variant_pos_expr).await {
         let variant_path = std::path::Path::new(&variant_file);
@@ -566,7 +568,7 @@ pub async fn add_new_variant(
             );
 
             let url_expr = format!(
-                "with import {} {{ }}; {}.src.url or (builtins.head {}.src.urls)",
+                "let pkgs = import {} {{ }}; in pkgs.{}.src.url or (builtins.head pkgs.{}.src.urls)",
                 normalized_entry, variant_attr_path, variant_attr_path
             );
             let src_url = match eval_nix_expr_for_system(&url_expr, platform).await {
@@ -595,7 +597,7 @@ pub async fn add_new_variant(
             if !current.contains(placeholder_hash) {
                 // All placeholders consumed — update the stale hash for this platform
                 let hash_expr = format!(
-                    "with import {} {{ }}; {}.src.outputHash",
+                    "let pkgs = import {} {{ }}; in pkgs.{}.src.outputHash",
                     normalized_entry, variant_attr_path
                 );
                 let stale_hash = match eval_nix_expr_for_system(&hash_expr, platform).await {

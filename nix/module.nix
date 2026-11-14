@@ -59,12 +59,43 @@ let
           name
           upstream
           entrypoint
+          select
           fork
           path
           ;
+        eval_entrypoint = r.evalEntrypoint;
       }) cfg.watch.repos;
     } cfg.settings
   );
+
+  # Answers git's HTTPS credential requests for github.com with $GITHUB_TOKEN
+  # (delivered through environmentFile), so update branches can be pushed.
+  gitCredentialHelper = pkgs.writeShellScript "git-credential-github-token" ''
+    [ "''${1:-}" = get ] || exit 0
+    [ -n "''${GITHUB_TOKEN:-}" ] || exit 0
+    cat > /dev/null
+    echo username=x-access-token
+    echo "password=$GITHUB_TOKEN"
+  '';
+
+  # Used as the services' system-level git config (GIT_CONFIG_SYSTEM): commit
+  # identity plus the credential helper. A ~/.gitconfig in the state directory
+  # still takes precedence.
+  gitConfigFile = pkgs.writeText "ekapkgs-update-gitconfig" (
+    lib.generators.toGitINI (
+      {
+        user = {
+          name = cfg.git.userName;
+          email = cfg.git.userEmail;
+        };
+      }
+      // lib.optionalAttrs cfg.git.githubTokenCredentialHelper {
+        credential."https://github.com".helper = "${gitCredentialHelper}";
+      }
+    )
+  );
+
+  servicePath = [ cfg.package ] ++ cfg.extraPackages;
 
   watchConfigFile = settingsFormat.generate "ekapkgs-update-watch.toml" watchEffectiveSettings;
 
@@ -273,11 +304,77 @@ in
     };
 
     packagesFile = lib.mkOption {
-      type = lib.types.path;
+      type = lib.types.nullOr lib.types.path;
+      default = null;
       example = lib.literalExpression "./default.nix";
       description = ''
-        Path to the Nix file evaluated to discover packages to update.
+        Path to the Nix file evaluated to discover packages to update. Used
+        by the `ekapkgs-update run` service (required when
+        {option}`services.ekapkgs-update.run.enable` is set) and as the
+        default `--file` for other commands. Not needed for multi-repo watch
+        mode, where each repository declares its own entry point.
       '';
+    };
+
+    run = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether to run the batch `ekapkgs-update run` service, which
+          evaluates {option}`services.ekapkgs-update.packagesFile` and
+          updates every outdated package. Disable it when the watch daemon
+          already covers the same repositories.
+        '';
+      };
+
+      startAt = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "daily";
+        description = ''
+          systemd calendar expression for running the batch service
+          periodically. When `null`, it runs once at boot.
+        '';
+      };
+    };
+
+    extraPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      example = lib.literalExpression "[ pkgs.claude-code ]";
+      description = ''
+        Extra packages on the `PATH` of the run and watch services.
+        `--claude-fix` needs `pkgs.claude-code` here (installing it in
+        `environment.systemPackages` does not make it visible to the
+        services) plus credentials, e.g. `ANTHROPIC_API_KEY` or
+        `CLAUDE_CODE_OAUTH_TOKEN` in {option}`services.ekapkgs-update.environmentFile`.
+      '';
+    };
+
+    git = {
+      userName = lib.mkOption {
+        type = lib.types.str;
+        default = "ekapkgs-update";
+        description = "Author name for update commits.";
+      };
+
+      userEmail = lib.mkOption {
+        type = lib.types.str;
+        default = "noreply@ekapkgs.org";
+        description = "Author email for update commits.";
+      };
+
+      githubTokenCredentialHelper = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Configure a git credential helper that authenticates HTTPS pushes
+          to github.com with the `GITHUB_TOKEN` from
+          {option}`services.ekapkgs-update.environmentFile`. Without it (or
+          another credential setup), pushing update branches fails.
+        '';
+      };
     };
 
     environmentFile = lib.mkOption {
@@ -495,7 +592,33 @@ in
               entrypoint = lib.mkOption {
                 type = lib.types.str;
                 default = "default.nix";
-                description = "Nix file to evaluate within the repo.";
+                description = ''
+                  Nix file (relative to the repo root) enumerated with
+                  `nix-eval-jobs` to discover packages.
+                '';
+              };
+              select = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                example = "x: x.buildable";
+                description = ''
+                  `nix-eval-jobs --select` function applied to
+                  `entrypoint`, for entry points that return nested sets
+                  (e.g. `{ buildable = ...; }`) instead of the packages
+                  themselves. Dotted keys in the selected set (`"cmake.v4"`)
+                  are treated as attribute paths. Requires
+                  `evalEntrypoint`.
+                '';
+              };
+              evalEntrypoint = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                example = "default.nix";
+                description = ''
+                  Nix file (relative to the repo root) against which package
+                  attribute paths are evaluated, located and built. Defaults
+                  to `entrypoint`.
+                '';
               };
               fork = lib.mkOption {
                 type = lib.types.str;
@@ -520,15 +643,19 @@ in
         example = lib.literalExpression ''
           [
             {
-              name = "core-pkgs";
-              upstream = "github.com/ekala-project/core-pkgs";
-              entrypoint = "default.nix";
-              path = "/var/lib/ekapkgs-update/repos/core-pkgs";
+              name = "corepkgs";
+              upstream = "github.com/ekala-project/corepkgs";
+              entrypoint = "ci/packages.nix";
+              select = "x: x.buildable";
+              evalEntrypoint = "default.nix";
+              path = "/var/lib/ekapkgs-update/repos/corepkgs";
             }
             {
               name = "ekapkgs";
               upstream = "github.com/ekala-project/ekapkgs";
-              entrypoint = "default.nix";
+              entrypoint = "ci/repos-packages.nix";
+              select = "x: x.buildable";
+              evalEntrypoint = "default.nix";
               path = "/var/lib/ekapkgs-update/repos/ekapkgs";
             }
           ]
@@ -579,7 +706,24 @@ in
           dashboard uses it for the single-repo / `run` scope).
         '';
       }
-    ];
+      {
+        assertion = cfg.run.enable -> cfg.packagesFile != null;
+        message = ''
+          services.ekapkgs-update.run.enable requires
+          services.ekapkgs-update.packagesFile. Set it, or set
+          services.ekapkgs-update.run.enable = false when only the watch
+          daemon is used.
+        '';
+      }
+    ]
+    ++ map (r: {
+      assertion = r.select != null -> r.evalEntrypoint != null;
+      message = ''
+        services.ekapkgs-update.watch.repos (${r.name}): `select` requires
+        `evalEntrypoint` (e.g. "default.nix"), because attribute paths from the
+        selected set must be evaluated against a file where they resolve.
+      '';
+    }) cfg.watch.repos;
 
     nixpkgs.overlays = [
       (import ./overlay.nix)
@@ -599,16 +743,20 @@ in
       ekapkgs-update = { };
     };
 
-    systemd.services.ekapkgs-update = {
+    systemd.services.ekapkgs-update = lib.mkIf cfg.run.enable {
       description = "ekapkgs-update automated package update daemon";
-      wantedBy = [ "multi-user.target" ];
+      # With startAt the timer starts the service; otherwise run once at boot.
+      wantedBy = lib.optional (cfg.run.startAt == null) "multi-user.target";
+      startAt = lib.mkIf (cfg.run.startAt != null) cfg.run.startAt;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
       # The wrapped package puts nix/git/gh/cachix on PATH, but several
       # subprocesses inspect this anyway; setting it explicitly keeps
       # subprocess output predictable in journalctl.
-      path = [ cfg.package ];
+      path = servicePath;
+
+      environment.GIT_CONFIG_SYSTEM = "${gitConfigFile}";
 
       serviceConfig = {
         Type = "simple";
@@ -709,7 +857,9 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
-      path = [ cfg.package ];
+      path = servicePath;
+
+      environment.GIT_CONFIG_SYSTEM = "${gitConfigFile}";
 
       serviceConfig = {
         Type = "simple";

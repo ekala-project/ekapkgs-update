@@ -46,6 +46,14 @@ pub struct NixEvalDrv {
 
     /// Meta information about the package
     pub meta: Option<NixMeta>,
+
+    /// Result of the `--apply` function for this derivation, when one was given.
+    #[serde(
+        rename = "extraValue",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extra_value: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -62,6 +70,79 @@ impl NixEvalError {
         self.error
             .contains("cannot evaluate a function that has an argument without a value")
     }
+}
+
+impl NixEvalItem {
+    /// Reinterpret dotted attribute names as attribute paths.
+    ///
+    /// `--select` is typically used to pick a flat attribute set whose keys are
+    /// dotted package paths (e.g. corepkgs' `buildable` contains `"cmake.v4"`).
+    /// nix-eval-jobs reports such a key as a single quoted component, which
+    /// cannot be spliced into `with import <file> { }; <attr>` expressions.
+    /// This splits those keys into real components and re-renders `attr`.
+    pub fn flatten_dotted_attrs(&mut self) {
+        let (attr, attr_path) = match self {
+            NixEvalItem::Error(e) => (&mut e.attr, &mut e.attr_path),
+            NixEvalItem::Drv(d) => (&mut d.attr, &mut d.attr_path),
+        };
+        *attr_path = split_dotted_components(attr_path);
+        *attr = render_attr_path(attr_path);
+    }
+}
+
+/// Split each component on `.` (e.g. `["cmake.v4"]` -> `["cmake", "v4"]`).
+///
+/// Components that would produce an empty segment (`"a..b"`, `".a"`) are kept
+/// verbatim, since they cannot be valid dotted paths.
+pub fn split_dotted_components(components: &[String]) -> Vec<String> {
+    components
+        .iter()
+        .flat_map(|component| {
+            let parts: Vec<&str> = component.split('.').collect();
+            if parts.iter().any(|p| p.is_empty()) {
+                vec![component.clone()]
+            } else {
+                parts.into_iter().map(str::to_owned).collect()
+            }
+        })
+        .collect()
+}
+
+/// Render attribute path components as a Nix attribute path.
+///
+/// Components that are plain Nix identifiers are emitted bare; anything else
+/// (leading digit, dots, keywords, ...) is double-quoted, mirroring how
+/// nix-eval-jobs renders its `attr` field.
+pub fn render_attr_path(components: &[String]) -> String {
+    components
+        .iter()
+        .map(|c| {
+            if is_nix_identifier(c) {
+                c.clone()
+            } else {
+                let escaped = c
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace("${", "\\${");
+                format!("\"{escaped}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Whether `s` can appear unquoted as an attribute name in a Nix select path.
+fn is_nix_identifier(s: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "assert", "else", "if", "in", "inherit", "let", "or", "rec", "then", "with",
+    ];
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '-'))
+        && !KEYWORDS.contains(&s)
 }
 
 #[cfg(test)]
@@ -107,5 +188,63 @@ mod tests {
             error: "error: attribute 'src' missing".to_owned(),
         };
         assert!(!real_error.is_function_error());
+    }
+
+    #[test]
+    fn test_render_attr_path() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["cmake"], "cmake"),
+            (
+                &["python3", "v3_12", "pkgs", "requests"],
+                "python3.v3_12.pkgs.requests",
+            ),
+            (&["389-ds-base"], "\"389-ds-base\""),
+            (&["cmake.v4"], "\"cmake.v4\""),
+            (&["foo'", "bar-baz"], "foo'.bar-baz"),
+            (&["with"], "\"with\""),
+            (&["a\"b${c}"], "\"a\\\"b\\${c}\""),
+        ];
+        for (components, expected) in cases {
+            let owned: Vec<String> = components.iter().map(|s| (*s).to_owned()).collect();
+            assert_eq!(render_attr_path(&owned), *expected, "{components:?}");
+        }
+    }
+
+    #[test]
+    fn test_split_dotted_components() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["cmake.v4"], &["cmake", "v4"]),
+            (&["zlib"], &["zlib"]),
+            (&["linux", "pkgs.zfs"], &["linux", "pkgs", "zfs"]),
+            (&["a..b"], &["a..b"]),
+            (&[".hidden"], &[".hidden"]),
+        ];
+        for (input, expected) in cases {
+            let owned: Vec<String> = input.iter().map(|s| (*s).to_owned()).collect();
+            assert_eq!(split_dotted_components(&owned), *expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_flatten_dotted_attrs_on_select_output() -> anyhow::Result<()> {
+        // Shape produced by `nix-eval-jobs --select 'x: x.buildable'` for a
+        // variant key in corepkgs' flat `buildable` set.
+        let line = r#"{"attr":"\"abseil-cpp.v20230802\"","attrPath":["abseil-cpp.v20230802"],"drvPath":"/nix/store/aaaa-abseil-cpp-20230802.1.drv","name":"abseil-cpp-20230802.1","outputs":{"out":"/nix/store/bbbb-abseil-cpp-20230802.1"},"system":"x86_64-linux","extraValue":{"version":"20230802.1"}}"#;
+        let mut item: NixEvalItem =
+            serde_json::from_str(line).context("select output line must parse")?;
+        item.flatten_dotted_attrs();
+        let NixEvalItem::Drv(drv) = item else {
+            anyhow::bail!("expected a derivation");
+        };
+        assert_eq!(drv.attr, "abseil-cpp.v20230802");
+        assert_eq!(drv.attr_path, vec!["abseil-cpp", "v20230802"]);
+        assert_eq!(
+            drv.extra_value
+                .as_ref()
+                .and_then(|v| v.get("version"))
+                .and_then(serde_json::Value::as_str),
+            Some("20230802.1")
+        );
+        Ok(())
     }
 }

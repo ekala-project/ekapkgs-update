@@ -40,6 +40,36 @@ pub enum ClaudeFixResult {
     InvocationError { message: String },
 }
 
+/// Check once at startup that `--claude-fix` can actually work.
+///
+/// Without this, a missing `claude` binary (e.g. installed system-wide but not
+/// on a systemd service's `PATH`) only shows up as a per-package warning after
+/// a build has already failed.
+pub async fn warn_if_claude_unavailable() {
+    match Command::new("claude").arg("--version").output().await {
+        Ok(output) if output.status.success() => {
+            info!(
+                "--claude-fix enabled (claude {})",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+        },
+        Ok(output) => {
+            warn!(
+                "--claude-fix requested but `claude --version` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        },
+        Err(e) => {
+            warn!(
+                "--claude-fix requested but the `claude` CLI is not on PATH ({}); build failures \
+                 will not be sent to Claude",
+                e
+            );
+        },
+    }
+}
+
 /// Attempt to fix a failed package build using Claude Code CLI.
 ///
 /// Invokes `claude` in the worktree directory with a detailed prompt

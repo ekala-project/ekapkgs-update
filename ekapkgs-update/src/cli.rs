@@ -104,6 +104,15 @@ pub enum Commands {
         /// Nix file to evaluate
         #[arg(short, long, default_value = "default.nix")]
         file: String,
+        /// nix-eval-jobs `--select` function applied to the file before
+        /// traversal, e.g. 'x: x.buildable' for an entry point that returns
+        /// `{ buildable = ...; }`. Requires --eval-file.
+        #[arg(long, value_name = "EXPR")]
+        select: Option<String>,
+        /// Nix file that attribute paths are evaluated, located and built
+        /// against (e.g. the repository's default.nix). Defaults to --file.
+        #[arg(long, value_name = "FILE")]
+        eval_file: Option<String>,
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
@@ -517,6 +526,15 @@ pub enum Commands {
         /// Nix file to evaluate
         #[arg(short, long, default_value = "default.nix")]
         file: String,
+        /// nix-eval-jobs `--select` function applied to the file before
+        /// traversal, e.g. 'x: x.buildable' for an entry point that returns
+        /// `{ buildable = ...; }`. Requires --eval-file.
+        #[arg(long, value_name = "EXPR")]
+        select: Option<String>,
+        /// Nix file that attribute paths are evaluated, located and built
+        /// against (e.g. the repository's default.nix). Defaults to --file.
+        #[arg(long, value_name = "FILE")]
+        eval_file: Option<String>,
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
@@ -655,6 +673,73 @@ pub enum AutofixCommand {
     },
 }
 
+/// Configure extra `nix-build` arguments (`--builders`, `--max-jobs`).
+///
+/// CLI flags take precedence over the config file's `[nix]` section.
+fn apply_nix_build_args(builders: Option<String>, max_jobs: Option<usize>, config: &ConfigFile) {
+    let builders = builders.or_else(|| config.nix.builders.clone());
+    let max_jobs = max_jobs.or(config.nix.max_jobs);
+
+    let mut extra_args = Vec::new();
+    if let Some(builders) = builders {
+        extra_args.push("--builders".to_owned());
+        extra_args.push(builders);
+    }
+    if let Some(max_jobs) = max_jobs {
+        extra_args.push("--max-jobs".to_owned());
+        extra_args.push(max_jobs.to_string());
+    }
+    if !extra_args.is_empty() {
+        commands::update::set_extra_nix_build_args(extra_args);
+    }
+}
+
+/// Use config-file values as defaults for CLI arguments.
+///
+/// Rewrites the defaults of every (sub)command argument so the precedence is
+/// CLI flag > config file > built-in default:
+///
+/// - `database`: config `database` replaces the built-in
+///   `~/.cache/ekapkgs-update/updates.db`;
+/// - `file`: config `file` replaces the built-in `default.nix`;
+/// - `select` / `eval_file`: config `select` / `eval_file`.
+///
+/// Without this, settings such as `database` in a NixOS-generated config file
+/// were silently ignored.
+pub fn apply_config_defaults(cmd: clap::Command, config: &ConfigFile) -> clap::Command {
+    let defaults: [(&str, Option<&String>); 4] = [
+        ("database", config.database.as_ref()),
+        ("file", config.file.as_ref()),
+        ("select", config.select.as_ref()),
+        ("eval_file", config.eval_file.as_ref()),
+    ];
+    apply_defaults_recursive(cmd, &defaults)
+}
+
+fn apply_defaults_recursive(
+    mut cmd: clap::Command,
+    defaults: &[(&str, Option<&String>)],
+) -> clap::Command {
+    for (id, value) in defaults {
+        let Some(value) = value else {
+            continue;
+        };
+        if cmd.get_arguments().any(|a| a.get_id() == *id) {
+            let value = (*value).clone();
+            cmd = cmd.mut_arg(*id, move |arg| arg.default_value(value));
+        }
+    }
+
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_owned())
+        .collect();
+    for name in names {
+        cmd = cmd.mut_subcommand(name, |sub| apply_defaults_recursive(sub, defaults));
+    }
+    cmd
+}
+
 /// Worktrees subcommands
 #[derive(Subcommand)]
 pub enum WorktreesCommand {
@@ -701,6 +786,8 @@ impl Commands {
         match self {
             Commands::Run {
                 file,
+                select,
+                eval_file,
                 database,
                 upstream,
                 fork,
@@ -726,20 +813,11 @@ impl Commands {
                 claude_fix_max_turns,
                 claude_fix_timeout,
             } => {
-                let mut extra_args = Vec::new();
-                if let Some(ref builders_val) = builders {
-                    extra_args.push("--builders".to_owned());
-                    extra_args.push(builders_val.clone());
-                }
-                if let Some(max_jobs_val) = max_jobs {
-                    extra_args.push("--max-jobs".to_owned());
-                    extra_args.push(max_jobs_val.to_string());
-                }
-                if !extra_args.is_empty() {
-                    commands::update::set_extra_nix_build_args(extra_args);
-                }
+                apply_nix_build_args(builders, max_jobs, &config_file);
                 commands::run::RunConfig::from_args(
                     file,
+                    select,
+                    eval_file,
                     database,
                     upstream,
                     fork,
@@ -790,18 +868,7 @@ impl Commands {
                 builders,
                 max_jobs,
             } => {
-                let mut extra_args = Vec::new();
-                if let Some(ref builders_val) = builders {
-                    extra_args.push("--builders".to_owned());
-                    extra_args.push(builders_val.clone());
-                }
-                if let Some(max_jobs_val) = max_jobs {
-                    extra_args.push("--max-jobs".to_owned());
-                    extra_args.push(max_jobs_val.to_string());
-                }
-                if !extra_args.is_empty() {
-                    commands::update::set_extra_nix_build_args(extra_args);
-                }
+                apply_nix_build_args(builders, max_jobs, &config_file);
                 commands::update::UpdateParams::from_args(
                     file,
                     attr_path,
@@ -933,22 +1000,7 @@ impl Commands {
                     builders,
                     max_jobs,
                 } => {
-                    // CLI flags override config file for nix build args
-                    let resolved_builders = builders.or_else(|| config_file.nix.builders.clone());
-                    let resolved_max_jobs = max_jobs.or(config_file.nix.max_jobs);
-
-                    let mut extra_args = Vec::new();
-                    if let Some(ref builders_val) = resolved_builders {
-                        extra_args.push("--builders".to_owned());
-                        extra_args.push(builders_val.clone());
-                    }
-                    if let Some(max_jobs_val) = resolved_max_jobs {
-                        extra_args.push("--max-jobs".to_owned());
-                        extra_args.push(max_jobs_val.to_string());
-                    }
-                    if !extra_args.is_empty() {
-                        commands::update::set_extra_nix_build_args(extra_args);
-                    }
+                    apply_nix_build_args(builders, max_jobs, &config_file);
 
                     let autofix_config = commands::autofix::config::AutofixConfig {
                         database_path: database,
@@ -1006,18 +1058,7 @@ impl Commands {
                 builders,
                 max_jobs,
             } => {
-                let mut extra_args = Vec::new();
-                if let Some(ref builders_val) = builders {
-                    extra_args.push("--builders".to_owned());
-                    extra_args.push(builders_val.clone());
-                }
-                if let Some(max_jobs_val) = max_jobs {
-                    extra_args.push("--max-jobs".to_owned());
-                    extra_args.push(max_jobs_val.to_string());
-                }
-                if !extra_args.is_empty() {
-                    commands::update::set_extra_nix_build_args(extra_args);
-                }
+                apply_nix_build_args(builders, max_jobs, &config_file);
                 commands::audit::execute(
                     target,
                     file,
@@ -1044,18 +1085,7 @@ impl Commands {
                 builders,
                 max_jobs,
             } => {
-                let mut extra_args = Vec::new();
-                if let Some(ref builders_val) = builders {
-                    extra_args.push("--builders".to_owned());
-                    extra_args.push(builders_val.clone());
-                }
-                if let Some(max_jobs_val) = max_jobs {
-                    extra_args.push("--max-jobs".to_owned());
-                    extra_args.push(max_jobs_val.to_string());
-                }
-                if !extra_args.is_empty() {
-                    commands::update::set_extra_nix_build_args(extra_args);
-                }
+                apply_nix_build_args(builders, max_jobs, &config_file);
 
                 let repo_coords = commands::review::parse_repo_arg(&repo)?;
                 commands::review::execute(commands::review::ReviewConfig {
@@ -1080,6 +1110,8 @@ impl Commands {
             } => commands::lint::lint(path, fix, no_ignore).await,
             Commands::Watch {
                 file,
+                select,
+                eval_file,
                 database,
                 poll_interval,
                 index_refresh_hours,
@@ -1096,20 +1128,11 @@ impl Commands {
                 claude_fix_max_turns,
                 claude_fix_timeout,
             } => {
-                let mut extra_args = Vec::new();
-                if let Some(ref builders_val) = builders {
-                    extra_args.push("--builders".to_owned());
-                    extra_args.push(builders_val.clone());
-                }
-                if let Some(max_jobs_val) = max_jobs {
-                    extra_args.push("--max-jobs".to_owned());
-                    extra_args.push(max_jobs_val.to_string());
-                }
-                if !extra_args.is_empty() {
-                    commands::update::set_extra_nix_build_args(extra_args);
-                }
+                apply_nix_build_args(builders, max_jobs, &config_file);
                 let mut watch_config = commands::watch::WatchConfig::from_args(
                     file,
+                    select,
+                    eval_file,
                     database,
                     poll_interval,
                     index_refresh_hours,
@@ -1128,5 +1151,98 @@ impl Commands {
                 watch_config.execute().await
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, FromArgMatches};
+
+    use super::*;
+
+    fn parse(config: &ConfigFile, argv: &[&str]) -> Args {
+        let cmd = apply_config_defaults(Args::command(), config);
+        let matches = cmd
+            .try_get_matches_from(argv)
+            .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        Args::from_arg_matches(&matches).unwrap()
+    }
+
+    fn config() -> ConfigFile {
+        ConfigFile {
+            database: Some("/var/lib/ekapkgs-update/updates.db".to_owned()),
+            file: Some("/repos/corepkgs/ci/packages.nix".to_owned()),
+            select: Some("x: x.buildable".to_owned()),
+            eval_file: Some("/repos/corepkgs/default.nix".to_owned()),
+            ..ConfigFile::default()
+        }
+    }
+
+    #[test]
+    fn config_file_values_become_defaults() {
+        let args = parse(&config(), &["ekapkgs-update", "watch"]);
+        let Commands::Watch {
+            file,
+            select,
+            eval_file,
+            database,
+            ..
+        } = args.command
+        else {
+            panic!("expected watch");
+        };
+        assert_eq!(database, "/var/lib/ekapkgs-update/updates.db");
+        assert_eq!(file, "/repos/corepkgs/ci/packages.nix");
+        assert_eq!(select.as_deref(), Some("x: x.buildable"));
+        assert_eq!(eval_file.as_deref(), Some("/repos/corepkgs/default.nix"));
+    }
+
+    #[test]
+    fn cli_flags_override_config_file() {
+        let args = parse(
+            &config(),
+            &[
+                "ekapkgs-update",
+                "run",
+                "--database",
+                "/tmp/x.db",
+                "-f",
+                "other.nix",
+            ],
+        );
+        let Commands::Run { file, database, .. } = args.command else {
+            panic!("expected run");
+        };
+        assert_eq!(database, "/tmp/x.db");
+        assert_eq!(file, "other.nix");
+    }
+
+    #[test]
+    fn nested_subcommands_get_config_database() {
+        let args = parse(&config(), &["ekapkgs-update", "worktrees", "list"]);
+        let Commands::Worktrees {
+            command: WorktreesCommand::List { database, .. },
+        } = args.command
+        else {
+            panic!("expected worktrees list");
+        };
+        assert_eq!(database, "/var/lib/ekapkgs-update/updates.db");
+    }
+
+    #[test]
+    fn builtin_defaults_without_config() {
+        let args = parse(&ConfigFile::default(), &["ekapkgs-update", "watch"]);
+        let Commands::Watch {
+            file,
+            select,
+            database,
+            ..
+        } = args.command
+        else {
+            panic!("expected watch");
+        };
+        assert_eq!(database, DEFAULT_DATABASE_PATH);
+        assert_eq!(file, "default.nix");
+        assert_eq!(select, None);
     }
 }

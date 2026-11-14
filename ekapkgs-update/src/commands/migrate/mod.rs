@@ -33,7 +33,8 @@ pub async fn migrate(file: String, target: String) -> anyhow::Result<()> {
         // Target is an attr path - resolve it to a file
         info!("Target is an attribute path: {}", target);
         let normalized_entry = crate::nix::normalize_entry_point(&file);
-        let position_expr = format!("with import {normalized_entry} {{ }}; {target}.meta.position");
+        let position_expr =
+            format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{target}.meta.position");
 
         let position = crate::nix::eval_nix_expr(&position_expr)
             .await

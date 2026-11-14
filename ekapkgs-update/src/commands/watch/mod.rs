@@ -10,8 +10,9 @@
 //!
 //! When `repos` is configured, the watch command maintains persistent checkouts
 //! of each repository, builds per-repo upstream indexes, and routes update PRs
-//! to the correct upstream repository. Before every (re-)index, managed
-//! checkouts are fast-forwarded to their upstream base branch (see [`sync`]).
+//! to the correct upstream repository. At startup, before every (re-)index
+//! and before every batch of updates, managed checkouts are fast-forwarded
+//! to their upstream base branch (see [`sync`]); history is never rewritten.
 //!
 //! ## Bootstrap (observe-only)
 //!
@@ -45,7 +46,13 @@ use crate::github::{GithubRepo, parse_github_url};
 pub struct ResolvedRepo {
     /// Human-readable name (from config).
     pub name: String,
-    /// Absolute path to the Nix entry point file within the repo.
+    /// Absolute path of the file enumerated with nix-eval-jobs to build the
+    /// upstream index.
+    pub enumerate_entry_point: String,
+    /// nix-eval-jobs `--select` applied to `enumerate_entry_point`.
+    pub select: Option<String>,
+    /// Absolute path of the file used to evaluate, locate and build individual
+    /// packages. Attr paths from enumeration resolve against this file.
     pub eval_entry_point: String,
     /// Absolute path to the repo root directory.
     pub repo_dir: PathBuf,
@@ -94,6 +101,11 @@ impl ResolvedRepo {
 pub struct WatchConfig {
     /// Nix file entry point to evaluate (single-repo legacy mode)
     pub file: String,
+    /// nix-eval-jobs `--select` for enumeration (single-repo legacy mode)
+    pub select: Option<String>,
+    /// File for per-package evaluation (single-repo legacy mode); defaults to
+    /// `file`
+    pub eval_file: Option<String>,
     /// Path to SQLite database for tracking updates
     pub database_path: String,
     /// How often to poll feeds, in minutes
@@ -129,6 +141,8 @@ impl WatchConfig {
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn from_args(
         file: String,
+        select: Option<String>,
+        eval_file: Option<String>,
         database_path: String,
         poll_interval: u64,
         index_refresh_hours: u64,
@@ -145,6 +159,8 @@ impl WatchConfig {
     ) -> Self {
         Self {
             file,
+            select,
+            eval_file,
             database_path,
             poll_interval_minutes: poll_interval,
             index_refresh_hours,
@@ -169,32 +185,24 @@ impl WatchConfig {
             self.poll_interval_minutes, self.index_refresh_hours
         );
 
+        if self.poll_interval_minutes == 0 || self.index_refresh_hours == 0 {
+            anyhow::bail!("--poll-interval and --index-refresh-hours must be greater than 0");
+        }
+
         let poll_interval = Duration::from_secs(self.poll_interval_minutes * 60);
         let index_refresh = Duration::from_secs(self.index_refresh_hours * 3600);
 
         let expanded_db = shellexpand::tilde(&self.database_path).to_string();
         let db = crate::database::Database::new(&expanded_db).await?;
+        info!("Database: {}", expanded_db);
+
+        if self.claude_fix {
+            crate::commands::run::warn_if_claude_unavailable().await;
+        }
 
         // Resolve repos: multi-repo mode or single-repo legacy mode
         let resolved_repos = if self.repos.is_empty() {
-            // Single-repo legacy mode: synthesize one ResolvedRepo from CLI flags
-            let pr_config = if let Some(ref remote_name) = self.upstream {
-                crate::git::get_pr_config_from_remote(remote_name)
-                    .await
-                    .ok()
-            } else {
-                crate::git::get_pr_config_from_git().await.ok()
-            };
-
-            vec![ResolvedRepo {
-                name: String::new(),
-                eval_entry_point: self.file.clone(),
-                repo_dir: PathBuf::from("."),
-                pr_config,
-                fork: self.fork.clone(),
-                upstream_url: None,
-                managed: false,
-            }]
+            vec![self.resolve_single_repo().await?]
         } else {
             // Multi-repo mode: provision checkouts and resolve each repo
             let mut resolved = Vec::with_capacity(self.repos.len());
@@ -202,9 +210,14 @@ impl WatchConfig {
                 match provision_repo(repo_config).await {
                     Ok(r) => {
                         info!(
-                            "[{}] Provisioned: {} (entry: {})",
+                            "[{}] Provisioned: {} (index: {}{}, eval: {})",
                             r.name,
                             r.repo_dir.display(),
+                            r.enumerate_entry_point,
+                            r.select
+                                .as_deref()
+                                .map(|s| format!(" select {s}"))
+                                .unwrap_or_default(),
                             r.eval_entry_point
                         );
                         resolved.push(r);
@@ -274,7 +287,7 @@ impl WatchConfig {
 
         let updater_config = crate::commands::run::UpdaterServiceConfig {
             session_id: String::new(), // Updated per poll cycle
-            eval_entry_point: Arc::from(self.file.as_str()),
+            eval_entry_point: Arc::from(resolved_repos[0].eval_entry_point.as_str()),
             pr_config: None, // Per-request overrides used in multi-repo mode
             fork: Arc::from(self.fork.as_str()),
             run_passthru_tests: self.run_passthru_tests,
@@ -300,6 +313,44 @@ impl WatchConfig {
             session_config,
         )
         .await
+    }
+
+    /// Single-repo legacy mode: the user's own working copy, driven by CLI
+    /// flags. Never synced or reset.
+    async fn resolve_single_repo(&self) -> anyhow::Result<ResolvedRepo> {
+        if self.select.is_some() && self.eval_file.is_none() {
+            anyhow::bail!(
+                "--select requires --eval-file (attribute paths from the selected set must be \
+                 evaluated against a file where they resolve, e.g. default.nix)"
+            );
+        }
+
+        let pr_config = if let Some(ref remote_name) = self.upstream {
+            crate::git::get_pr_config_from_remote(remote_name)
+                .await
+                .ok()
+        } else {
+            crate::git::get_pr_config_from_git().await.ok()
+        };
+
+        let enumerate = absolute(Path::new(&self.file))?;
+        let eval = absolute(Path::new(self.eval_file.as_deref().unwrap_or(&self.file)))?;
+        let repo_dir =
+            crate::git::repo_toplevel(enumerate.parent().unwrap_or_else(|| Path::new(".")))
+                .await
+                .unwrap_or_else(|_| PathBuf::from("."));
+
+        Ok(ResolvedRepo {
+            name: String::new(),
+            enumerate_entry_point: enumerate.to_string_lossy().into_owned(),
+            select: self.select.clone(),
+            eval_entry_point: eval.to_string_lossy().into_owned(),
+            repo_dir,
+            pr_config,
+            fork: self.fork.clone(),
+            upstream_url: None,
+            managed: false,
+        })
     }
 }
 
@@ -361,10 +412,21 @@ fn parse_upstream(upstream: &str) -> Option<GithubRepo> {
     })
 }
 
+/// Make `path` absolute relative to the current directory (without requiring
+/// symlinks to be resolved).
+fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("determine current directory")?
+        .join(path))
+}
+
 /// Provision a repository: clone if missing, set up fork remote.
 ///
-/// Existing checkouts are fetched and fast-forwarded by [`sync`] before
-/// each index build.
+/// Existing checkouts are fetched and fast-forwarded by [`sync`] at
+/// startup, before each index build and before each batch of updates.
 async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
     // Parse upstream URL to get owner/repo
     let github_repo = parse_upstream(&config.upstream).ok_or_else(|| {
@@ -378,6 +440,10 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
         "https://github.com/{}/{}",
         github_repo.owner, github_repo.repo
     );
+
+    if config.select.is_some() && config.eval_entrypoint.is_none() {
+        anyhow::bail!("'select' requires 'eval_entrypoint'");
+    }
 
     // Determine checkout path
     let repo_path = match &config.path {
@@ -461,20 +527,28 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
         }
     }
 
-    // Resolve entry point
-    let entry_point = repo_path.join(&config.entrypoint);
-    if !entry_point.exists() {
-        anyhow::bail!(
-            "Entry point {} does not exist in {}",
-            config.entrypoint,
-            repo_path.display()
-        );
-    }
-
     // Determine default branch for PR target
     let base_branch = get_default_branch_local(&repo_path)
         .await
         .unwrap_or_else(|_| "master".to_owned());
+
+    // Resolve entry points
+    let enumerate_entry_point = repo_path.join(&config.entrypoint);
+    let eval_entry_point = repo_path.join(
+        config
+            .eval_entrypoint
+            .as_deref()
+            .unwrap_or(&config.entrypoint),
+    );
+    for entry_point in [&enumerate_entry_point, &eval_entry_point] {
+        if !entry_point.exists() {
+            anyhow::bail!(
+                "Entry point {} does not exist in {}",
+                entry_point.display(),
+                repo_path.display()
+            );
+        }
+    }
 
     let pr_config = Some(PrConfig {
         owner: github_repo.owner,
@@ -484,7 +558,9 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
 
     Ok(ResolvedRepo {
         name: config.name.clone(),
-        eval_entry_point: entry_point.to_string_lossy().to_string(),
+        enumerate_entry_point: enumerate_entry_point.to_string_lossy().to_string(),
+        select: config.select.clone(),
+        eval_entry_point: eval_entry_point.to_string_lossy().to_string(),
         repo_dir: repo_path,
         pr_config,
         fork: config.fork.clone(),

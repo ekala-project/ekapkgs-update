@@ -47,8 +47,15 @@ pub fn warn_if_branch_concurrency_ignored(commit_strategy: CommitStrategy, reque
 /// Configuration for automated run mode
 #[derive(Debug, Clone, Serialize)]
 pub struct RunConfig {
-    /// Nix file entry point to evaluate
+    /// Nix file entry point enumerated with nix-eval-jobs
     pub file: String,
+
+    /// nix-eval-jobs `--select` applied to `file` before traversal
+    pub select: Option<String>,
+
+    /// Nix file attr paths are evaluated, located and built against.
+    /// Defaults to `file`; required when `select` is set.
+    pub eval_file: Option<String>,
 
     /// Path to SQLite database for tracking updates
     pub database_path: String,
@@ -102,6 +109,8 @@ impl RunConfig {
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn from_args(
         file: String,
+        select: Option<String>,
+        eval_file: Option<String>,
         database_path: String,
         upstream: Option<String>,
         fork: String,
@@ -134,6 +143,8 @@ impl RunConfig {
         };
         Self {
             file,
+            select,
+            eval_file,
             database_path,
             upstream,
             fork,
@@ -168,6 +179,8 @@ impl RunConfig {
 
         let RunConfig {
             file,
+            select,
+            eval_file,
             database_path,
             upstream,
             fork,
@@ -184,7 +197,29 @@ impl RunConfig {
             claude_fix_timeout,
         } = self;
 
-        info!("Running nix-eval-jobs on: {}", file);
+        if select.is_some() && eval_file.is_none() {
+            anyhow::bail!(
+                "--select requires --eval-file (attribute paths from the selected set must be \
+                 evaluated against a file where they resolve, e.g. default.nix)"
+            );
+        }
+        let eval_file = eval_file.unwrap_or_else(|| file.clone());
+
+        info!(
+            "Running nix-eval-jobs on: {}{}",
+            file,
+            select
+                .as_deref()
+                .map(|s| format!(" (select: {s})"))
+                .unwrap_or_default()
+        );
+        if eval_file != file {
+            info!("Evaluating packages against: {}", eval_file);
+        }
+
+        if claude_fix {
+            super::warn_if_claude_unavailable().await;
+        }
 
         // Expand tilde in database path
         let expanded_db_path = shellexpand::tilde(&database_path).to_string();
@@ -222,13 +257,21 @@ impl RunConfig {
             info!("Running with concurrency level: {}", concurrency);
         }
 
-        // Determine PR configuration: use CLI override or auto-detect from git
+        // Determine PR configuration: use CLI override or auto-detect from git,
+        // inspecting the repository that contains the entry point (which need
+        // not be the working directory, e.g. under systemd).
+        let entry_dir = std::path::Path::new(&eval_file)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
         let pr_config = if let Some(remote_name) = upstream {
-            crate::git::get_pr_config_from_remote(&remote_name)
+            crate::git::PrConfig::from_remote_in(entry_dir.as_deref(), &remote_name)
                 .await
                 .ok()
         } else {
-            crate::git::get_pr_config_from_git().await.ok()
+            crate::git::PrConfig::from_git_upstream_in(entry_dir.as_deref())
+                .await
+                .ok()
         };
 
         // Create channel for communication between services
@@ -238,7 +281,8 @@ impl RunConfig {
         let db_checker = db.clone();
         let db_updater = db.clone();
         let file_checker = file.clone();
-        let file_updater = file.clone();
+        let eval_file_checker = eval_file.clone();
+        let file_updater = eval_file.clone();
 
         // Spawn release checker service
         let skip_repology = pr_enhancements.skip_repology;
@@ -253,6 +297,8 @@ impl RunConfig {
             let max_eval_workers = std::cmp::max(1, checker_concurrency);
             super::checker::release_checker_service_with_limits(
                 file_checker,
+                select,
+                eval_file_checker,
                 db_checker,
                 tx,
                 skip_unstable,

@@ -539,7 +539,7 @@ async fn index_roundtrip_github() {
 
     assert_eq!(reconstructed.source_type(), "github");
     assert_eq!(reconstructed.source_key(), "NixOS/nixpkgs");
-    assert!(reconstructed.feed_url().is_some());
+    assert!(!reconstructed.feed_urls().is_empty());
 }
 
 #[tokio::test]
@@ -578,4 +578,286 @@ async fn index_roundtrip_gitlab_with_instance() {
 
     assert_eq!(reconstructed.source_type(), "gitlab");
     assert_eq!(reconstructed.instance(), Some("gitlab.gnome.org"));
+}
+
+// ── Index replacement, version policy and dispatch guards ─────────
+
+use ekapkgs_update::commands::watch::feeds::update_version_for_entry;
+use ekapkgs_update::database::NewUpstreamIndexEntry;
+use ekapkgs_update::vcs_sources::{Release, SemverStrategy, VersionPolicy};
+
+fn new_entry(
+    attr_path: &str,
+    key: &str,
+    version: &str,
+    policy: VersionPolicy,
+) -> NewUpstreamIndexEntry {
+    NewUpstreamIndexEntry {
+        attr_path: attr_path.to_owned(),
+        pname: None,
+        upstream_type: "github".to_owned(),
+        upstream_key: key.to_owned(),
+        instance: None,
+        current_version: version.to_owned(),
+        src_url: None,
+        drv_path: Some(format!("/nix/store/aaaa-{attr_path}.drv")),
+        policy,
+    }
+}
+
+fn policy(strategy: SemverStrategy) -> VersionPolicy {
+    VersionPolicy {
+        strategy,
+        include_prereleases: false,
+        version_regex: None,
+    }
+}
+
+fn releases(tags: &[&str]) -> Vec<Release> {
+    tags.iter()
+        .map(|t| Release {
+            tag_name: (*t).to_owned(),
+            is_prerelease: false,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn replace_upstream_index_is_per_repo_and_keeps_policy() {
+    let db = setup_db().await;
+
+    db.replace_upstream_index(
+        "corepkgs",
+        &[
+            new_entry(
+                "cmake",
+                "Kitware/CMake",
+                "4.2.0",
+                policy(SemverStrategy::Minor),
+            ),
+            new_entry(
+                "cmake.v3",
+                "Kitware/CMake",
+                "3.31.8",
+                policy(SemverStrategy::Minor),
+            ),
+        ],
+        true,
+    )
+    .await
+    .unwrap();
+    db.replace_upstream_index(
+        "ekapkgs",
+        &[new_entry(
+            "ripgrep",
+            "BurntSushi/ripgrep",
+            "14.1.0",
+            policy(SemverStrategy::Latest),
+        )],
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Re-indexing corepkgs replaces only corepkgs' rows.
+    db.replace_upstream_index(
+        "corepkgs",
+        &[new_entry(
+            "cmake",
+            "Kitware/CMake",
+            "4.2.1",
+            policy(SemverStrategy::Minor),
+        )],
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(db.upstream_index_count(Some("corepkgs")).await.unwrap(), 1);
+    assert_eq!(db.upstream_index_count(Some("ekapkgs")).await.unwrap(), 1);
+
+    let entries = db
+        .get_attr_paths_for_source("github", "Kitware/CMake", None)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].current_version.as_deref(), Some("4.2.1"));
+    assert_eq!(
+        entries[0].drv_path.as_deref(),
+        Some("/nix/store/aaaa-cmake.drv")
+    );
+    assert_eq!(entries[0].version_policy(), policy(SemverStrategy::Minor));
+}
+
+#[tokio::test]
+async fn prune_removes_unconfigured_repos() {
+    let db = setup_db().await;
+    for repo in ["corepkgs", "ekapkgs", "old-repo"] {
+        db.replace_upstream_index(
+            repo,
+            &[new_entry(
+                "zlib",
+                "madler/zlib",
+                "1.3.1",
+                policy(SemverStrategy::Latest),
+            )],
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    db.retain_watched_repos(&["corepkgs", "ekapkgs"])
+        .await
+        .unwrap();
+    assert_eq!(db.upstream_index_count(Some("old-repo")).await.unwrap(), 0);
+    assert_eq!(db.upstream_index_count(Some("corepkgs")).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn dispatch_respects_version_policy() {
+    let db = setup_db().await;
+    db.replace_upstream_index(
+        "corepkgs",
+        &[
+            new_entry(
+                "cmake",
+                "Kitware/CMake",
+                "4.2.0",
+                policy(SemverStrategy::Latest),
+            ),
+            new_entry(
+                "cmake.v3",
+                "Kitware/CMake",
+                "3.31.8",
+                policy(SemverStrategy::Minor),
+            ),
+            new_entry(
+                "cmake.v3_30",
+                "Kitware/CMake",
+                "3.30.1",
+                policy(SemverStrategy::Patch),
+            ),
+        ],
+        true,
+    )
+    .await
+    .unwrap();
+
+    let available = releases(&["v4.3.0", "v4.2.3", "v3.31.9", "v3.30.4", "v4.4.0-rc1"]);
+    let entries = db
+        .get_attr_paths_for_source("github", "Kitware/CMake", None)
+        .await
+        .unwrap();
+    let decisions: Vec<(String, Option<String>)> = entries
+        .iter()
+        .map(|e| (e.attr_path.clone(), update_version_for_entry(e, &available)))
+        .collect();
+
+    assert_eq!(
+        decisions,
+        vec![
+            // Latest: newest stable release, prerelease ignored.
+            ("cmake".to_owned(), Some("4.3.0".to_owned())),
+            // Minor: stays on the 3.x series.
+            ("cmake.v3".to_owned(), Some("3.31.9".to_owned())),
+            // Patch: stays on 3.30.x.
+            ("cmake.v3_30".to_owned(), Some("3.30.4".to_owned())),
+        ]
+    );
+
+    // Nothing newer within the series -> no update.
+    let none_newer = releases(&["v3.31.8", "v3.30.1"]);
+    assert_eq!(update_version_for_entry(&entries[1], &none_newer), None);
+}
+
+#[tokio::test]
+async fn dispatch_uses_version_regex_and_prerelease_policy() {
+    let db = setup_db().await;
+    db.replace_upstream_index(
+        "",
+        &[new_entry(
+            "jq",
+            "jqlang/jq",
+            "1.7.1",
+            VersionPolicy {
+                strategy: SemverStrategy::Latest,
+                include_prereleases: true,
+                version_regex: Some("jq-(.*)".to_owned()),
+            },
+        )],
+        true,
+    )
+    .await
+    .unwrap();
+    let entries = db
+        .get_attr_paths_for_source("github", "jqlang/jq", None)
+        .await
+        .unwrap();
+
+    let available = releases(&["jq-1.8.0rc1", "jq-1.7.1"]);
+    assert_eq!(
+        update_version_for_entry(&entries[0], &available).as_deref(),
+        Some("1.8.0rc1")
+    );
+}
+
+#[tokio::test]
+async fn incomplete_index_keeps_stale_entries() {
+    let db = setup_db().await;
+    db.replace_upstream_index(
+        "corepkgs",
+        &[
+            new_entry(
+                "zlib",
+                "madler/zlib",
+                "1.3.1",
+                policy(SemverStrategy::Latest),
+            ),
+            new_entry("jq", "jqlang/jq", "1.7.1", policy(SemverStrategy::Latest)),
+        ],
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Without pruning (evaluation looked incomplete), entries missing from
+    // the new run are kept and the others refreshed.
+    let pruned = db
+        .replace_upstream_index(
+            "corepkgs",
+            &[new_entry(
+                "zlib",
+                "madler/zlib",
+                "1.3.2",
+                policy(SemverStrategy::Latest),
+            )],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pruned, 0);
+    assert_eq!(db.upstream_index_count(Some("corepkgs")).await.unwrap(), 2);
+    let zlib = db
+        .get_attr_paths_for_source("github", "madler/zlib", None)
+        .await
+        .unwrap();
+    assert_eq!(zlib[0].current_version.as_deref(), Some("1.3.2"));
+
+    // With pruning, they are removed.
+    let pruned = db
+        .replace_upstream_index(
+            "corepkgs",
+            &[new_entry(
+                "zlib",
+                "madler/zlib",
+                "1.3.2",
+                policy(SemverStrategy::Latest),
+            )],
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pruned, 1);
+    assert_eq!(db.upstream_index_count(Some("corepkgs")).await.unwrap(), 1);
 }

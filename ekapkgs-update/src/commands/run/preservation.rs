@@ -97,6 +97,7 @@ pub async fn preserve_failure(
     attr_path: &str,
     phase: UpdatePhase,
     worktree_path: &Path,
+    entry_point: &Path,
     error: &UpdateError,
     build_log: Option<String>,
     test_output: Option<String>,
@@ -142,7 +143,7 @@ pub async fn preserve_failure(
     debug!("{}: Diff generated and saved", attr_path);
 
     // Save package metadata
-    let metadata = extract_package_metadata(worktree_path, attr_path).await?;
+    let metadata = extract_package_metadata(entry_point, attr_path).await?;
     let metadata_path = base_path.join("metadata.json");
     fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?).await?;
     debug!("{}: Metadata saved", attr_path);
@@ -225,9 +226,10 @@ async fn generate_diff(worktree_path: &Path) -> anyhow::Result<String> {
     }
 }
 
-/// Extract package metadata using Nix evaluation
+/// Extract package metadata using Nix evaluation of `entry_point` (the
+/// worktree's copy of the eval entry point)
 async fn extract_package_metadata(
-    worktree_path: &Path,
+    entry_point: &Path,
     attr_path: &str,
 ) -> anyhow::Result<serde_json::Value> {
     // Try to run nix-instantiate to get package metadata
@@ -238,8 +240,8 @@ async fn extract_package_metadata(
             "--json",
             "--expr",
             &format!(
-                "with import {}/<nixpkgs> {{}}; builtins.tryEval (builtins.toJSON {}.meta or {{}})",
-                worktree_path.display(),
+                "let pkgs = import {} {{ }}; in builtins.tryEval (builtins.toJSON (pkgs.{}.meta or {{ }}))",
+                crate::nix::normalize_entry_point(&entry_point.to_string_lossy()),
                 attr_path
             ),
         ])

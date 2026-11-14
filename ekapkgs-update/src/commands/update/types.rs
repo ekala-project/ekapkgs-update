@@ -87,24 +87,6 @@ impl UpdatePhase {
             Self::PrCreation => "pr_creation",
         }
     }
-
-    /// Parse a phase name as stored in the database (inverse of `as_str`)
-    #[allow(dead_code)]
-    pub fn from_db_name(s: &str) -> Option<Self> {
-        match s {
-            "metadata_extraction" => Some(Self::MetadataExtraction),
-            "source_discovery" => Some(Self::SourceDiscovery),
-            "version_selection" => Some(Self::VersionSelection),
-            "source_hash_update" => Some(Self::SourceHashUpdate),
-            "dependency_hash_update" => Some(Self::DependencyHashUpdate),
-            "build" => Some(Self::Build),
-            "patch_recovery" => Some(Self::PatchRecovery),
-            "testing" => Some(Self::Testing),
-            "agent_fix" => Some(Self::AgentFix),
-            "pr_creation" => Some(Self::PrCreation),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for UpdatePhase {

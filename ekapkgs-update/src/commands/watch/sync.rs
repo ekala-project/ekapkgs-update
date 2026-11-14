@@ -240,6 +240,8 @@ mod tests {
     fn resolved(dir: PathBuf) -> ResolvedRepo {
         ResolvedRepo {
             name: "core".into(),
+            enumerate_entry_point: dir.join("default.nix").to_string_lossy().to_string(),
+            select: None,
             eval_entry_point: dir.join("default.nix").to_string_lossy().to_string(),
             repo_dir: dir,
             pr_config: Some(PrConfig {

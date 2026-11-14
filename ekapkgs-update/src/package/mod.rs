@@ -61,7 +61,7 @@ impl PackageQuery {
 
     pub async fn get_attr(&self, attr: &str) -> Option<String> {
         let expr = format!(
-            "with import {} {{ }}; {}.{}",
+            "let pkgs = import {} {{ }}; in pkgs.{}.{}",
             self.eval_entry_point, self.attr_path, attr
         );
 
@@ -71,7 +71,7 @@ impl PackageQuery {
     pub async fn get_version(&self) -> Result<String> {
         // Try to get version directly
         let expr = format!(
-            "with import {} {{ }}; {}.version or (builtins.parseDrvName {}.name).version",
+            "let pkgs = import {} {{ }}; in pkgs.{}.version or (builtins.parseDrvName pkgs.{}.name).version",
             self.eval_entry_point, self.attr_path, self.attr_path
         );
 
@@ -80,13 +80,19 @@ impl PackageQuery {
     }
 
     pub async fn get_src_url(&self) -> Option<String> {
-        // Try to get source URL
+        // Source URL(s), space-separated. fetchurl may set `url = ""` and put
+        // the real locations in `urls`, so `src.url or src.urls` is not enough.
         let url_expr = format!(
-            "with import {} {{ }}; builtins.toString ({}.src.url or {}.src.urls)",
-            self.eval_entry_point, self.attr_path, self.attr_path
+            "let pkgs = import {} {{ }}; in let s = pkgs.{}.src; u = s.url or \"\"; in \
+             builtins.concatStringsSep \" \" ((if builtins.isString u && u != \"\" then [ u ] \
+             else [ ]) ++ builtins.filter (x: builtins.isString x && x != \"\") (s.urls or [ ]))",
+            self.eval_entry_point, self.attr_path
         );
 
-        eval_nix_expr(&url_expr).await.ok()
+        eval_nix_expr(&url_expr)
+            .await
+            .ok()
+            .filter(|url| !url.trim().is_empty())
     }
 }
 
@@ -159,7 +165,7 @@ impl PackageMetadata {
         // Uses a full expression since builtins.concatStringsSep can't be appended via get_attr
         let platform_hashes = {
             let expr = format!(
-                "with import {} {{ }}; builtins.concatStringsSep \" \" ({}.passthru.ekapkgs-update.platform-hashes or [])",
+                "let pkgs = import {} {{ }}; in builtins.concatStringsSep \" \" (pkgs.{}.passthru.ekapkgs-update.platform-hashes or [])",
                 package.eval_entry_point, package.attr_path
             );
             eval_nix_expr(&expr).await.ok()
@@ -249,6 +255,19 @@ impl PackageMetadata {
     /// 3. `src.url` parsing — auto-detect GitHub, GitLab, SourceHut, PyPI, etc.
     /// 4. `pname` — assume PyPI package as last resort
     pub fn resolve_upstream_source(&self) -> anyhow::Result<UpstreamSource> {
+        self.resolve_upstream_source_with(true)
+    }
+
+    /// [`PackageMetadata::resolve_upstream_source`] with control over the
+    /// final "PyPI project named after `pname`" fallback.
+    ///
+    /// That fallback is only sound for Python packages: for anything else
+    /// (wrappers, meta-packages, sources without a URL) it would match an
+    /// unrelated PyPI project with the same name and propose bogus versions.
+    pub fn resolve_upstream_source_with(
+        &self,
+        allow_pypi_fallback: bool,
+    ) -> anyhow::Result<UpstreamSource> {
         // 1. Explicit update-script
         if let Some(ref script_path) = self.update_script {
             return Ok(UpstreamSource::Script {
@@ -268,9 +287,13 @@ impl PackageMetadata {
             });
         }
 
-        // 3. Auto-detect from src.url
+        // 3. Auto-detect from src.url (possibly several space-separated
+        // mirrors: the first recognizable one wins)
         if let Some(ref src_url) = self.src_url {
-            if let Some(source) = UpstreamSource::from_url(src_url) {
+            if let Some(source) = src_url
+                .split_whitespace()
+                .find_map(UpstreamSource::from_url)
+            {
                 return Ok(source);
             }
             anyhow::bail!("Could not parse upstream source from URL: {src_url}");
@@ -278,6 +301,12 @@ impl PackageMetadata {
 
         // 4. Fall back to PyPI via pname
         if let Some(ref pname) = self.pname {
+            if !allow_pypi_fallback {
+                anyhow::bail!(
+                    "No source URL, github-repo or update-script, and not a Python package \
+                     (refusing to guess PyPI project '{pname}')"
+                );
+            }
             return Ok(UpstreamSource::PyPI {
                 pname: pname.clone(),
             });
@@ -526,6 +555,44 @@ mod tests {
         let source = metadata.resolve_upstream_source().unwrap();
         assert_eq!(source.source_type(), "pypi");
         assert_eq!(source.source_key(), "requests");
+
+        // Not a Python package: never guess a PyPI project from the pname.
+        assert!(metadata.resolve_upstream_source_with(false).is_err());
+    }
+
+    #[test]
+    fn test_resolve_upstream_source_tries_each_mirror() {
+        let metadata = PackageMetadata {
+            version: "8.21.0".to_owned(),
+            // corepkgs' fetchurl: unrecognized primary mirror, GitHub second.
+            src_url: Some(
+                "https://curl.haxx.se/download/curl-8.21.0.tar.xz \
+                 https://github.com/curl/curl/releases/download/curl-8_21_0/curl-8.21.0.tar.xz"
+                    .to_owned(),
+            ),
+            output_hash: None,
+            cargo_hash: None,
+            vendor_hash: None,
+            npm_deps_hash: None,
+            nuget_deps_hash: None,
+            composer_deps_hash: None,
+            pname: Some("curl".to_owned()),
+            description: None,
+            homepage: None,
+            changelog: None,
+            skip: None,
+            semver_strategy: None,
+            include_prereleases: None,
+            version_regex: None,
+            platform_hashes: None,
+            github_repo: None,
+            keep: None,
+            update_script: None,
+        };
+
+        let source = metadata.resolve_upstream_source_with(false).unwrap();
+        assert_eq!(source.source_type(), "github");
+        assert_eq!(source.source_key(), "curl/curl");
     }
 
     #[test]

@@ -222,7 +222,7 @@ async fn lint_file_inner(file: &str, fix: bool) -> Result<bool> {
 
 /// Check a Nix file's content for lint violations. Returns `None` if the file
 /// is not a simple derivation expression, or `Some(violations)` otherwise.
-#[allow(dead_code)] // used by tests_lint.rs and library consumers
+#[cfg_attr(not(test), allow(dead_code))] // library API; the binary only uses `lint`
 pub fn lint_content(content: &str) -> Option<Vec<String>> {
     let range = find_derivation_attrset(content)?;
     let body = &content[range.body_start..range.body_end];

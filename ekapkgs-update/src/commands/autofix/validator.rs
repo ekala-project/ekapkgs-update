@@ -51,7 +51,9 @@ pub async fn apply_and_validate(
     // Syntax check via nix-instantiate
     let eval_result = Command::new("nix-instantiate")
         .args(["--eval", "--strict", "-E"])
-        .arg(format!("with import {eval_entry_point} {{}}; {attr_path}"))
+        .arg(format!(
+            "let pkgs = import {eval_entry_point} {{ }}; in pkgs.{attr_path}"
+        ))
         .current_dir(worktree_path)
         .output()
         .await

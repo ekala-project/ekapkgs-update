@@ -147,6 +147,41 @@ impl fmt::Display for SemverStrategy {
     }
 }
 
+/// Per-package constraints on which upstream release an automated update may
+/// target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionPolicy {
+    pub strategy: SemverStrategy,
+    pub include_prereleases: bool,
+    pub version_regex: Option<String>,
+}
+
+impl VersionPolicy {
+    /// Pick the newest release this policy allows relative to `current_version`.
+    ///
+    /// Returns the release together with its resolved version string, or
+    /// `None` when no release qualifies.
+    pub fn best_release(
+        &self,
+        releases: Vec<Release>,
+        current_version: &str,
+    ) -> Option<(Release, String)> {
+        let regex = self.version_regex.as_deref();
+        let release = find_best_release(
+            releases,
+            current_version,
+            self.strategy,
+            None,
+            None,
+            regex,
+            self.include_prereleases,
+        )
+        .ok()?;
+        let version = release.resolved_version(regex).ok()?;
+        Some((release, version))
+    }
+}
+
 /// Upstream VCS source (GitHub, GitLab, SourceHut, PyPI, etc.)
 #[derive(Debug)]
 pub enum UpstreamSource {
@@ -566,23 +601,28 @@ impl UpstreamSource {
         }
     }
 
-    /// Returns an RSS/Atom feed URL if the platform provides one natively.
+    /// RSS/Atom feed URLs the platform provides natively, in the order they
+    /// should be tried (the first one with entries wins).
     ///
-    /// - GitHub: `https://github.com/{owner}/{repo}/releases.atom`
+    /// - GitHub: `releases.atom`, then `tags.atom` — mirroring the API path,
+    ///   which falls back to tags for projects that don't publish releases.
+    ///   Without the tags feed, every tags-only project would hit the REST API
+    ///   on every poll and exhaust the rate limit.
     /// - PyPI: `https://pypi.org/rss/project/{pname}/releases.xml`
-    /// - Others: `None` (use API polling instead)
-    pub fn feed_url(&self) -> Option<String> {
+    /// - Others: empty (use API polling instead)
+    pub fn feed_urls(&self) -> Vec<String> {
         match self {
-            Self::GitHub { owner, repo } => {
-                Some(format!("https://github.com/{owner}/{repo}/releases.atom"))
-            },
+            Self::GitHub { owner, repo } => vec![
+                format!("https://github.com/{owner}/{repo}/releases.atom"),
+                format!("https://github.com/{owner}/{repo}/tags.atom"),
+            ],
             Self::PyPI { pname } => {
-                Some(format!("https://pypi.org/rss/project/{pname}/releases.xml"))
+                vec![format!("https://pypi.org/rss/project/{pname}/releases.xml")]
             },
             Self::GitLab { .. }
             | Self::SourceHut { .. }
             | Self::DirectoryListing { .. }
-            | Self::Script { .. } => None,
+            | Self::Script { .. } => Vec::new(),
         }
     }
 }

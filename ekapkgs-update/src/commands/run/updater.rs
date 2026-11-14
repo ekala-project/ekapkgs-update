@@ -18,20 +18,46 @@ use crate::nix::{eval_nix_expr, normalize_entry_point};
 use crate::package::PackageMetadata;
 use crate::vcs_sources::SemverStrategy;
 
-/// Derive the repository directory from the Nix evaluation entry point
+/// Derive the repository root from the Nix evaluation entry point.
 ///
-/// Extracts the directory containing the Nix file used as the entry point.
-/// For example, `/home/user/repo/default.nix` -> `/home/user/repo`
-fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathBuf> {
+/// Uses `git rev-parse --show-toplevel` so entry points in a subdirectory
+/// (`/repo/ci/packages.nix`) resolve to `/repo`, falling back to the entry
+/// point's directory when it is not inside a git repository. The result is
+/// canonical.
+async fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathBuf> {
     let path = std::fs::canonicalize(eval_entry_point)
         .with_context(|| format!("Cannot resolve entry point path: {eval_entry_point}"))?;
-    let repo_dir = path.parent().ok_or_else(|| {
+    let parent = path.parent().ok_or_else(|| {
         anyhow::anyhow!(
             "Cannot determine repository directory from entry point: {}",
             path.display()
         )
     })?;
-    Ok(repo_dir.to_path_buf())
+    let root = match crate::git::repo_toplevel(parent).await {
+        Ok(root) => root,
+        Err(e) => {
+            debug!("{}: {e:#}; using its directory", path.display());
+            parent.to_path_buf()
+        },
+    };
+    Ok(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
+/// Express `path` (inside the main checkout) relative to the canonical
+/// repository root `repo_dir`, so it can be joined onto a worktree.
+///
+/// Returns `None` when `path` is not inside the repository, e.g. a package
+/// whose `meta.position` points into the Nix store. Joining an absolute path
+/// onto the worktree would silently yield the original path and edit files
+/// outside the worktree, so callers must not proceed.
+fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(repo_dir) {
+        return Some(relative.to_path_buf());
+    }
+    // Paths from Nix evaluation are not canonical when the checkout path
+    // contains symlinks; repo_dir always is.
+    let canonical = std::fs::canonicalize(path).ok()?;
+    canonical.strip_prefix(repo_dir).ok().map(Path::to_path_buf)
 }
 
 /// Database bookkeeping for one update attempt, shared by worktree and
@@ -276,8 +302,8 @@ pub(super) async fn perform_update(
 
     let attempt = Attempt::new(db, session_id, req);
 
-    // Derive repository directory from eval entry point
-    let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point) {
+    // Derive the repository root from the eval entry point
+    let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point).await {
         Ok(dir) => dir,
         Err(e) => {
             warn!(
@@ -288,6 +314,49 @@ pub(super) async fn perform_update(
                 "Repository directory determination failed: {e}"
             )));
         },
+    };
+
+    // Get file location from meta.position (in the main repository)
+    let file_location = match get_file_location(eval_entry_point, attr_path).await {
+        Ok(loc) => loc,
+        Err(e) => {
+            warn!("{}: Failed to get file location: {}", attr_path, e);
+            return Ok(attempt
+                .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
+                .await);
+        },
+    };
+
+    debug!("{}: File location: {}", attr_path, file_location);
+
+    // Both the package file and the entry point are addressed relative to the
+    // repository root so they can be found inside the worktree, wherever the
+    // entry point lives (e.g. `ci/packages.nix`).
+    let Some(relative_file_location) = relative_to_repo(Path::new(&file_location), &repo_dir)
+    else {
+        warn!(
+            "{}: package file {} is outside the repository {}; not editing it",
+            attr_path,
+            file_location,
+            repo_dir.display()
+        );
+        return Ok(UpdateResult::Skipped(format!(
+            "Package file {file_location} is outside repository {}",
+            repo_dir.display()
+        )));
+    };
+    let Some(relative_entry_point) = relative_to_repo(Path::new(eval_entry_point), &repo_dir)
+    else {
+        warn!(
+            "{}: entry point {} is outside the repository {}",
+            attr_path,
+            eval_entry_point,
+            repo_dir.display()
+        );
+        return Ok(UpdateResult::Skipped(format!(
+            "Entry point {eval_entry_point} is outside repository {}",
+            repo_dir.display()
+        )));
     };
 
     // Create a worktree for this update (repo-qualified so the same attr
@@ -303,27 +372,7 @@ pub(super) async fn perform_update(
         },
     };
 
-    // Get file location from meta.position (in the main repository)
-    let file_location = match get_file_location(eval_entry_point, attr_path).await {
-        Ok(loc) => loc,
-        Err(e) => {
-            warn!("{}: Failed to get file location: {}", attr_path, e);
-            cleanup_worktree(&repo_dir, &worktree_path).await.ok();
-            return Ok(attempt
-                .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
-                .await);
-        },
-    };
-
-    debug!("{}: File location: {}", attr_path, file_location);
-
-    // Convert the absolute file path to be relative to the repository root,
-    // then join with the worktree path so edits happen inside the worktree.
-    let file_location_path = Path::new(&file_location);
-    let relative_file_location = file_location_path
-        .strip_prefix(&repo_dir)
-        .unwrap_or(file_location_path);
-    let worktree_file_path = worktree_path.join(relative_file_location);
+    let worktree_file_path = worktree_path.join(&relative_file_location);
     let worktree_file_str = worktree_file_path.to_string_lossy().to_string();
 
     // Attempt the update in the worktree.
@@ -334,12 +383,9 @@ pub(super) async fn perform_update(
         .with_explicit_version(Some(new_version.clone()));
     let update_config = attempt.update_config(run_passthru_tests);
 
-    // Resolve the eval entry point relative to the worktree so that all nix
+    // Resolve the eval entry point inside the worktree so that all nix
     // builds/evaluations use the worktree's (modified) files, not the originals.
-    let entry_point_filename = Path::new(eval_entry_point)
-        .file_name()
-        .unwrap_or(std::ffi::OsStr::new("default.nix"));
-    let worktree_entry_point = worktree_path.join(entry_point_filename);
+    let worktree_entry_point = worktree_path.join(&relative_entry_point);
     let worktree_entry_str = worktree_entry_point.to_string_lossy().to_string();
 
     let update_result = update_config
@@ -609,6 +655,7 @@ pub(super) async fn perform_update(
                     attr_path,
                     failure.phase(),
                     &worktree_path,
+                    &worktree_entry_point,
                     &failure,
                     Some(error_message.clone()), // Build/update error message
                     test_output,
@@ -985,7 +1032,8 @@ pub(super) async fn perform_direct_update(
 /// Get the file location for a package from meta.position
 async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let position_expr = format!("with import {normalized_entry} {{ }}; {attr_path}.meta.position");
+    let position_expr =
+        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.meta.position");
 
     let position = eval_nix_expr(&position_expr).await?;
 
@@ -1009,7 +1057,7 @@ async fn create_pr_for_update(
     db: &Database,
     repo_name: &str,
     worktree_path: &Path,
-    eval_entry_point: &str,
+    worktree_entry_point: &str,
     attr_path: &str,
     old_version: &str,
     new_version: &str,
@@ -1033,8 +1081,10 @@ async fn create_pr_for_update(
     )
     .await?;
 
-    // Fetch package metadata for PR body
-    let metadata = PackageMetadata::from_attr_path(eval_entry_point, attr_path)
+    // Fetch package metadata for PR body from the updated worktree (not
+    // `<nixpkgs>`, which resolves through NIX_PATH to an unrelated tree).
+    let eval_entry_point = normalize_entry_point(worktree_entry_point);
+    let metadata = PackageMetadata::from_attr_path(&eval_entry_point, attr_path)
         .await
         .ok();
 
@@ -1074,7 +1124,7 @@ async fn create_pr_for_update(
     // updates don't typically need the raw store paths or `cachix use`
     // boilerplate, and the cache name is already visible in the deployment.
     if let Err(e) = pr_enhancements
-        .perform_worktree_cachix_push(worktree_path, eval_entry_point, attr_path)
+        .perform_worktree_cachix_push(worktree_path, &eval_entry_point, attr_path)
         .await
     {
         warn!("{}: Cachix push raised an error: {:#}", attr_path, e);
@@ -1082,7 +1132,7 @@ async fn create_pr_for_update(
 
     // Audit the built package if requested
     let audit_markdown = match pr_enhancements
-        .perform_worktree_audit(worktree_path, eval_entry_point, attr_path)
+        .perform_worktree_audit(worktree_path, &eval_entry_point, attr_path)
         .await
     {
         Ok(md) => md,
@@ -1094,7 +1144,7 @@ async fn create_pr_for_update(
 
     // Perform directory diff if requested
     let diff_markdown = pr_enhancements
-        .perform_worktree_directory_diff(worktree_path, eval_entry_point, attr_path)
+        .perform_worktree_directory_diff(worktree_path, &eval_entry_point, attr_path)
         .await
         .ok()
         .flatten();
@@ -1216,13 +1266,26 @@ async fn create_pr_for_update(
 
     body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
+    // A branch pushed to a fork must be addressed as `<fork-owner>:<branch>`.
+    let push_owner = match crate::git::remote_github_owner(worktree_path, fork).await {
+        Ok(owner) => Some(owner),
+        Err(e) => {
+            debug!(
+                "{}: could not determine owner of remote '{}': {e:#}",
+                attr_path, fork
+            );
+            None
+        },
+    };
+    let head = crate::git::pr_head(&config.owner, push_owner.as_deref(), &branch_name);
+
     // Create PR via GitHub API (draft if tests failed)
     let pr = crate::github::create_pull_request_with_options(
         &config.owner,
         &config.repo,
         &title,
         &body,
-        &branch_name,
+        &head,
         &config.base_branch,
         &github_token,
         draft,
@@ -1516,5 +1579,64 @@ mod tests {
             );
         }
         assert_eq!(pr_columns(&db).await, (None, None));
+    }
+
+    #[test]
+    fn relative_to_repo_maps_paths_inside_the_repository() {
+        let repo = Path::new("/var/lib/ekapkgs-update/repos/corepkgs");
+        assert_eq!(
+            relative_to_repo(
+                Path::new("/var/lib/ekapkgs-update/repos/corepkgs/pkgs/zlib/default.nix"),
+                repo
+            ),
+            Some(PathBuf::from("pkgs/zlib/default.nix"))
+        );
+        // An entry point in a subdirectory keeps its subdirectory.
+        assert_eq!(
+            relative_to_repo(
+                Path::new("/var/lib/ekapkgs-update/repos/corepkgs/ci/packages.nix"),
+                repo
+            ),
+            Some(PathBuf::from("ci/packages.nix"))
+        );
+    }
+
+    #[test]
+    fn relative_to_repo_rejects_paths_outside_the_repository() {
+        let repo = Path::new("/var/lib/ekapkgs-update/repos/ekapkgs");
+        // A package inherited from a pinned input lives in the Nix store.
+        assert_eq!(
+            relative_to_repo(
+                Path::new(
+                    "/nix/store/0000000000000000000000000000000-source/pkgs/zlib/default.nix"
+                ),
+                repo
+            ),
+            None
+        );
+        // A sibling checkout with a common prefix is not inside the repo.
+        assert_eq!(
+            relative_to_repo(
+                Path::new("/var/lib/ekapkgs-update/repos/ekapkgs-other/default.nix"),
+                repo
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn relative_to_repo_resolves_symlinked_checkouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("pkgs")).unwrap();
+        std::fs::write(real.join("pkgs/foo.nix"), "{}").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let canonical_repo = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(
+            relative_to_repo(&link.join("pkgs/foo.nix"), &canonical_repo),
+            Some(PathBuf::from("pkgs/foo.nix"))
+        );
     }
 }

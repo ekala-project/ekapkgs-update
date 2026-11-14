@@ -163,13 +163,23 @@ async fn eval_nix_bool(expr: &str) -> anyhow::Result<bool> {
     Ok(result.trim() == "true")
 }
 
+/// Check if a package is a Python package (built with `buildPythonPackage`,
+/// which sets `pythonModule`). Evaluation failures count as `false`.
+pub async fn is_python_package(eval_entry_point: &str, attr_path: &str) -> bool {
+    let normalized_entry = normalize_entry_point(eval_entry_point);
+    let check_expr =
+        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path} ? pythonModule");
+    eval_nix_bool(&check_expr).await.unwrap_or(false)
+}
+
 /// Check if a package uses mkManyVariants pattern by evaluating '<pkg> ? variants'
 pub async fn is_many_variants_package(
     eval_entry_point: &str,
     attr_path: &str,
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let check_expr = format!("with import {normalized_entry} {{ }}; {attr_path} ? variants");
+    let check_expr =
+        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path} ? variants");
 
     match eval_nix_bool(&check_expr).await {
         Ok(is_many_variants) => {
@@ -204,8 +214,8 @@ pub async fn get_variants_list(
 ) -> anyhow::Result<Vec<String>> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let expr = format!(
-        "with import {normalized_entry} {{ }}; builtins.toJSON (builtins.attrNames \
-         {attr_path}.variants)"
+        "let pkgs = import {normalized_entry} {{ }}; in builtins.toJSON (builtins.attrNames \
+         pkgs.{attr_path}.variants)"
     );
 
     let output = eval_nix_expr(&expr).await?;
@@ -231,7 +241,7 @@ pub async fn get_variant_version(
 ) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let expr = format!(
-        "with import {normalized_entry} {{ }}; {attr_path}.variants.{variant_name}.version"
+        "let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.variants.{variant_name}.version"
     );
 
     eval_nix_expr(&expr).await
@@ -275,8 +285,9 @@ pub async fn has_attr(
     attribute_name: &str,
 ) -> anyhow::Result<bool> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let check_expr =
-        format!("with import {normalized_entry} {{ }}; {attr_path} ? {attribute_name}");
+    let check_expr = format!(
+        "let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path} ? {attribute_name}"
+    );
 
     match eval_nix_bool(&check_expr).await {
         Ok(has_attribute) => {
