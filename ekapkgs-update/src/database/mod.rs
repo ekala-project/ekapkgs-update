@@ -27,7 +27,9 @@
 //! ## Connection Pool and Cleanup
 //!
 //! [`Database::new`] establishes a connection pool and runs schema migrations via
-//! `sqlx::migrate!`. After migrations, it repairs package state the SQL migrations
+//! `sqlx::migrate!`. Before that, it accepts the stored checksums of applied
+//! migrations that were later edited without changing their schema
+//! (`SUPERSEDED_MIGRATION_CHECKSUMS`). After migrations, it repairs package state the SQL migrations
 //! cannot derive (`repair_derived_state`: stale proposals and missing failure
 //! summaries in databases upgraded from before the dashboard data model), then
 //! opportunistically cleans up expired cache entries for both CVE and Repology data
@@ -147,6 +149,65 @@ impl From<SqlitePool> for Database {
     }
 }
 
+/// Applied migrations that were later edited without changing their schema,
+/// as `(version, checksum of the edited-out file as uppercase hex)`.
+///
+/// sqlx checksums the whole file, comments included, and refuses to start when
+/// an applied migration's checksum differs from the embedded one. Never edit an
+/// applied migration; when it has happened anyway and the edit is
+/// schema-neutral, list the old checksum here so databases that ran it keep
+/// working.
+const SUPERSEDED_MIGRATION_CHECKSUMS: &[(i64, &str)] = &[
+    // c358116 added column comments to 20261111_dashboard_data.sql
+    // (pr_url/pr_number); databases migrated by 885f05d stored this checksum.
+    (
+        20_261_111,
+        "09D059AA41805A264A5DB67C5413C2D9B19C181C987FAE7DFE83AACAB2E2582F3106F94922E22B3A87119E0875AE2501",
+    ),
+];
+
+/// Rewrite the stored checksum of each [`SUPERSEDED_MIGRATION_CHECKSUMS`]
+/// entry to the embedded migration's checksum, so `migrator.run` accepts it.
+///
+/// Only rows still holding the listed old checksum are touched, and a database
+/// without `_sqlx_migrations` (new or never migrated) is left alone.
+async fn reconcile_migration_checksums(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let has_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+         WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_table {
+        return Ok(());
+    }
+
+    for &(version, old_checksum) in SUPERSEDED_MIGRATION_CHECKSUMS {
+        let Some(migration) = migrator.iter().find(|m| m.version == version) else {
+            continue;
+        };
+        let updated = sqlx::query(
+            "UPDATE _sqlx_migrations SET checksum = ? WHERE version = ? AND hex(checksum) = ?",
+        )
+        .bind(migration.checksum.as_ref())
+        .bind(version)
+        .bind(old_checksum)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if updated > 0 {
+            info!(
+                "Updated checksum of migration {} (edited after it was applied)",
+                version
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     /// Initialize the database connection and create tables if needed
     pub async fn new(db_path: &str) -> Result<Self> {
@@ -171,7 +232,11 @@ impl Database {
         info!("Connected to database at {}", db_path);
 
         // Run migrations
-        sqlx::migrate!("./migrations")
+        let migrator = sqlx::migrate!("./migrations");
+        reconcile_migration_checksums(&pool, &migrator)
+            .await
+            .context("Failed to reconcile migration checksums")?;
+        migrator
             .run(&pool)
             .await
             .context("Failed to run database migrations")?;
@@ -698,4 +763,67 @@ pub struct NewUpstreamIndexEntry {
     pub src_url: Option<String>,
     pub drv_path: Option<String>,
     pub policy: VersionPolicy,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn stored_checksum(pool: &SqlitePool, version: i64) -> String {
+        sqlx::query_scalar("SELECT hex(checksum) FROM _sqlx_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_superseded_migration_checksums() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+
+        // A fresh database has nothing to reconcile.
+        reconcile_migration_checksums(&pool, &migrator)
+            .await
+            .unwrap();
+        migrator.run(&pool).await.unwrap();
+
+        for &(version, old_checksum) in SUPERSEDED_MIGRATION_CHECKSUMS {
+            let current = stored_checksum(&pool, version).await;
+            assert_ne!(current, old_checksum, "{version} is still the old file");
+
+            // Simulate a database migrated before the edit.
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = unhex(?) WHERE version = ?")
+                .bind(old_checksum)
+                .bind(version)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(migrator.run(&pool).await.is_err(), "{version} not rejected");
+
+            reconcile_migration_checksums(&pool, &migrator)
+                .await
+                .unwrap();
+            assert_eq!(stored_checksum(&pool, version).await, current);
+            migrator.run(&pool).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_leaves_unknown_checksums() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run(&pool).await.unwrap();
+
+        // An edit nobody vetted must still be reported by sqlx.
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 20261111")
+            .execute(&pool)
+            .await
+            .unwrap();
+        reconcile_migration_checksums(&pool, &migrator)
+            .await
+            .unwrap();
+        assert_eq!(stored_checksum(&pool, 20_261_111).await, "00");
+        assert!(migrator.run(&pool).await.is_err());
+    }
 }
