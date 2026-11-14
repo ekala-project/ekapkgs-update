@@ -32,7 +32,7 @@ mod tests_teams;
 mod tests_variants;
 
 pub use attributes::find_and_update_attr;
-pub use fetch_pypi::update_fetch_pypi_sdist;
+pub use fetch_pypi::{update_fetch_pypi_sdist, update_fetch_pypi_wheel};
 // `RewriteError` is intentionally kept private to the `rewrite` module: callers
 // don't need to name the type — they reach `is_not_found()` (and `Display`)
 // via method resolution on the `Err` half of the public functions' return

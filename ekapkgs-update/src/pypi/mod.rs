@@ -80,6 +80,10 @@ pub struct PypiFile {
     pub filename: String,
     /// `sdist` or `bdist_wheel` (older releases may have other `bdist_*` kinds)
     pub packagetype: String,
+    /// `source` for sdists; for wheels the directory the file is served from
+    /// (usually its python tag), i.e. `fetchPypi`'s `dist`
+    #[serde(default)]
+    pub python_version: String,
 }
 
 #[derive(Debug, Deserialize)]

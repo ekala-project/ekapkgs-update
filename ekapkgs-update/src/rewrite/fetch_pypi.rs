@@ -7,6 +7,10 @@ use super::error::{Result, RewriteError};
 /// `fetchPypi`'s default `extension`.
 const DEFAULT_EXTENSION: &str = "tar.gz";
 
+/// `fetchPypi`'s default wheel `python` tag and `dist` directory. They default
+/// independently, so a wheel whose tag changes needs both set.
+const DEFAULT_WHEEL_TAG: &str = "py2.py3";
+
 /// Set the `pname` and/or `extension` passed to the file's `fetchPypi` call
 ///
 /// Used when a release's sdist filename no longer matches what `fetchPypi`
@@ -50,6 +54,64 @@ pub fn update_fetch_pypi_sdist(
     pname: Option<&str>,
     extension: Option<&str>,
 ) -> Result<String> {
+    rewrite_fetch_pypi(
+        content,
+        pname,
+        &[("extension", extension, DEFAULT_EXTENSION)],
+    )
+}
+
+/// Set the `pname`, `python` and/or `dist` passed to the file's wheel
+/// `fetchPypi` call (`format = "wheel";`)
+///
+/// Used when a release's wheel filename no longer matches the call, typically
+/// because the python tag changed (`py2.py3` → `py3`). `pname` is handled as in
+/// [`update_fetch_pypi_sdist`]. `python` and `dist` replace an existing string
+/// attribute or add one; setting `fetchPypi`'s default (`py2.py3`) removes it.
+///
+/// # Errors
+/// As [`update_fetch_pypi_sdist`], plus [`RewriteError::Structural`] when
+/// `python` or `dist` is bound to something other than a string literal (e.g.
+/// `dist = python;`) or inherited.
+///
+/// # Example
+/// ```
+/// use ekapkgs_update::rewrite::update_fetch_pypi_wheel;
+///
+/// let content = r#"{
+///   src = fetchPypi {
+///     inherit pname version;
+///     format = "wheel";
+///     hash = "sha256-abc";
+///   };
+/// }"#;
+/// let updated = update_fetch_pypi_wheel(content, None, Some("py3"), Some("py3")).unwrap();
+/// assert!(updated.contains(r#"python = "py3";"#));
+/// assert!(updated.contains(r#"dist = "py3";"#));
+/// ```
+pub fn update_fetch_pypi_wheel(
+    content: &str,
+    pname: Option<&str>,
+    python: Option<&str>,
+    dist: Option<&str>,
+) -> Result<String> {
+    rewrite_fetch_pypi(
+        content,
+        pname,
+        &[
+            ("python", python, DEFAULT_WHEEL_TAG),
+            ("dist", dist, DEFAULT_WHEEL_TAG),
+        ],
+    )
+}
+
+/// Rewrite the only `fetchPypi` call: set `pname`, then each
+/// `(attribute, value, fetchPypi default)` whose value is `Some`.
+fn rewrite_fetch_pypi(
+    content: &str,
+    pname: Option<&str>,
+    attrs: &[(&str, Option<&str>, &str)],
+) -> Result<String> {
     ensure_parses(content)?;
 
     let (body_start, body_end) = find_fetch_pypi_body(content)?;
@@ -59,8 +121,10 @@ pub fn update_fetch_pypi_sdist(
     if let Some(pname) = pname {
         body = set_pname(&body, pname)?;
     }
-    if let Some(extension) = extension {
-        body = set_extension(&body, extension, &indent);
+    for &(name, value, default) in attrs {
+        if let Some(value) = value {
+            body = set_string_attr(&body, name, value, default, &indent)?;
+        }
     }
 
     let result = format!("{}{body}{}", &content[..body_start], &content[body_end..]);
@@ -177,15 +241,24 @@ fn set_pname(body: &str, pname: &str) -> Result<String> {
     })
 }
 
-fn set_extension(body: &str, extension: &str, indent: &str) -> String {
-    static EXTENSION: OnceLock<Regex> = OnceLock::new();
-    let extension_re = EXTENSION.get_or_init(|| {
-        Regex::new(r#"(?m)^([ \t]*)extension\s*=\s*"[^"]*"\s*;[ \t]*\n?"#).expect("valid regex")
-    });
+/// Set the string attribute `name` in a `fetchPypi` body: replace an existing
+/// `name = "…";`, or add one after the last attribute. Setting `default`
+/// removes the attribute instead.
+fn set_string_attr(
+    body: &str,
+    name: &str,
+    value: &str,
+    default: &str,
+    indent: &str,
+) -> Result<String> {
+    let name_re = regex::escape(name);
+    let literal = Regex::new(&format!(
+        r#"(?m)^([ \t]*){name_re}\s*=\s*"[^"]*"\s*;[ \t]*\n?"#
+    ))?;
 
-    if let Some(caps) = extension_re.captures(body) {
+    if let Some(caps) = literal.captures(body) {
         let whole = caps.get(0).expect("match");
-        let replacement = if extension == DEFAULT_EXTENSION {
+        let replacement = if value == default {
             String::new()
         } else {
             let newline = if whole.as_str().ends_with('\n') {
@@ -193,23 +266,33 @@ fn set_extension(body: &str, extension: &str, indent: &str) -> String {
             } else {
                 ""
             };
-            format!("{}extension = \"{extension}\";{newline}", &caps[1])
+            format!("{}{name} = \"{value}\";{newline}", &caps[1])
         };
-        return format!(
+        return Ok(format!(
             "{}{replacement}{}",
             &body[..whole.start()],
             &body[whole.end()..]
-        );
+        ));
     }
 
-    if extension == DEFAULT_EXTENSION {
-        return body.to_owned();
+    // Any other binding (`dist = python;`, `inherit … dist;`) would be
+    // duplicated by adding one, which Nix rejects at evaluation time.
+    let other_binding = Regex::new(&format!(r"(?m)^[ \t]*{name_re}\s*="))?;
+    let inherited = Regex::new(&format!(r"\binherit\b[^;]*\b{name_re}\b[^;]*;"))?;
+    if other_binding.is_match(body) || inherited.is_match(body) {
+        return Err(RewriteError::Structural(format!(
+            "fetchPypi's {name} is not a string literal; refusing to rewrite it"
+        )));
+    }
+
+    if value == default {
+        return Ok(body.to_owned());
     }
 
     // Add it after the last attribute, before the closing brace's line.
     let trimmed = body.trim_end();
-    format!(
-        "{trimmed}\n{indent}extension = \"{extension}\";{}",
+    Ok(format!(
+        "{trimmed}\n{indent}{name} = \"{value}\";{}",
         &body[trimmed.len()..]
-    )
+    ))
 }
