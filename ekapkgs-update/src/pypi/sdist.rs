@@ -6,6 +6,10 @@
 //! `sphinxcontrib-openapi-0.8.4.tar.gz`. `fetchPypi` builds its URL from
 //! `pname`, so bumping only `version` produces a URL that 404s.
 //!
+//! Wheel sources break the same way when a project changes its wheel's python
+//! tag (`cloudsmith_api-2.0.43-py2.py3-none-any.whl` → `…-py3-none-any.whl`):
+//! `fetchPypi`'s `python` and `dist` must follow.
+//!
 //! These helpers are pure so they can be tested without network access; the
 //! update workflow (`commands::update::hash_workflows`) supplies the evaluated
 //! `src` filename and PyPI's file list.
@@ -93,6 +97,113 @@ pub fn plan_sdist_fix(current: &str, version: &str, sdists: &[&str]) -> SdistFix
                 filename: sdist.to_owned(),
             }
         })
+}
+
+/// What to do about a package's wheel `src` after a version bump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WheelFix {
+    /// The current filename and directory are one of the release's wheels.
+    Matches,
+    /// The release has a wheel for the same name and ABI/platform under a
+    /// different name spelling, python tag or directory. Only the parts that
+    /// differ are set.
+    Rewrite {
+        /// New `pname` for `fetchPypi`, when the name part differs.
+        pname: Option<String>,
+        /// New `python` tag, when it differs.
+        python: Option<String>,
+        /// New `dist` directory, when it differs.
+        dist: Option<String>,
+        /// The wheel filename the rewrite should produce.
+        filename: String,
+    },
+    /// No wheel of the release has the same name and ABI/platform tags.
+    NoMatch,
+}
+
+/// A wheel PyPI lists for a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wheel<'a> {
+    pub filename: &'a str,
+    /// Directory `fetchPypi` requests it from (PyPI's `python_version`).
+    pub dist: &'a str,
+}
+
+/// Split `<name>-<version>-<python>-<abi>-<platform>.whl` into
+/// `(name, python, "<abi>-<platform>")`.
+///
+/// Wheels with a build tag (`<name>-<version>-<build>-…`) are not recognised:
+/// `fetchPypi` cannot request them.
+pub fn split_wheel_filename<'a>(
+    filename: &'a str,
+    version: &str,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let stem = filename.strip_suffix(".whl")?;
+    let (name, rest) = stem.split_once(&format!("-{version}-"))?;
+    let (python, abi_platform) = rest.split_once('-')?;
+    let well_formed = !name.is_empty()
+        && !python.is_empty()
+        && abi_platform.split('-').count() == 2
+        && abi_platform.split('-').all(|part| !part.is_empty());
+    well_formed.then_some((name, python, abi_platform))
+}
+
+/// Directory segment of a wheel URL
+/// (`…/packages/<dist>/<letter>/<pname>/<filename>`).
+pub fn wheel_url_dist(url: &str) -> Option<&str> {
+    let mut segments = url.rsplit('/');
+    let _filename = segments.next()?;
+    let _pname = segments.next()?;
+    let _letter = segments.next()?;
+    segments.next().filter(|dist| !dist.is_empty())
+}
+
+/// Decide how the wheel `src` (`current` requested from `current_dist`) must
+/// change to match one of `wheels`, the wheels PyPI lists for `version`.
+///
+/// Candidates must have the same name (PEP 503 normalised) and the same
+/// ABI/platform tags; among them, one with the current python tag wins.
+pub fn plan_wheel_fix(
+    current: &str,
+    current_dist: &str,
+    version: &str,
+    wheels: &[Wheel<'_>],
+) -> WheelFix {
+    if wheels
+        .iter()
+        .any(|w| w.filename == current && w.dist == current_dist)
+    {
+        return WheelFix::Matches;
+    }
+    let Some((current_name, current_python, current_abi_platform)) =
+        split_wheel_filename(current, version)
+    else {
+        return WheelFix::NoMatch;
+    };
+    let wanted = normalize_name(current_name);
+
+    let candidates: Vec<(Wheel<'_>, &str, &str)> = wheels
+        .iter()
+        .filter_map(|w| {
+            let (name, python, abi_platform) = split_wheel_filename(w.filename, version)?;
+            (abi_platform == current_abi_platform && normalize_name(name) == wanted)
+                .then_some((*w, name, python))
+        })
+        .collect();
+    let Some(&(wheel, name, python)) = candidates
+        .iter()
+        .find(|(_, _, python)| *python == current_python)
+        .or_else(|| candidates.first())
+    else {
+        return WheelFix::NoMatch;
+    };
+
+    WheelFix::Rewrite {
+        pname: (name != current_name).then(|| name.to_owned()),
+        python: (python != current_python).then(|| python.to_owned()),
+        dist: (wheel.dist != current_dist).then(|| wheel.dist.to_owned()),
+        filename: wheel.filename.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +348,158 @@ mod tests {
         for (current, version, sdists, expected) in cases {
             assert_eq!(
                 &plan_sdist_fix(current, version, sdists),
+                expected,
+                "current: {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_wheel_filename() {
+        let cases = [
+            (
+                "cloudsmith_api-2.0.43-py3-none-any.whl",
+                "2.0.43",
+                Some(("cloudsmith_api", "py3", "none-any")),
+            ),
+            (
+                "foo-1.0-py2.py3-none-any.whl",
+                "1.0",
+                Some(("foo", "py2.py3", "none-any")),
+            ),
+            (
+                "numpy-2.1.0-cp312-cp312-manylinux_2_17_x86_64.whl",
+                "2.1.0",
+                Some(("numpy", "cp312", "cp312-manylinux_2_17_x86_64")),
+            ),
+            // Build tag, wrong version, sdist, missing parts
+            ("foo-1.0-1-py3-none-any.whl", "1.0", None),
+            ("foo-1.0-py3-none-any.whl", "1.1", None),
+            ("foo-1.0.tar.gz", "1.0", None),
+            ("foo-1.0-py3-none.whl", "1.0", None),
+            ("-1.0-py3-none-any.whl", "1.0", None),
+        ];
+        for (filename, version, expected) in cases {
+            assert_eq!(
+                split_wheel_filename(filename, version),
+                expected,
+                "filename: {filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wheel_url_dist() {
+        let cases = [
+            (
+                "https://files.pythonhosted.org/packages/py2.py3/c/cloudsmith_api/cloudsmith_api-2.0.43-py2.py3-none-any.whl",
+                Some("py2.py3"),
+            ),
+            (
+                "https://files.pythonhosted.org/packages/py3/f/foo/foo-1.0-py3-none-any.whl",
+                Some("py3"),
+            ),
+            ("foo-1.0-py3-none-any.whl", None),
+            ("c/foo/foo-1.0-py3-none-any.whl", None),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(wheel_url_dist(url), expected, "url: {url}");
+        }
+    }
+
+    fn wheel_rewrite(
+        pname: Option<&str>,
+        python: Option<&str>,
+        dist: Option<&str>,
+        filename: &str,
+    ) -> WheelFix {
+        WheelFix::Rewrite {
+            pname: pname.map(str::to_owned),
+            python: python.map(str::to_owned),
+            dist: dist.map(str::to_owned),
+            filename: filename.to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_plan_wheel_fix() {
+        let w = |filename, dist| Wheel { filename, dist };
+        let cases: &[(&str, &str, &str, &[Wheel<'_>], WheelFix)] = &[
+            (
+                "foo-1.0-py3-none-any.whl",
+                "py3",
+                "1.0",
+                &[w("foo-1.0-py3-none-any.whl", "py3")],
+                WheelFix::Matches,
+            ),
+            // python tag (and so the directory) changed
+            (
+                "cloudsmith_api-2.0.43-py2.py3-none-any.whl",
+                "py2.py3",
+                "2.0.43",
+                &[w("cloudsmith_api-2.0.43-py3-none-any.whl", "py3")],
+                wheel_rewrite(
+                    None,
+                    Some("py3"),
+                    Some("py3"),
+                    "cloudsmith_api-2.0.43-py3-none-any.whl",
+                ),
+            ),
+            // name spelling changed
+            (
+                "Foo.Bar-2.0-py3-none-any.whl",
+                "py3",
+                "2.0",
+                &[w("foo_bar-2.0-py3-none-any.whl", "py3")],
+                wheel_rewrite(Some("foo_bar"), None, None, "foo_bar-2.0-py3-none-any.whl"),
+            ),
+            // only the directory is wrong
+            (
+                "foo-1.0-py3-none-any.whl",
+                "py2.py3",
+                "1.0",
+                &[w("foo-1.0-py3-none-any.whl", "py3")],
+                wheel_rewrite(None, None, Some("py3"), "foo-1.0-py3-none-any.whl"),
+            ),
+            // sdist-only release
+            (
+                "foo-1.1-py2.py3-none-any.whl",
+                "py2.py3",
+                "1.1",
+                &[],
+                WheelFix::NoMatch,
+            ),
+            // the current python tag is preferred among candidates
+            (
+                "foo-1.1-py3-none-any.whl",
+                "py2.py3",
+                "1.1",
+                &[
+                    w("foo-1.1-py2-none-any.whl", "py2"),
+                    w("foo-1.1-py3-none-any.whl", "py3"),
+                ],
+                wheel_rewrite(None, None, Some("py3"), "foo-1.1-py3-none-any.whl"),
+            ),
+            // different platform only
+            (
+                "foo-1.0-py3-none-any.whl",
+                "py3",
+                "1.0",
+                &[w("foo-1.0-cp312-cp312-manylinux_2_17_x86_64.whl", "cp312")],
+                WheelFix::NoMatch,
+            ),
+            // different project
+            (
+                "foo-1.0-py2.py3-none-any.whl",
+                "py2.py3",
+                "1.0",
+                &[w("bar-1.0-py3-none-any.whl", "py3")],
+                WheelFix::NoMatch,
+            ),
+        ];
+        for (current, dist, version, wheels, expected) in cases {
+            assert_eq!(
+                &plan_wheel_fix(current, dist, version, wheels),
                 expected,
                 "current: {current}"
             );

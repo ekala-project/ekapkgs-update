@@ -108,7 +108,7 @@ ekapkgs-update/                     # Main CLI crate
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
-    pypi/sdist.rs                   # Pure sdist-filename matching (PEP 503 names) used after PyPI version bumps
+    pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
     nix/                            # Nix eval helpers, nix-eval-jobs (run_eval.rs: --select/--apply, exit status), eval cache
@@ -266,13 +266,15 @@ This is intentional, not a bug:
 
 Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has a dedicated `update_*_if_needed` function in `hash_workflows.rs`.
 
-### PyPI sdist Names (`pypi/sdist.rs`, `hash_workflows::align_pypi_sdist`)
+### PyPI File Names (`pypi/sdist.rs`, `hash_workflows::align_pypi_src`)
 
-`fetchPypi` builds its URL from `pname`, but projects often rename their sdists between releases (`sphinxcontrib-openapi-0.8.4.tar.gz` → `sphinxcontrib_openapi-0.10.0.tar.gz`) or change the archive type (`.zip` → `.tar.gz`). For PyPI upstreams, `update_source_hash` therefore checks the bumped `src` filename against the sdists PyPI lists for the new version (`/pypi/<name>/<version>/json`) before discovering the hash:
+`fetchPypi` builds its URL from its arguments, but projects often rename their sdists between releases (`sphinxcontrib-openapi-0.8.4.tar.gz` → `sphinxcontrib_openapi-0.10.0.tar.gz`), change the archive type (`.zip` → `.tar.gz`), or change their wheel's python tag (`py2.py3` → `py3`). For PyPI upstreams, `update_source_hash` therefore checks the bumped `src` URL against the files PyPI lists for the new version (`/pypi/<name>/<version>/json`) before discovering the hash:
 
-- Same name under PEP 503 normalisation → `update_fetch_pypi_sdist()` sets `fetchPypi`'s `pname` (taking it out of `inherit (finalAttrs) pname version;`) and/or `extension`, and the new URL is re-evaluated to confirm it.
-- No sdist at all (wheel-only release) → the update fails with an explicit error instead of a 404.
-- Wheel sources, unrelated names, PyPI errors and `fetchPypi` calls that can't be rewritten are logged and left to the source build.
+- **sdist** with the same name under PEP 503 normalisation → `update_fetch_pypi_sdist()` sets `fetchPypi`'s `pname` (taking it out of `inherit (finalAttrs) pname version;`) and/or `extension`.
+- **wheel** (`format = "wheel";`) with the same name and ABI/platform tags (`plan_wheel_fix`, preferring the current python tag) → `update_fetch_pypi_wheel()` sets `pname`, `python` and/or `dist`. In corepkgs' `fetchPypi`, `dist` defaults to `py2.py3` independently of `python`, so a tag change sets both; the target `dist` is PyPI's `python_version`. A `python`/`dist` that isn't a string literal (`dist = python;`) or is inherited is refused rather than duplicated.
+- Either way the new URL is re-evaluated to confirm the filename (and wheel directory).
+- No sdist at all for an sdist-based package (wheel-only release) → the update fails with an explicit error instead of a 404.
+- Unrelated names, missing platform wheels, PyPI errors and `fetchPypi` calls that can't be rewritten are logged and left to the source build.
 
 ### Nix AST Rewriting (`rewrite/`)
 
@@ -283,7 +285,7 @@ Uses **regex with rnix AST validation**, not pure AST transformation:
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
-Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`, `update_fetch_pypi_sdist()`.
+Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`, `update_fetch_pypi_sdist()`, `update_fetch_pypi_wheel()`.
 
 Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is returned for a version attribute, `file_update.rs` falls back to searching sibling files (mkManyVariants pattern).
 

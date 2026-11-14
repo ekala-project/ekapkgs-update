@@ -1,4 +1,4 @@
-//! Tests for fetchPypi sdist rewriting (update_fetch_pypi_sdist)
+//! Tests for fetchPypi rewriting (update_fetch_pypi_sdist, update_fetch_pypi_wheel)
 
 use super::error::RewriteError;
 use super::*;
@@ -139,4 +139,81 @@ fn test_update_fetch_pypi_sdist_errors() {
     // Invalid input
     let err = update_fetch_pypi_sdist("{ src = fetchPypi { ", Some("x"), None).unwrap_err();
     assert!(matches!(err, RewriteError::Parse(_)));
+}
+
+#[test]
+fn test_update_fetch_pypi_wheel() {
+    type Case<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'a str>,
+        &'a str,
+    );
+    let cases: &[Case<'_>] = &[
+        // python tag change: both default independently, so both are added
+        (
+            "    inherit (finalAttrs) pname version;\n    format = \"wheel\";\n    hash = \"sha256-x\";",
+            None,
+            Some("py3"),
+            Some("py3"),
+            "    inherit (finalAttrs) pname version;\n    format = \"wheel\";\n    hash = \"sha256-x\";\n    python = \"py3\";\n    dist = \"py3\";",
+        ),
+        // existing attributes are replaced in place
+        (
+            "    inherit (finalAttrs) pname version;\n    format = \"wheel\";\n    python = \"py2\";\n    dist = \"py2\";\n    hash = \"sha256-x\";",
+            None,
+            Some("py3"),
+            Some("py3"),
+            "    inherit (finalAttrs) pname version;\n    format = \"wheel\";\n    python = \"py3\";\n    dist = \"py3\";\n    hash = \"sha256-x\";",
+        ),
+        // back to the default removes them
+        (
+            "    inherit pname version;\n    format = \"wheel\";\n    python = \"py3\";\n    dist = \"py3\";\n    hash = \"sha256-x\";",
+            None,
+            Some("py2.py3"),
+            Some("py2.py3"),
+            "    inherit pname version;\n    format = \"wheel\";\n    hash = \"sha256-x\";",
+        ),
+        // only the directory
+        (
+            "    inherit pname version;\n    format = \"wheel\";\n    python = \"py3\";",
+            None,
+            None,
+            Some("py3"),
+            "    inherit pname version;\n    format = \"wheel\";\n    python = \"py3\";\n    dist = \"py3\";",
+        ),
+        // name spelling
+        (
+            "    inherit (finalAttrs) pname version;\n    format = \"wheel\";",
+            Some("foo_bar"),
+            None,
+            None,
+            "    pname = \"foo_bar\";\n    inherit (finalAttrs) version;\n    format = \"wheel\";",
+        ),
+    ];
+
+    for (body, pname, python, dist, expected_body) in cases {
+        let content = package(body);
+        let expected = package(expected_body);
+        let updated = update_fetch_pypi_wheel(&content, *pname, *python, *dist)
+            .unwrap_or_else(|e| panic!("rewrite failed for body {body:?}: {e}"));
+        assert_eq!(updated, expected, "body: {body:?}");
+    }
+}
+
+#[test]
+fn test_update_fetch_pypi_wheel_refuses_non_literal() {
+    let bodies = [
+        // `dist = python;` would gain a second `dist` binding
+        "    inherit pname version;\n    format = \"wheel\";\n    python = \"py3\";\n    dist = python;",
+        // inherited from the enclosing scope
+        "    inherit pname version python dist;\n    format = \"wheel\";",
+        "    inherit pname version;\n    inherit (finalAttrs) dist;\n    format = \"wheel\";",
+    ];
+    for body in bodies {
+        let err = update_fetch_pypi_wheel(&package(body), None, Some("py3"), Some("py3"))
+            .expect_err(body);
+        assert!(matches!(err, RewriteError::Structural(_)), "body: {body:?}");
+    }
 }
