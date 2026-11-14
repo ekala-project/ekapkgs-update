@@ -3,6 +3,7 @@
   rustPlatform,
   pkg-config,
   openssl,
+  sqlite,
   perl,
   makeWrapper,
   cachix,
@@ -45,6 +46,7 @@ rustPlatform.buildRustPackage {
 
   buildInputs = [
     openssl
+    sqlite
   ];
 
   # This causes the build to occur again, but in debug mode

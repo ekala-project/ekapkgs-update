@@ -1,4 +1,10 @@
-final: prev: with final; {
+final: prev:
+with final;
+let
+  # ekapkgs exposes `elm` at the top level; nixpkgs only as elmPackages.elm.
+  prevElm = prev.elm or prev.elmPackages.elm;
+in
+{
   dev-shell = callPackage ./dev-shell.nix { };
 
   # Not packaged in ekapkgs; used by the dev shell and `nix fmt`.
@@ -18,10 +24,10 @@ final: prev: with final; {
   elm =
     if
       stdenv.hostPlatform.system == "aarch64-linux"
-      && prev.elm.version == "0.19.2"
-      && !(lib.meta.availableOn stdenv.hostPlatform prev.elm)
+      && prevElm.version == "0.19.2"
+      && !(lib.meta.availableOn stdenv.hostPlatform prevElm)
     then
-      prev.elm.overrideAttrs (old: {
+      prevElm.overrideAttrs (old: {
         src = fetchurl {
           url = "https://github.com/elm/compiler/releases/download/0.19.2/elm-0.19.2-linux-arm.gz";
           hash = "sha256-orsj6K+MmHTtH3AP26TSVjZpkxPf8EaVWYxBBVAoyPU=";
@@ -31,5 +37,5 @@ final: prev: with final; {
         };
       })
     else
-      prev.elm;
+      prevElm;
 }
