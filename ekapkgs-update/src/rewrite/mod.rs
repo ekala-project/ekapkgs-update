@@ -39,7 +39,9 @@ pub use fetch_pypi::{update_fetch_pypi_sdist, update_fetch_pypi_wheel};
 // type. Tests in `rewrite/tests.rs` use `super::*` to access the type.
 pub use maintainers::replace_maintainers_with_empty;
 pub use patches::{is_patches_array_empty, remove_patch_from_array, remove_patches_attribute};
-pub use rev_fixup::{needs_final_attrs_conversion, try_fixup_stale_rev};
+pub use rev_fixup::{
+    align_ref_with_tag, is_single_ref_from, needs_final_attrs_conversion, try_fixup_stale_rev,
+};
 pub use rev_update::try_update_rev_attr;
 pub use teams::replace_teams_with_empty;
 pub use variants::{add_variant_entry, clone_variant_entry, update_variant_attr};

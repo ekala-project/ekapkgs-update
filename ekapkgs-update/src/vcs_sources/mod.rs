@@ -306,6 +306,20 @@ fn parse_pypi_url(url: &str) -> Option<String> {
 }
 
 impl UpstreamSource {
+    /// The repository name a fetcher for this upstream binds as `repo`, for
+    /// upstreams whose releases are git tags (GitHub, GitLab, SourceHut).
+    ///
+    /// Other upstreams' `Release::tag_name` is a bare version, not a tag.
+    pub fn git_repo_name(&self) -> Option<&str> {
+        match self {
+            UpstreamSource::GitHub { repo, .. } | UpstreamSource::SourceHut { repo, .. } => {
+                Some(repo)
+            },
+            UpstreamSource::GitLab { project, .. } => project.rsplit('/').next(),
+            _ => None,
+        }
+    }
+
     /// Parse a URL and return the appropriate UpstreamSource
     ///
     /// Tries to parse the URL as GitHub first, then GitLab, then SourceHut, then PyPI.

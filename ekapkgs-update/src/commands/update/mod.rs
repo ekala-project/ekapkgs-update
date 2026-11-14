@@ -21,8 +21,8 @@ pub use build::{build_and_get_outputs, get_extra_nix_build_args, set_extra_nix_b
 pub(super) use build::{build_flake_package, build_nix_expr, detect_reversed_patch};
 pub use config::{UpdateConfig, UpdateParams, VersionConfig};
 pub(super) use file_update::{
-    update_cargo_hash, update_composer_deps_hash, update_nix_file, update_npm_deps_hash,
-    update_nuget_deps_hash, update_vendor_hash,
+    ReleaseTag, update_cargo_hash, update_composer_deps_hash, update_nix_file,
+    update_npm_deps_hash, update_nuget_deps_hash, update_vendor_hash,
 };
 pub(super) use flake::update_flake_package;
 pub(super) use format::format_nix_file;
@@ -121,7 +121,10 @@ pub async fn update_from_file_path(
                 &metadata.version,
                 new_version,
                 metadata.output_hash.as_deref(),
-                Some(&best_release.tag_name),
+                upstream_source.git_repo_name().map(|repo| ReleaseTag {
+                    name: &best_release.tag_name,
+                    repo,
+                }),
                 match &upstream_source {
                     UpstreamSource::PyPI { pname } => Some(pname.as_str()),
                     _ => None,
