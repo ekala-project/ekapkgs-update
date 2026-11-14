@@ -285,9 +285,13 @@ Uses **regex with rnix AST validation**, not pure AST transformation:
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
-Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`, `update_fetch_pypi_sdist()`, `update_fetch_pypi_wheel()`.
+Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `try_fixup_stale_rev()`, `align_ref_with_tag()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`, `update_fetch_pypi_sdist()`, `update_fetch_pypi_wheel()`.
 
 Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is returned for a version attribute, `file_update.rs` falls back to searching sibling files (mkManyVariants pattern).
+
+### Git Refs and Release Tags (`commands/update/file_update.rs`, `rewrite/rev_fixup.rs`)
+
+After the version bump, `update_nix_file` checks the file's git ref against the release tag (`ReleaseTag`, only for GitHub/GitLab/SourceHut upstreams via `UpstreamSource::git_repo_name`; other upstreams' `tag_name` is a bare version). A stale commit-SHA `rev` is rewritten to reference the version (`try_fixup_stale_rev`), and a ref built from an older tag scheme is rewritten to the release's tag (`align_ref_with_tag`: HDF5's `rev = "hdf5_${version}"` → `"${version}"`). Both apply only when `is_single_ref_from` holds: the file has exactly one `rev`/`tag` and binds `repo = "<upstream repo>"`. Files with several refs (opencv's pinned third-party sources) are never touched.
 
 ### mkManyVariants Support
 

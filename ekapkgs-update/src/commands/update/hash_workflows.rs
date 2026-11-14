@@ -4,7 +4,7 @@ use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use super::{
-    build_nix_expr, update_cargo_hash, update_composer_deps_hash, update_nix_file,
+    ReleaseTag, build_nix_expr, update_cargo_hash, update_composer_deps_hash, update_nix_file,
     update_npm_deps_hash, update_nuget_deps_hash, update_vendor_hash,
 };
 use crate::hash_discovery;
@@ -27,7 +27,7 @@ pub async fn update_source_hash(
     old_version: &str,
     new_version: &str,
     old_hash: Option<&str>,
-    tag_name: Option<&str>,
+    release_tag: Option<ReleaseTag<'_>>,
     pypi_pname: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     // Step 1: Update version in file with invalid hash
@@ -40,7 +40,7 @@ pub async fn update_source_hash(
         new_version,
         old_hash,
         Some(invalid_hash),
-        tag_name,
+        release_tag,
     )
     .await?;
 
