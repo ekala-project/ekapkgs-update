@@ -713,3 +713,41 @@ async fn test_fetch_script_releases() {
     // rc1 should be detected as prerelease
     assert!(releases[3].is_prerelease);
 }
+
+#[test]
+fn test_git_repo_name() {
+    let cases = [
+        (
+            UpstreamSource::GitHub {
+                owner: "HDFGroup".to_owned(),
+                repo: "hdf5".to_owned(),
+            },
+            Some("hdf5"),
+        ),
+        (
+            UpstreamSource::GitLab {
+                instance: "gitlab.freedesktop.org".to_owned(),
+                owner: "mesa".to_owned(),
+                project: "group/sub/drm".to_owned(),
+            },
+            Some("drm"),
+        ),
+        (
+            UpstreamSource::SourceHut {
+                owner: "~sircmpwn".to_owned(),
+                repo: "scdoc".to_owned(),
+            },
+            Some("scdoc"),
+        ),
+        // PyPI "tags" are bare versions
+        (
+            UpstreamSource::PyPI {
+                pname: "requests".to_owned(),
+            },
+            None,
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(source.git_repo_name(), expected, "{source:?}");
+    }
+}
