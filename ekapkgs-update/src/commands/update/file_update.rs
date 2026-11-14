@@ -7,12 +7,28 @@ use super::variants::find_version_in_siblings;
 use crate::commands::migrate::{convert_to_final_attrs_pattern_generic, fix_closing_brace};
 use crate::nix::is_many_variants_package;
 use crate::rewrite::{
-    find_and_update_attr, needs_final_attrs_conversion, try_fixup_stale_rev, try_update_rev_attr,
+    align_ref_with_tag, find_and_update_attr, is_single_ref_from, needs_final_attrs_conversion,
+    try_fixup_stale_rev, try_update_rev_attr,
 };
+
+/// The git tag of the release being updated to, for upstreams whose releases
+/// are tags in a repository (GitHub, GitLab, SourceHut).
+#[derive(Debug, Clone, Copy)]
+pub struct ReleaseTag<'a> {
+    /// Tag name, e.g. `v1.2.3`
+    pub name: &'a str,
+    /// Repository name, as bound by `repo = "…";` in its fetcher
+    pub repo: &'a str,
+}
 
 /// Update version and hash in a Nix file
 ///
 /// Returns the actual file path that was updated (may differ from input due to mkManyVariants)
+///
+/// With a `release_tag`, the file's git ref is checked against it: a stale
+/// commit SHA is rewritten to reference the version, and a ref built from an
+/// older tag scheme is rewritten to the release's tag. Both only happen when
+/// the file's only `rev`/`tag` fetches the release's repository.
 pub async fn update_nix_file(
     eval_entry_point: &str,
     attr_path: &str,
@@ -21,7 +37,7 @@ pub async fn update_nix_file(
     new_version: &str,
     old_hash: Option<&str>,
     new_hash: Option<&str>,
-    tag_name: Option<&str>,
+    release_tag: Option<ReleaseTag<'_>>,
 ) -> anyhow::Result<PathBuf> {
     debug!(
         "Updating Nix file at {} using AST manipulation",
@@ -90,7 +106,7 @@ pub async fn update_nix_file(
             },
             Err(e) if e.is_not_found() => {
                 // Check if this is a commit SHA that needs fixing via finalAttrs
-                if let Some(tag) = tag_name {
+                if let Some(tag) = release_tag {
                     try_fixup_commit_sha_rev(&updated_content, tag, new_version)
                 } else {
                     debug!("No rev attribute to update (or skipped): {}", e);
@@ -105,6 +121,28 @@ pub async fn update_nix_file(
     } else {
         // For mkManyVariants, we already did string replacement above
         updated_content
+    };
+
+    // Point the ref at the release's tag if the tag scheme changed
+    let updated_content = match release_tag {
+        Some(tag)
+            if actual_file_path.as_path() == file_path
+                && is_single_ref_from(&updated_content, tag.repo) =>
+        {
+            match align_ref_with_tag(&updated_content, tag.name, new_version) {
+                Ok(aligned) => {
+                    if aligned != updated_content {
+                        info!("Rewrote git ref to match release tag {}", tag.name);
+                    }
+                    aligned
+                },
+                Err(e) => {
+                    debug!("Git ref not aligned with tag {}: {}", tag.name, e);
+                    updated_content
+                },
+            }
+        },
+        _ => updated_content,
     };
 
     // Update hash if provided
@@ -276,8 +314,18 @@ pub async fn update_composer_deps_hash(
 ///
 /// Returns the fixed content on success, or the original content unchanged
 /// if the fixup is not applicable.
-fn try_fixup_commit_sha_rev(content: &str, tag_name: &str, new_version: &str) -> String {
+fn try_fixup_commit_sha_rev(content: &str, tag: ReleaseTag<'_>, new_version: &str) -> String {
     use crate::rewrite::rev_update::{extract_rev_value, is_likely_commit_sha};
+
+    // The SHA must belong to the release's repository, and be the only ref:
+    // otherwise it may pin some other source (opencv's third-party data).
+    if !is_single_ref_from(content, tag.repo) {
+        debug!(
+            "Rev not fixed up: not the only ref, or not from {}",
+            tag.repo
+        );
+        return content.to_owned();
+    }
 
     // Only attempt fixup when rev is actually a commit SHA
     let is_sha = extract_rev_value(content)
@@ -307,7 +355,7 @@ fn try_fixup_commit_sha_rev(content: &str, tag_name: &str, new_version: &str) ->
     }
 
     // Rewrite rev to reference version
-    match try_fixup_stale_rev(&fixable, tag_name, new_version) {
+    match try_fixup_stale_rev(&fixable, tag.name, new_version) {
         Ok(fixed) => {
             info!("Fixed stale rev to reference version via tag format");
             fixed
