@@ -8,8 +8,16 @@ use super::{
     update_npm_deps_hash, update_nuget_deps_hash, update_vendor_hash,
 };
 use crate::hash_discovery;
+use crate::package::PackageQuery;
+use crate::pypi::fetch_release_files;
+use crate::pypi::sdist::{SdistFix, plan_sdist_fix};
+use crate::rewrite::update_fetch_pypi_sdist;
 
 /// Update source hash using the invalid hash discovery pattern
+///
+/// `pypi_pname` is the PyPI project for packages whose upstream is PyPI; the
+/// `fetchPypi` filename is then checked against the new release's sdists
+/// before the hash is discovered (see [`align_pypi_sdist`]).
 pub async fn update_source_hash(
     eval_entry_point: &str,
     attr_path: &str,
@@ -18,6 +26,7 @@ pub async fn update_source_hash(
     new_version: &str,
     old_hash: Option<&str>,
     tag_name: Option<&str>,
+    pypi_pname: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     // Step 1: Update version in file with invalid hash
     let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -37,6 +46,17 @@ pub async fn update_source_hash(
         "Updated version and set invalid hash in {}",
         actual_file_location.display()
     );
+
+    if let Some(pypi_pname) = pypi_pname {
+        align_pypi_sdist(
+            eval_entry_point,
+            attr_path,
+            &actual_file_location,
+            pypi_pname,
+            new_version,
+        )
+        .await?;
+    }
 
     // Step 2: Build source to get correct hash
     let (success, _stdout, stderr) =
@@ -79,6 +99,110 @@ pub async fn update_source_hash(
     info!("Source build successful");
 
     Ok(actual_file_location)
+}
+
+/// Make the `fetchPypi` filename match the sdist PyPI publishes for `version`
+///
+/// Projects often rename their sdists to the normalised form between releases
+/// (`sphinxcontrib-openapi-0.8.4.tar.gz` → `sphinxcontrib_openapi-0.10.0.tar.gz`),
+/// or change the archive type (`.zip` → `.tar.gz`). `fetchPypi` derives the
+/// filename from `pname`, so after a version bump the URL 404s. When the
+/// release's sdist is a spelling of the same name, set `fetchPypi`'s `pname`
+/// and/or `extension` to match it.
+///
+/// A release with only wheels fails here with a clear error rather than a 404.
+/// Anything else that does not fit (wheel sources, unrelated names, a PyPI
+/// outage, a `fetchPypi` call that can't be rewritten) is logged and left for
+/// the source build to report.
+async fn align_pypi_sdist(
+    eval_entry_point: &str,
+    attr_path: &str,
+    nix_file: &Path,
+    pypi_pname: &str,
+    version: &str,
+) -> anyhow::Result<()> {
+    let query = PackageQuery::new(eval_entry_point, attr_path);
+    let Some(current) = src_filename(&query).await else {
+        debug!("{attr_path}: no src URL to compare against PyPI sdists");
+        return Ok(());
+    };
+    if current.ends_with(".whl") {
+        debug!("{attr_path}: src is a wheel ({current}); not checking sdists");
+        return Ok(());
+    }
+
+    let files = match fetch_release_files(pypi_pname, version).await {
+        Ok(files) => files,
+        Err(e) => {
+            warn!("{attr_path}: could not list PyPI files for {pypi_pname} {version}: {e:#}");
+            return Ok(());
+        },
+    };
+    let sdists: Vec<&str> = files
+        .iter()
+        .filter(|f| f.packagetype == "sdist")
+        .map(|f| f.filename.as_str())
+        .collect();
+
+    match plan_sdist_fix(&current, version, &sdists) {
+        SdistFix::Matches => Ok(()),
+        SdistFix::NoSdist => {
+            let wheels: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+            anyhow::bail!(
+                "PyPI release {pypi_pname} {version} has no sdist, only: {}. \
+                 Fetch a wheel or the upstream source archive instead.",
+                wheels.join(", ")
+            )
+        },
+        SdistFix::NoMatch => {
+            warn!(
+                "{attr_path}: src file {current} is not among the sdists PyPI lists for \
+                 {pypi_pname} {version}: {}",
+                sdists.join(", ")
+            );
+            Ok(())
+        },
+        SdistFix::Rewrite {
+            pname,
+            extension,
+            filename,
+        } => {
+            info!("{attr_path}: PyPI sdist is now {filename} (was {current}); updating fetchPypi");
+            let content = tokio::fs::read_to_string(nix_file)
+                .await
+                .with_context(|| format!("read nix file {}", nix_file.display()))?;
+            let updated =
+                match update_fetch_pypi_sdist(&content, pname.as_deref(), extension.as_deref()) {
+                    Ok(updated) => updated,
+                    Err(e) => {
+                        warn!(
+                            "{attr_path}: could not rewrite fetchPypi in {} for {filename}: {e}",
+                            nix_file.display()
+                        );
+                        return Ok(());
+                    },
+                };
+            tokio::fs::write(nix_file, updated)
+                .await
+                .with_context(|| format!("write nix file {}", nix_file.display()))?;
+
+            match src_filename(&query).await {
+                Some(now) if now == filename => Ok(()),
+                now => anyhow::bail!(
+                    "Rewrote fetchPypi for sdist {filename}, but src now points at {}",
+                    now.as_deref().unwrap_or("nothing")
+                ),
+            }
+        },
+    }
+}
+
+/// Last path component of the package's first `src` URL.
+async fn src_filename(query: &PackageQuery) -> Option<String> {
+    let urls = query.get_src_url().await?;
+    let url = urls.split_whitespace().next()?;
+    let name = url.rsplit('/').next()?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// Update cargoHash for Rust packages using the invalid hash discovery pattern

@@ -108,6 +108,7 @@ ekapkgs-update/                     # Main CLI crate
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
+    pypi/sdist.rs                   # Pure sdist-filename matching (PEP 503 names) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
     nix/                            # Nix eval helpers, nix-eval-jobs (run_eval.rs: --select/--apply, exit status), eval cache
@@ -265,6 +266,14 @@ This is intentional, not a bug:
 
 Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has a dedicated `update_*_if_needed` function in `hash_workflows.rs`.
 
+### PyPI sdist Names (`pypi/sdist.rs`, `hash_workflows::align_pypi_sdist`)
+
+`fetchPypi` builds its URL from `pname`, but projects often rename their sdists between releases (`sphinxcontrib-openapi-0.8.4.tar.gz` → `sphinxcontrib_openapi-0.10.0.tar.gz`) or change the archive type (`.zip` → `.tar.gz`). For PyPI upstreams, `update_source_hash` therefore checks the bumped `src` filename against the sdists PyPI lists for the new version (`/pypi/<name>/<version>/json`) before discovering the hash:
+
+- Same name under PEP 503 normalisation → `update_fetch_pypi_sdist()` sets `fetchPypi`'s `pname` (taking it out of `inherit (finalAttrs) pname version;`) and/or `extension`, and the new URL is re-evaluated to confirm it.
+- No sdist at all (wheel-only release) → the update fails with an explicit error instead of a 404.
+- Wheel sources, unrelated names, PyPI errors and `fetchPypi` calls that can't be rewritten are logged and left to the source build.
+
 ### Nix AST Rewriting (`rewrite/`)
 
 Uses **regex with rnix AST validation**, not pure AST transformation:
@@ -274,7 +283,7 @@ Uses **regex with rnix AST validation**, not pure AST transformation:
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
-Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`.
+Key functions: `find_and_update_attr()`, `try_update_rev_attr()`, `remove_patch_from_array()`, `replace_maintainers_with_empty()`, `replace_teams_with_empty()`, `update_variant_attr()`, `add_variant_entry()`, `update_fetch_pypi_sdist()`.
 
 Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is returned for a version attribute, `file_update.rs` falls back to searching sibling files (mkManyVariants pattern).
 
