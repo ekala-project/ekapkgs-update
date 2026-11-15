@@ -108,7 +108,7 @@ ekapkgs-update/                     # Main CLI crate
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
       http_status.rs                #   HttpStatusError: typed non-success status from release endpoints (404/410 = not found)
-    github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
+    github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab: custom instances, nested groups, fetchFromGitLab `api/v4/projects/<encoded>` URLs; SourceHut: GraphQL `user { repository(name:) }`, needs SOURCEHUT_TOKEN)
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
