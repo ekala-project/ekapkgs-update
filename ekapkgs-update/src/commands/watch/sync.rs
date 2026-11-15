@@ -122,7 +122,7 @@ async fn fast_forward(repo: &ResolvedRepo) -> anyhow::Result<Synced> {
         .map_or("master", |c| c.base_branch.as_str());
 
     let remote = upstream_remote(repo).await;
-    run_git_in(dir, &["fetch", "--prune", &remote]).await?;
+    fetch_with_retry(repo, &remote).await?;
 
     let target = format!("{remote}/{base}");
     let target_sha = run_git_in(
@@ -158,6 +158,39 @@ async fn fast_forward(repo: &ResolvedRepo) -> anyhow::Result<Synced> {
     Ok(Synced::Refused(format!(
         "local {base} has diverged from {target}"
     )))
+}
+
+/// Delays between `git fetch` attempts. At boot the service can start before
+/// the network is routable even after `network-online.target`; a failed
+/// startup sync would otherwise leave the checkout stale until the next
+/// re-index.
+const FETCH_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(45),
+];
+
+async fn fetch_with_retry(repo: &ResolvedRepo, remote: &str) -> anyhow::Result<()> {
+    let dir = repo.repo_dir.as_path();
+    let mut delays = FETCH_RETRY_DELAYS.iter();
+    loop {
+        match run_git_in(dir, &["fetch", "--prune", remote]).await {
+            Ok(_) => return Ok(()),
+            Err(e) => match delays.next() {
+                Some(delay) => {
+                    warn!(
+                        "[{}] git fetch {} failed ({:#}); retrying in {}s",
+                        repo.label(),
+                        remote,
+                        e,
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(*delay).await;
+                },
+                None => return Err(e),
+            },
+        }
+    }
 }
 
 /// The remote whose URL points at the configured upstream (falls back to
