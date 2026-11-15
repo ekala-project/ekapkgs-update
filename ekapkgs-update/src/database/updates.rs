@@ -27,8 +27,8 @@ const LOG_COLUMNS: &str = "drv_path, attr_path, timestamp, status, error_log, ol
 /// date-based versions such as `0-unstable-2024-02-01`.
 ///
 /// This is the single rule for "the tree has reached this version" (merged
-/// proposals, stale failures).
-fn version_at_least(a: &str, b: &str) -> bool {
+/// proposals, stale failures, updates a sibling attribute already made).
+pub(crate) fn version_at_least(a: &str, b: &str) -> bool {
     use std::cmp::Ordering;
 
     if a == b {

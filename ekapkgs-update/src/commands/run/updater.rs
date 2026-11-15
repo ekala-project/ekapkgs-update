@@ -9,6 +9,7 @@ use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
 use super::preservation::preserve_failure;
 use super::types::{UpdateRequest, UpdateResult};
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
+use crate::commands::update::AlreadyAtVersion;
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::instrumentation::{PhaseHandle, PhaseTracker};
 use crate::commands::update::types::UpdatePhase;
@@ -194,6 +195,34 @@ impl<'a> Attempt<'a> {
                 Err(self.record_failure(&error, &message).await)
             },
         }
+    }
+
+    /// The tree already has the requested version (or newer): another
+    /// attribute built from the same file was updated first, or the change
+    /// landed some other way. Record the package as observed at that version,
+    /// which reconciles it to `up_to_date` instead of a failure.
+    async fn already_at_version(&self, already: &AlreadyAtVersion) -> UpdateResult {
+        info!(
+            "{}: Already at {} (requested {}), nothing to update",
+            self.req.attr_path, already.current, already.target
+        );
+        if let Err(e) = self
+            .db
+            .record_no_update(
+                self.req.repo(),
+                &self.req.attr_path,
+                &already.current,
+                Some(&already.target),
+                None,
+            )
+            .await
+        {
+            warn!(
+                "{}: Failed to record up-to-date package: {}",
+                self.req.attr_path, e
+            );
+        }
+        UpdateResult::Skipped(format!("already at version {}", already.current))
     }
 
     /// Fail the attempt before the update workflow ran (e.g. the package's
@@ -541,6 +570,16 @@ pub(super) async fn perform_update(
                 old_version: current_version.clone(),
                 new_version: new_version.clone(),
             })
+        },
+        Err(e) if e.downcast_ref::<AlreadyAtVersion>().is_some() => {
+            if let Err(cleanup_err) = cleanup_worktree(&repo_dir, &worktree_path).await {
+                warn!(
+                    "{}: Failed to clean up worktree: {}",
+                    attr_path, cleanup_err
+                );
+            }
+            let already = e.downcast_ref::<AlreadyAtVersion>().expect("checked");
+            Ok(attempt.already_at_version(already).await)
         },
         Err(e) => {
             // Update failed - record the failure log
@@ -961,6 +1000,11 @@ pub(super) async fn perform_direct_update(
             }
 
             Ok(commit_direct_update(&attempt, &snapshot, &git_mutex, &pkg_dir, &commit_msg).await)
+        },
+        Err(e) if e.downcast_ref::<AlreadyAtVersion>().is_some() => {
+            // Nothing was edited; the snapshot has nothing of ours to revert.
+            let already = e.downcast_ref::<AlreadyAtVersion>().expect("checked");
+            Ok(attempt.already_at_version(already).await)
         },
         Err(e) => {
             let error_message = format!("{e:#}");
@@ -1579,6 +1623,38 @@ mod tests {
             );
         }
         assert_eq!(pr_columns(&db).await, (None, None));
+    }
+
+    /// arro3-core after arro3-compute bumped their shared file: the update
+    /// finds the target already in place. That is an up-to-date package,
+    /// not a failure (no failure count, no backoff on the version).
+    #[tokio::test]
+    async fn already_at_version_is_recorded_up_to_date() {
+        let db = setup_db().await;
+        let session = db.create_session(SessionMode::Run, None).await.unwrap();
+        db.record_update_available("", "hello", "1.2", "1.3")
+            .await
+            .unwrap();
+        let req = request();
+        let attempt = Attempt::new(&db, &session, &req);
+
+        // As update_from_file_path reports it
+        let err = anyhow::Error::from(AlreadyAtVersion {
+            current: "1.3".to_owned(),
+            target: "1.3".to_owned(),
+        });
+        let already = err.downcast_ref::<AlreadyAtVersion>().expect("downcast");
+        let result = attempt.already_at_version(already).await;
+        assert!(
+            matches!(&result, UpdateResult::Skipped(reason) if reason.contains("already at version 1.3")),
+            "{result:?}"
+        );
+
+        let record = db.get_update_record("", "hello").await.unwrap().unwrap();
+        assert_eq!(record.status, UpdateStatus::UpToDate);
+        assert_eq!(record.current_version.as_deref(), Some("1.3"));
+        assert_eq!(record.failure_count, 0);
+        assert_eq!(record.failed_version, None);
     }
 
     #[test]

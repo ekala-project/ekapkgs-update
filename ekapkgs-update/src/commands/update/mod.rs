@@ -43,6 +43,22 @@ pub(super) use variants::{
 use crate::package::PackageMetadata;
 use crate::vcs_sources::UpstreamSource;
 
+/// [`update_from_file_path`] was given an explicit target version that the
+/// package already has (or exceeds), so there is nothing to update.
+///
+/// In branch mode, several attributes built from one file (`arro3-core`,
+/// `arro3-io`, `arro3-compute`) are queued separately; the first update bumps
+/// the shared file and the others find it at the target. Callers can
+/// `downcast_ref` the error to tell this apart from a failure.
+#[derive(Debug, thiserror::Error)]
+#[error("already at version {current} (requested {target})")]
+pub struct AlreadyAtVersion {
+    /// Version found in the tree
+    pub current: String,
+    /// Requested explicit version
+    pub target: String,
+}
+
 /// Update a package from a specific file path.
 /// Returns removed patches and the test result.
 ///
@@ -71,6 +87,18 @@ pub async fn update_from_file_path(
         )
         .await?;
     info!("Current version: {}", metadata.version);
+
+    // An explicit target the tree has already reached is nothing to do, e.g.
+    // because another attribute built from the same file was updated first.
+    if let Some(target) = version_config.explicit_version.as_deref() {
+        if crate::database::version_at_least(&metadata.version, target) {
+            return Err(AlreadyAtVersion {
+                current: metadata.version.clone(),
+                target: target.to_owned(),
+            }
+            .into());
+        }
+    }
 
     // Step 2: Determine upstream source
     let upstream_source = tracker
