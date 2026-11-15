@@ -132,7 +132,10 @@ pub struct GithubPrFile {
 pub fn parse_github_url(url: &str) -> Option<GithubRepo> {
     static GITHUB_URL_REGEX: OnceLock<Regex> = OnceLock::new();
     let github_regex = GITHUB_URL_REGEX.get_or_init(|| {
-        Regex::new(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git|/|$)")
+        // `downloads/` is GitHub's retired file hosting
+        // (`github.com/downloads/<owner>/<repo>/<file>`). `.git` only ends
+        // the repo name as a suffix: `notofonts.github.io` is a repo name.
+        Regex::new(r"github\.com[:/](?:downloads/)?([^/]+)/([^/]+?)(?:\.git)?(?:/|$)")
             .expect("hard-coded GitHub URL regex must compile")
     });
     let caps = github_regex.captures(url)?;
@@ -594,6 +597,31 @@ mod tests {
             "owner",
             "repo",
         );
+    }
+
+    #[test]
+    fn test_parse_github_url_shapes() {
+        for (url, owner, repo) in [
+            ("https://github.com/owner/repo.git", "owner", "repo"),
+            ("https://github.com/owner/repo.git/", "owner", "repo"),
+            (
+                "https://github.com/notofonts/notofonts.github.io/releases/download/x.zip",
+                "notofonts",
+                "notofonts.github.io",
+            ),
+            (
+                "https://github.com/owner/repo.github",
+                "owner",
+                "repo.github",
+            ),
+            (
+                "https://github.com/downloads/petdance/tidyp/tidyp-1.04.tar.gz",
+                "petdance",
+                "tidyp",
+            ),
+        ] {
+            assert_parses_to(url, owner, repo);
+        }
     }
 
     #[test]
