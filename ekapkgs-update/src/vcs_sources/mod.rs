@@ -548,7 +548,7 @@ impl UpstreamSource {
         include_prereleases: bool,
     ) -> anyhow::Result<Release> {
         let releases = self.fetch_all_releases().await?;
-        find_best_release(
+        let result = find_best_release(
             releases,
             current_version,
             strategy,
@@ -556,7 +556,79 @@ impl UpstreamSource {
             explicit_version,
             version_regex,
             include_prereleases,
-        )
+        );
+        let Some(target) = explicit_version else {
+            return result;
+        };
+        let Err(err) = result else {
+            return result;
+        };
+
+        // A tag is often pushed some time before its release is published.
+        // Watch sees it earlier (GitHub's `releases.atom` lists bare tags), so
+        // the explicit target can be a tag the releases endpoint doesn't know
+        // yet. Look it up among the tags before giving up.
+        let tags = match self.fetch_tag_releases().await {
+            Ok(Some(tags)) => tags,
+            Ok(None) => return Err(err),
+            Err(tag_err) => {
+                debug!("Tag lookup for explicit version {target} failed: {tag_err:#}");
+                return Err(err);
+            },
+        };
+        match find_explicit_release(tags, target, version_regex) {
+            Some(release) => {
+                info!(
+                    "Version {target} has no release yet; using tag {}",
+                    release.tag_name
+                );
+                Ok(release)
+            },
+            None => Err(err),
+        }
+    }
+
+    /// Fetch the repository's tags as releases, for platforms whose releases
+    /// are a subset of their tags (GitHub, GitLab).
+    ///
+    /// Returns `None` for upstreams without a separate tags endpoint (their
+    /// [`fetch_all_releases`](Self::fetch_all_releases) already lists tags,
+    /// or they have no tags at all).
+    async fn fetch_tag_releases(&self) -> anyhow::Result<Option<Vec<Release>>> {
+        let tags: Vec<String> = match self {
+            UpstreamSource::GitHub { owner, repo } => {
+                let token = env::var("GITHUB_TOKEN").ok();
+                fetch_github_tags(owner, repo, token.as_deref())
+                    .await?
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect()
+            },
+            UpstreamSource::GitLab {
+                instance,
+                owner,
+                project,
+            } => {
+                let token = env::var("GITLAB_TOKEN").ok();
+                fetch_gitlab_tags(instance, owner, project, token.as_deref())
+                    .await?
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect()
+            },
+            UpstreamSource::SourceHut { .. }
+            | UpstreamSource::PyPI { .. }
+            | UpstreamSource::DirectoryListing { .. }
+            | UpstreamSource::Script { .. } => return Ok(None),
+        };
+        Ok(Some(
+            tags.into_iter()
+                .map(|tag_name| Release {
+                    tag_name,
+                    is_prerelease: false,
+                })
+                .collect(),
+        ))
     }
 
     /// Get a human-readable description of this source
@@ -657,6 +729,23 @@ impl UpstreamSource {
     }
 }
 
+/// Find the release whose tag name or resolved version is `target_version`.
+///
+/// A tag `version_regex` doesn't match (e.g. an unrelated `vscode-v0.2.0` tag
+/// next to the project's own) is not a match.
+pub fn find_explicit_release(
+    releases: Vec<Release>,
+    target_version: &str,
+    version_regex: Option<&str>,
+) -> Option<Release> {
+    releases.into_iter().find(|release| {
+        release.tag_name == target_version
+            || release
+                .resolved_version(version_regex)
+                .is_ok_and(|version| version == target_version)
+    })
+}
+
 /// Find the best compatible release from a list based on semver strategy
 ///
 /// Filters releases by:
@@ -689,16 +778,9 @@ pub fn find_best_release(
     // If explicit version is specified, find and return that exact version.
     // We consume the vector so the matched release is moved out instead of cloned.
     if let Some(target_version) = explicit_version {
-        for release in releases {
-            let version = release.resolved_version(version_regex)?;
-
-            // Match either the tag directly or the extracted version
-            if release.tag_name == target_version || version == target_version {
-                return Ok(release);
-            }
-        }
-
-        anyhow::bail!("Explicit version '{target_version}' not found in available releases");
+        return find_explicit_release(releases, target_version, version_regex).ok_or_else(|| {
+            anyhow::anyhow!("Explicit version '{target_version}' not found in available releases")
+        });
     }
 
     // Sort all releases by version descending (newest first) so we can

@@ -773,3 +773,42 @@ fn test_git_repo_name() {
         assert_eq!(source.git_repo_name(), expected, "{source:?}");
     }
 }
+
+#[test]
+fn test_find_explicit_release() {
+    let tags = |names: &[&str]| -> Vec<Release> {
+        names
+            .iter()
+            .map(|name| Release {
+                tag_name: (*name).to_owned(),
+                is_prerelease: false,
+            })
+            .collect()
+    };
+    /// (tags, target, version regex, expected tag)
+    type Case<'a> = (&'a [&'a str], &'a str, Option<&'a str>, Option<&'a str>);
+    let cases: [Case<'_>; 6] = [
+        // the version without the tag's prefix
+        (&["v1.4.0", "v1.3.0"], "1.4.0", None, Some("v1.4.0")),
+        // the tag name itself
+        (&["v1.4.0"], "v1.4.0", None, Some("v1.4.0")),
+        (&["1.4.0"], "1.4.0", None, Some("1.4.0")),
+        // a tag the regex doesn't match is skipped, not an error
+        (
+            &["vscode-v0.2.0", "release-3.12.6"],
+            "3.12.6",
+            Some(r"release-(.*)"),
+            Some("release-3.12.6"),
+        ),
+        (&["vscode-v0.2.0"], "3.12.6", Some(r"release-(.*)"), None),
+        (&["v1.3.0"], "1.4.0", None, None),
+    ];
+    for (names, target, regex, expected) in cases {
+        let found = find_explicit_release(tags(names), target, regex);
+        assert_eq!(
+            found.map(|r| r.tag_name).as_deref(),
+            expected,
+            "{names:?} / {target} / {regex:?}"
+        );
+    }
+}
