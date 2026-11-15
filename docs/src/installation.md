@@ -119,7 +119,7 @@ ekapkgs-update requires the following tools at runtime:
 
 - **nix** (2.4 or later, with flakes support recommended)
 - **git** (for PR creation and repository management)
-- **nix-eval-jobs** (for parallel package evaluation)
+- **[iets](https://github.com/numtide/iets)** (`iets eval-jobs`, for parallel package evaluation; the flake builds it from source)
 - **gh** (GitHub CLI, for PR creation if targeting GitHub)
 - **cachix** (optional, for build artifact caching)
 
@@ -134,7 +134,7 @@ Check that ekapkgs-update is correctly installed:
 ekapkgs-update --help
 
 # Verify dependencies are accessible
-which nix git gh nix-eval-jobs
+which nix git gh iets
 
 # Test basic functionality
 ekapkgs-update update --help

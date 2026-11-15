@@ -12,10 +12,10 @@
 //! Submodules handle more specialized tasks:
 //!
 //! - [`flake`]: Flake-based package building and evaluation
-//! - [`nix_eval_jobs`]: Parallel evaluation via `nix-eval-jobs`
+//! - [`nix_eval_jobs`]: The nix-eval-jobs JSON format `iets eval-jobs` emits
 //! - [`eval_cache`]: Caching of evaluation results keyed by git commit
 //! - [`rebuild_count`]: Derivation impact analysis (how many packages rebuild)
-//! - [`run_eval`]: Streaming evaluation output parsing
+//! - [`run_eval`]: Streaming `iets eval-jobs` invocation and output parsing
 
 pub mod eval_cache;
 pub mod flake;

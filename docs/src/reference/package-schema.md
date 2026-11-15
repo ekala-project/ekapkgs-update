@@ -538,7 +538,7 @@ Ensure:
 - `pname` and `version` are set
 - `src` contains a fetcher
 - URL includes version placeholder
-- File is evaluated by `nix-eval-jobs`
+- File is evaluated by `iets eval-jobs`
 
 ### Hash Update Failed
 

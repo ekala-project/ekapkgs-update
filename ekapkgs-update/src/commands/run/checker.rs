@@ -20,7 +20,7 @@ const PROGRESS_INTERVAL: usize = 250;
 /// Service that monitors packages for new upstream releases, with optional
 /// concurrency and eval-worker limits.
 ///
-/// `file` is enumerated with nix-eval-jobs (optionally through `select`);
+/// `file` is enumerated with iets eval-jobs (optionally through `select`);
 /// `eval_file` is the entry point attr paths are evaluated against.
 ///
 /// Returns `(checked, skipped_by_backoff, eval_errors)`. When `session_id`
@@ -37,7 +37,7 @@ pub async fn release_checker_service_with_limits(
     max_eval_workers: Option<usize>,
     session_id: Option<String>,
 ) -> (usize, usize, usize) {
-    let stream = nix::run_eval::run_nix_eval_jobs_with_options(
+    let stream = nix::run_eval::run_eval_jobs_with_options(
         file,
         nix::run_eval::EvalJobsOptions {
             max_workers: max_eval_workers,

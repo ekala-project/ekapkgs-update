@@ -141,7 +141,7 @@ impl PackageInfo {
 pub struct FailedUpdate<'a> {
     pub repo_name: &'a str,
     pub attr_path: &'a str,
-    /// Derivation path, when the request came from `nix-eval-jobs`. A
+    /// Derivation path, when the request came from `iets eval-jobs`. A
     /// synthetic `<repo>:<attr>@<version>` key is used otherwise.
     pub drv_path: Option<&'a str>,
     pub session_id: Option<&'a str>,

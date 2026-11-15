@@ -1,4 +1,4 @@
-//! Upstream index builder: enumerates packages with a single `nix-eval-jobs`
+//! Upstream index builder: enumerates packages with a single `iets eval-jobs`
 //! pass, determines each package's upstream source and version policy, and
 //! stores the mapping in the `upstream_index` database table.
 //!
@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::database::{Database, NewUpstreamIndexEntry, PackageInfo};
 use crate::nix::nix_eval_jobs::{NixEvalDrv, NixEvalItem};
-use crate::nix::run_eval::{EvalJobsOptions, run_nix_eval_jobs_with_options};
+use crate::nix::run_eval::{EvalJobsOptions, run_eval_jobs_with_options};
 use crate::package::PackageMetadata;
 use crate::variant_strategy::infer_update_strategy;
 use crate::vcs_sources::{SemverStrategy, VersionPolicy};
@@ -100,9 +100,9 @@ struct IndexedAttrs {
 pub struct IndexTarget<'a> {
     /// Repository name stored with every entry (empty in single-repo mode).
     pub repo_name: &'a str,
-    /// File passed to nix-eval-jobs to enumerate packages.
+    /// File passed to iets eval-jobs to enumerate packages.
     pub enumerate_file: &'a str,
-    /// Optional nix-eval-jobs `--select` applied to the enumeration root.
+    /// Optional iets eval-jobs `--select` applied to the enumeration root.
     pub select: Option<&'a str>,
     /// Only index packages whose `meta.position` lies inside this directory:
     /// anything defined elsewhere (e.g. a pinned dependency in the Nix store)
@@ -125,7 +125,7 @@ enum SkipReason {
 /// Result statistics from an index build run.
 #[derive(Debug, Default)]
 pub struct IndexStats {
-    /// Derivations and evaluation errors reported by nix-eval-jobs.
+    /// Derivations and evaluation errors reported by iets eval-jobs.
     pub evaluated: usize,
     /// Entries stored in the index.
     pub indexed: usize,
@@ -193,7 +193,7 @@ pub async fn build_upstream_index(
         .repo_dir
         .map(|dir| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()));
 
-    let stream = run_nix_eval_jobs_with_options(
+    let stream = run_eval_jobs_with_options(
         target.enumerate_file.to_owned(),
         EvalJobsOptions {
             max_workers: max_eval_workers,
@@ -240,7 +240,7 @@ pub async fn build_upstream_index(
     }
 
     if stats.stream_error.is_none() && stats.evaluated == 0 {
-        stats.stream_error = Some("nix-eval-jobs produced no derivations".to_owned());
+        stats.stream_error = Some("iets eval-jobs produced no derivations".to_owned());
     }
     stats.indexed = indexed.len();
 

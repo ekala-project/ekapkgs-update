@@ -1,7 +1,14 @@
-//! Streaming wrapper around `nix-eval-jobs`.
+//! Streaming wrapper around `iets eval-jobs`.
+//!
+//! [iets](https://github.com/numtide/iets) is a Nix evaluator whose
+//! `eval-jobs` subcommand emits the same JSON lines as `nix-eval-jobs` (see
+//! [`super::nix_eval_jobs`]), and evaluates several times faster. Unlike
+//! `nix-eval-jobs`, it evaluates a file in pure mode unless given `--impure`,
+//! which package sets need for `builtins.currentSystem`, so it is always
+//! passed.
 //!
 //! Each invocation writes the full stderr to
-//! `~/.cache/ekapkgs-update/logs/nix-eval-jobs.<entry-point>.stderr.log`
+//! `~/.cache/ekapkgs-update/logs/eval-jobs.<entry-point>.stderr.log`
 //! (truncated per run) and keeps the last few lines in memory so failures can
 //! be reported in the regular log instead of disappearing into a file.
 
@@ -19,10 +26,10 @@ use super::nix_eval_jobs::NixEvalItem;
 /// Number of trailing stderr lines kept for error reporting.
 const STDERR_TAIL_LINES: usize = 20;
 
-/// Options for a `nix-eval-jobs` invocation.
+/// Options for an `iets eval-jobs` invocation.
 #[derive(Debug, Clone, Default)]
 pub struct EvalJobsOptions {
-    /// `--workers` value. `None` uses the nix-eval-jobs default.
+    /// `--workers` value. `None` uses the iets default (the cores, at most 4).
     pub max_workers: Option<usize>,
     /// `--select` function applied to the evaluation root before traversal,
     /// e.g. `x: x.buildable`. Dotted keys in the selected set are treated as
@@ -63,20 +70,39 @@ fn stderr_log_file_name(file_path: &str) -> String {
     // Keep the tail: the end of the path is the distinguishing part.
     let start = trimmed.len().saturating_sub(MAX_LEN);
     let tail = trimmed.get(start..).unwrap_or(trimmed);
-    format!("nix-eval-jobs.{tail}.stderr.log")
+    format!("eval-jobs.{tail}.stderr.log")
 }
 
-pub fn run_nix_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
-    run_nix_eval_jobs_with_options(file_path, EvalJobsOptions::default())
+pub fn run_eval_jobs(file_path: String) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
+    run_eval_jobs_with_options(file_path, EvalJobsOptions::default())
 }
 
-/// Run `nix-eval-jobs` and stream its results.
+/// Arguments to `iets` for evaluating `file_path` with `options`.
+fn eval_jobs_args(file_path: &str, options: &EvalJobsOptions) -> Vec<String> {
+    let mut args: Vec<String> = ["eval-jobs", "--impure", "--show-input-drvs"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if let Some(workers) = options.max_workers {
+        args.extend(["--workers".to_owned(), workers.to_string()]);
+    }
+    if let Some(select) = &options.select {
+        args.extend(["--select".to_owned(), select.clone()]);
+    }
+    if let Some(apply) = &options.apply {
+        args.extend(["--apply".to_owned(), apply.clone()]);
+    }
+    args.push(file_path.to_owned());
+    args
+}
+
+/// Run `iets eval-jobs` and stream its results.
 ///
-/// The stream ends with an `Err` item if nix-eval-jobs exits unsuccessfully,
+/// The stream ends with an `Err` item if iets exits unsuccessfully,
 /// carrying the tail of its stderr. A successful run that produced no jobs at
 /// all is logged as a warning, since that almost always means the entry point
 /// returns nested attribute sets that need a `select`.
-pub fn run_nix_eval_jobs_with_options(
+pub fn run_eval_jobs_with_options(
     file_path: String,
     options: EvalJobsOptions,
 ) -> impl Stream<Item = anyhow::Result<NixEvalItem>> {
@@ -101,35 +127,25 @@ pub fn run_nix_eval_jobs_with_options(
             }
         };
 
-        debug!("nix-eval-jobs stderr logging to: {:?}", log_path);
+        debug!("iets eval-jobs stderr logging to: {:?}", log_path);
 
-        let mut nix_eval_cmd = Command::new("nix-eval-jobs");
-        nix_eval_cmd.arg("--show-input-drvs");
-        if let Some(workers) = options.max_workers {
-            nix_eval_cmd.arg("--workers").arg(workers.to_string());
-        }
-        if let Some(select) = &options.select {
-            nix_eval_cmd.arg("--select").arg(select);
-        }
-        if let Some(apply) = &options.apply {
-            nix_eval_cmd.arg("--apply").arg(apply);
-        }
-        nix_eval_cmd
-            .arg(&file_path)
+        let mut eval_cmd = Command::new("iets");
+        eval_cmd
+            .args(eval_jobs_args(&file_path, &options))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = match nix_eval_cmd.spawn() {
+        let mut child = match eval_cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
-                yield Err(anyhow::anyhow!("Failed to spawn nix-eval-jobs: {e}"));
+                yield Err(anyhow::anyhow!("Failed to spawn iets eval-jobs (is iets on PATH?): {e}"));
                 return;
             }
         };
 
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            yield Err(anyhow::anyhow!("nix-eval-jobs stdout/stderr were not piped"));
+            yield Err(anyhow::anyhow!("iets eval-jobs stdout/stderr were not piped"));
             return;
         };
 
@@ -173,7 +189,7 @@ pub fn run_nix_eval_jobs_with_options(
                 },
                 Err(e) => {
                     warn!(
-                        "Encountered error when deserializing nix-eval-jobs output: {:?}",
+                        "Encountered error when deserializing iets eval-jobs output: {:?}",
                         e
                     );
                     continue;
@@ -194,7 +210,7 @@ pub fn run_nix_eval_jobs_with_options(
             Ok(status) if status.success() => {
                 if jobs == 0 {
                     warn!(
-                        "nix-eval-jobs produced no jobs for {}{}. If this file returns nested \
+                        "iets eval-jobs produced no jobs for {}{}. If this file returns nested \
                          attribute sets (e.g. `{{ buildable = ...; }}`), configure a select \
                          expression such as `x: x.buildable`. stderr log: {}{}",
                         file_path,
@@ -207,18 +223,18 @@ pub fn run_nix_eval_jobs_with_options(
                         }
                     );
                 } else {
-                    debug!("nix-eval-jobs produced {} jobs for {}", jobs, file_path);
+                    debug!("iets eval-jobs produced {} jobs for {}", jobs, file_path);
                 }
             },
             Ok(status) => {
                 yield Err(anyhow::anyhow!(
-                    "nix-eval-jobs exited with {status} evaluating {file_path}{select_desc} \
+                    "iets eval-jobs exited with {status} evaluating {file_path}{select_desc} \
                      (stderr log: {}):\n{tail_text}",
                     log_path.display()
                 ));
             },
             Err(e) => {
-                yield Err(anyhow::anyhow!("Failed to wait for nix-eval-jobs: {e}"));
+                yield Err(anyhow::anyhow!("Failed to wait for iets eval-jobs: {e}"));
             },
         }
     }
@@ -232,16 +248,46 @@ mod tests {
     fn test_stderr_log_file_name() {
         assert_eq!(
             stderr_log_file_name("/var/lib/ekapkgs-update/repos/corepkgs/ci/packages.nix"),
-            "nix-eval-jobs.var_lib_ekapkgs-update_repos_corepkgs_ci_packages.nix.stderr.log"
+            "eval-jobs.var_lib_ekapkgs-update_repos_corepkgs_ci_packages.nix.stderr.log"
         );
         assert_eq!(
             stderr_log_file_name("default.nix"),
-            "nix-eval-jobs.default.nix.stderr.log"
+            "eval-jobs.default.nix.stderr.log"
         );
 
         let long = format!("/{}/default.nix", "a".repeat(300));
         let name = stderr_log_file_name(&long);
         assert!(name.ends_with("_default.nix.stderr.log"));
-        assert!(name.len() <= "nix-eval-jobs..stderr.log".len() + 120);
+        assert!(name.len() <= "eval-jobs..stderr.log".len() + 120);
+    }
+
+    #[test]
+    fn test_eval_jobs_args() {
+        assert_eq!(
+            eval_jobs_args("default.nix", &EvalJobsOptions::default()),
+            ["eval-jobs", "--impure", "--show-input-drvs", "default.nix"]
+        );
+        assert_eq!(
+            eval_jobs_args(
+                "ci/packages.nix",
+                &EvalJobsOptions {
+                    max_workers: Some(8),
+                    select: Some("x: x.buildable".to_owned()),
+                    apply: Some("d: d.name".to_owned()),
+                }
+            ),
+            [
+                "eval-jobs",
+                "--impure",
+                "--show-input-drvs",
+                "--workers",
+                "8",
+                "--select",
+                "x: x.buildable",
+                "--apply",
+                "d: d.name",
+                "ci/packages.nix"
+            ]
+        );
     }
 }

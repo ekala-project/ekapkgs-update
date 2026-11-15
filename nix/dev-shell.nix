@@ -7,7 +7,7 @@
   pkg-config,
   openssl,
   sqlite,
-  nix-eval-jobs,
+  iets,
   cachix,
 }:
 
@@ -15,7 +15,7 @@ stdenv.mkDerivation {
   name = "dev";
 
   nativeBuildInputs = [
-    nix-eval-jobs
+    iets
     # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
     cargo
     clippy

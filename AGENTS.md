@@ -32,6 +32,7 @@ clippy.toml                         # Clippy thresholds (MSRV, arg limits)
 flake.nix                           # Nix flake: dev shell, packages, NixOS module
 nix/                                # Nix overlay, package defs, NixOS module
   elm-format.nix                    # elm-format built from source (not in ekapkgs); dev shell + nix fmt
+  iets.nix                          # iets built from source (flake input iets-src; not in ekapkgs); provides `iets eval-jobs`
   package-web-frontend.nix          # Offline Elm build of ekapkgs-update-web/frontend → elm.js (uglify-js minified)
   web-frontend/                     # Pinned Elm deps incl. test deps (elm-srcs.nix, registry.dat); update.sh regenerates them
   web-frontend-tests.nix            # Sandbox check running the Elm unit tests (flake checks.web-frontend-tests)
@@ -95,7 +96,7 @@ ekapkgs-update/                     # Main CLI crate
       watch/                          # RSS/event-driven passive update mode (multi-repo)
         mod.rs                      #   WatchConfig, ResolvedRepo, repo provisioning (clone/fork)
         sync.rs                     #   Fast-forward-only checkout sync (startup, re-index, before update batches)
-        index.rs                    #   Per-repo upstream index: one nix-eval-jobs pass with --apply → upstream_index
+        index.rs                    #   Per-repo upstream index: one `iets eval-jobs` pass with --apply → upstream_index
         feeds.rs                    #   Feed polling (RSS/Atom/API), per-entry version policy, UpstreamSource reconstruction, source health (moved/not found)
         listener.rs                 #   Event loop: poll cycles, observe-only bootstrap, dispatch decisions
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
@@ -112,7 +113,7 @@ ekapkgs-update/                     # Main CLI crate
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
-    nix/                            # Nix eval helpers, nix-eval-jobs (run_eval.rs: --select/--apply, exit status), eval cache
+    nix/                            # Nix eval helpers, `iets eval-jobs` (run_eval.rs: --impure, --select/--apply, exit status; nix_eval_jobs.rs: its nix-eval-jobs-format JSON), eval cache
     git/                            # Git worktree/branch/PR operations
     cve/                            # OSV.dev CVE analysis (24h cache)
     repology/                       # Repology cross-distro version check (72h cache)
@@ -154,7 +155,7 @@ ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + 
 The `run` command is the primary batch-mode entry point. Two concurrent services communicate over an unbounded mpsc channel:
 
 ```
-nix-eval-jobs (streaming JSON)
+iets eval-jobs (streaming JSON)
         │
         ▼
   Checker Service  ──── mpsc::unbounded_channel ────▶  Updater Service
@@ -163,7 +164,7 @@ nix-eval-jobs (streaming JSON)
 
 ### Checker Service (`commands/run/checker.rs`)
 
-1. Consumes `nix-eval-jobs` output stream
+1. Consumes `iets eval-jobs` output stream
 2. For each package: checks database backoff, extracts `PackageMetadata`
 3. Reads passthru attributes (`skip`, `semver-strategy`, `include-prereleases`, `version-regex`)
 4. Determines `UpstreamSource` from `src.url` or pname
@@ -214,7 +215,7 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
   Repo provisioning ──── auto-clone if missing, auto-fork via GitHub API,
         │                 sync managed checkout to origin/<base>
         ▼
-  Per-repo nix-eval-jobs ──── one pass: --select (enumeration) + --apply (metadata);
+  Per-repo iets eval-jobs ─── one pass: --select (enumeration) + --apply (metadata);
         │                      re-sync + re-index periodically (default: 24h)
         ▼
   upstream_index table (atomically replaced per repo)
@@ -229,13 +230,13 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
                                                               eval_entry_point, pr_config, fork
 ```
 
-**Entry points: enumeration vs evaluation.** `entrypoint` (+ optional `select`, a nix-eval-jobs `--select` function such as `x: x.buildable`) is only used to *enumerate* packages. Dotted keys in a selected flat set (`"cmake.v4"`) are split into attr paths (`NixEvalItem::flatten_dotted_attrs`). `eval_entrypoint` (defaults to `entrypoint`, required with `select`) is what attr paths are evaluated, located (`meta.position`) and built against — e.g. the repo's `default.nix`. Never evaluate per-package queries through an eager set like corepkgs' `buildable`: it forces every `drvPath`, so each query becomes a full CI eval. The `run` command has the same split via `--select`/`--eval-file`.
+**Entry points: enumeration vs evaluation.** `entrypoint` (+ optional `select`, an `iets eval-jobs` `--select` function such as `x: x.buildable`) is only used to *enumerate* packages. Dotted keys in a selected flat set (`"cmake.v4"`) are split into attr paths (`NixEvalItem::flatten_dotted_attrs`). `eval_entrypoint` (defaults to `entrypoint`, required with `select`) is what attr paths are evaluated, located (`meta.position`) and built against — e.g. the repo's `default.nix`. Never evaluate per-package queries through an eager set like corepkgs' `buildable`: it forces every `drvPath`, so each query becomes a full CI eval. The `run` command has the same split via `--select`/`--eval-file`.
 
 **Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist and creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig` (`managed = true`; legacy single-repo mode is `managed = false`, name `''`, the user's own working copy). Then it closes out state left by a killed process (`recover_interrupted_watch_state`), registers repos in `watched_repos` and forgets repos removed from the config (`retain_watched_repos`, which also drops their `upstream_index` rows).
 
 **Sync** (`commands/watch/sync.rs`): At startup, before every index build and before every batch of updates (only the repos the batch touches), managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten, and unmanaged checkouts are never fetched or merged. Worktrees are created from `HEAD`, so this is what keeps updates current.
 
-**Index builder** (`commands/watch/index.rs`): One `nix-eval-jobs` pass per repo with an `--apply` function (`INDEX_APPLY_EXPR`) that extracts version, pname, description, homepage, source URLs, `meta.position`, variants/Python flags and `passthru.ekapkgs-update` settings — no per-package `nix-instantiate` (that took hours). Skips packages defined outside the repo (`meta.position` in the Nix store), pinned variants, opt-outs and packages without a recognizable upstream (the pname→PyPI guess is only allowed for Python packages). The strategy comes from `infer_update_strategy(...).resolve(has_variants)`. Entries (with `drv_path` and the `VersionPolicy`) are written in one transaction by `replace_upstream_index`, which also prunes the repo's stale rows unless the evaluation looks incomplete (stream error, nothing evaluated, or under half the previous count; `prune_decision`). Every indexed package is registered in `updates` (`upsert_package_info`).
+**Index builder** (`commands/watch/index.rs`): One `iets eval-jobs` pass per repo with an `--apply` function (`INDEX_APPLY_EXPR`) that extracts version, pname, description, homepage, source URLs, `meta.position`, variants/Python flags and `passthru.ekapkgs-update` settings — no per-package `nix-instantiate` (that took hours). Skips packages defined outside the repo (`meta.position` in the Nix store), pinned variants, opt-outs and packages without a recognizable upstream (the pname→PyPI guess is only allowed for Python packages). The strategy comes from `infer_update_strategy(...).resolve(has_variants)`. Entries (with `drv_path` and the `VersionPolicy`) are written in one transaction by `replace_upstream_index`, which also prunes the repo's stale rows unless the evaluation looks incomplete (stream error, nothing evaluated, or under half the previous count; `prune_decision`). Every indexed package is registered in `updates` (`upsert_package_info`).
 
 **Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub (`releases.atom`, then `tags.atom` for tags-only projects) and PyPI (cheaper than API), falls back to `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing. GitHub tags come from the `/releases/tag/<tag>` link, not the entry title (the title is the release name). `update_version_for_entry` applies the entry's stored `VersionPolicy`.
 
@@ -472,7 +473,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `WatchCycleStats` / `IndexOutcome` | `database/watch.rs` | Poll/index cycle results |
 | `PrEnhancementsConfig` | `commands/pr_enhancements.rs` | CVE, Repology, rebuild, Cachix, dir diff flags |
 | `CommitStrategy` | `cli.rs` | Worktrees vs Branch |
-| `NixEvalDrv` | `nix/nix_eval_jobs.rs` | Deserialized nix-eval-jobs output per package |
+| `NixEvalDrv` | `nix/nix_eval_jobs.rs` | Deserialized `iets eval-jobs` output per package (nix-eval-jobs JSON format) |
 | `Database` | `database/mod.rs` | SQLite pool wrapper (Clone-safe for async sharing) |
 | `FailureArtifacts` | `commands/run/preservation.rs` | Preserved worktree + logs for failed updates |
 | `PrConfig` | `git/mod.rs` | Owner/repo/base-branch for PR creation |
@@ -490,7 +491,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `IndexTarget` | `commands/watch/index.rs` | What to index: repo name, enumeration file, select, repo dir |
 | `VersionPolicy` | `vcs_sources/mod.rs` | Semver strategy + prerelease + regex; `best_release` picks the target |
 | `UpdateStrategyInference` | `variant_strategy.rs` | Shared strategy decision (explicit / variant / attr suffix / pinned) for `run` and `watch` |
-| `EvalJobsOptions` | `nix/run_eval.rs` | nix-eval-jobs `--workers`/`--select`/`--apply` |
+| `EvalJobsOptions` | `nix/run_eval.rs` | `iets eval-jobs` `--workers`/`--select`/`--apply` |
 | `ReviewConfig` | `commands/review.rs` | PR review configuration (repo, PR#, tests, best-practices flags) |
 | `RepoCoords` | `commands/review.rs` | Parsed repository owner/repo coordinates |
 
@@ -501,7 +502,7 @@ Runtime tools (provided by Nix dev shell):
 - `nix-instantiate` — Nix expression evaluation
 - `nix-build` — Package building (supports `--system` for cross-platform eval)
 - `nix store prefetch-file` — URL hash prefetching for platform-hashes
-- `nix-eval-jobs` — Parallel package evaluation (streaming JSON)
+- `iets eval-jobs` — Parallel package evaluation (streaming JSON in the nix-eval-jobs format). Always run with `--impure`: unlike nix-eval-jobs, iets evaluates a file purely by default, so `builtins.currentSystem` (used by package sets' default `system`) is missing and every job fails
 - `git` — Worktree management, commits, branches
 - `nixfmt` — Optional Nix file formatting
 - `cachix` — Optional binary cache pushing

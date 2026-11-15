@@ -119,7 +119,7 @@ async fn load_sources(
             if sources.is_empty() {
                 warn!(
                     "Watching 0 upstream sources: no package could be indexed. Check the index \
-                     log lines above (entry point, select expression, nix-eval-jobs errors)."
+                     log lines above (entry point, select expression, iets eval-jobs errors)."
                 );
             } else {
                 info!("Watching {} unique upstream sources", sources.len());
@@ -134,7 +134,7 @@ async fn load_sources(
 }
 
 /// Sync and re-index every repo (sequentially: each index build already
-/// runs nix-eval-jobs with many workers).
+/// runs iets eval-jobs with many workers).
 ///
 /// With `reuse_within`, a repo whose last index is still reusable
 /// ([`index_reuse_remaining`]) is synced but not re-indexed. Returns how long

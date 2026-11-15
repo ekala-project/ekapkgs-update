@@ -4,7 +4,7 @@
 
 ### Batch Updates (`run`)
 
-- Evaluates all packages via `nix-eval-jobs`, checks upstream sources, and updates in parallel
+- Evaluates all packages via `iets eval-jobs` (replaces `nix-eval-jobs`; same output, about 3x faster on corepkgs), checks upstream sources, and updates in parallel
 - Worktree isolation by default — each update gets its own git worktree for safe concurrency
 - Branch mode alternative — serialized commits directly to the working tree
 - Automatic PR creation with rich bodies: changelogs, rebuild impact, CVE analysis, directory diffs, audit results

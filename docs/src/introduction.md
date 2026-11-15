@@ -65,7 +65,7 @@ ekapkgs-update uses a **two-service architecture**:
 │  ┌─────────────────────┐      ┌──────────────────────┐    │
 │  │ Release Checker     │─────▶│  Updater Service     │    │
 │  │                     │ chan │  (worker pool)       │    │
-│  │ - nix-eval-jobs     │ nel  │                      │    │
+│  │ - iets eval-jobs    │ nel  │                      │    │
 │  │ - VCS source lookup │      │  - Hash updates      │    │
 │  │ - Backoff filtering │      │  - Build & test      │    │
 │  │ - Repology check    │      │  - PR creation       │    │
@@ -82,7 +82,7 @@ ekapkgs-update uses a **two-service architecture**:
 
 ### Update Workflow
 
-1. **Discovery**: `nix-eval-jobs` evaluates your package set
+1. **Discovery**: `iets eval-jobs` evaluates your package set
 2. **Filtering**: Backoff mechanism skips recently-failed packages
 3. **Version Check**: Query upstream sources for new releases
 4. **Update**: Rewrite package file with new version and hashes

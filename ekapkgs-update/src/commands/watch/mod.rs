@@ -1,6 +1,6 @@
 //! Watch command: RSS/event-driven passive update mode.
 //!
-//! Instead of evaluating all packages via `nix-eval-jobs` on every run, the
+//! Instead of evaluating all packages via `iets eval-jobs` on every run, the
 //! watch command builds a reverse index mapping upstream sources to attr_paths,
 //! then polls RSS/Atom feeds and APIs for new releases.  When a new release is
 //! detected, it constructs an [`UpdateRequest`] and feeds it to the existing
@@ -46,10 +46,10 @@ use crate::github::{GithubRepo, parse_github_url};
 pub struct ResolvedRepo {
     /// Human-readable name (from config).
     pub name: String,
-    /// Absolute path of the file enumerated with nix-eval-jobs to build the
+    /// Absolute path of the file enumerated with iets eval-jobs to build the
     /// upstream index.
     pub enumerate_entry_point: String,
-    /// nix-eval-jobs `--select` applied to `enumerate_entry_point`.
+    /// iets eval-jobs `--select` applied to `enumerate_entry_point`.
     pub select: Option<String>,
     /// Absolute path of the file used to evaluate, locate and build individual
     /// packages. Attr paths from enumeration resolve against this file.
@@ -101,7 +101,7 @@ impl ResolvedRepo {
 pub struct WatchConfig {
     /// Nix file entry point to evaluate (single-repo legacy mode)
     pub file: String,
-    /// nix-eval-jobs `--select` for enumeration (single-repo legacy mode)
+    /// iets eval-jobs `--select` for enumeration (single-repo legacy mode)
     pub select: Option<String>,
     /// File for per-package evaluation (single-repo legacy mode); defaults to
     /// `file`
