@@ -12,7 +12,7 @@
   gnutar,
   xz,
   gh,
-  nix-eval-jobs,
+  iets,
   coreutils,
 }:
 
@@ -64,7 +64,7 @@ rustPlatform.buildRustPackage {
           nix
           git
           gh
-          nix-eval-jobs
+          iets
           gnutar
           xz
           coreutils

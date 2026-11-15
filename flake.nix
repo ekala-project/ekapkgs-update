@@ -2,11 +2,25 @@
   description = "Ekapkgs-update flake, a tool for updating and curating packages";
 
   inputs.ekapkgs.url = "github:ekala-project/ekapkgs";
+  # iets is not in ekapkgs; nix/iets.nix builds it from source.
+  inputs.iets-src.url = "github:numtide/iets";
+  inputs.iets-src.flake = false;
 
   outputs =
-    { self, ekapkgs }:
+    {
+      self,
+      ekapkgs,
+      iets-src,
+    }:
     let
-      localOverlay = import ./nix/overlay.nix;
+      # Build iets from the locked flake input rather than nix/iets.nix's
+      # flake.lock fallback.
+      localOverlay =
+        final: prev:
+        let
+          local = import ./nix/overlay.nix final prev;
+        in
+        local // { iets = local.iets.override { inherit iets-src; }; };
     in
     ekapkgs.lib.mkFlake {
       systems = [
@@ -20,7 +34,7 @@
         pkgs:
         {
           default = pkgs.ekapkgs-update;
-          inherit (pkgs) ekapkgs-update;
+          inherit (pkgs) ekapkgs-update iets;
         }
         # The dashboard's Elm frontend needs elm: ekapkgs' binary on
         # x86_64-linux, the overlay's upstream binary on aarch64-linux.
@@ -47,7 +61,7 @@
               rustfmt
               pkg-config
               sqlite
-              nix-eval-jobs
+              iets
               # cachix  # TODO: ghc-binary-9.8.4 segfaults; re-enable when fixed upstream
             ]
             # The web dashboard's Elm frontend (built by ekapkgs-update-web's

@@ -12,6 +12,9 @@ in
 
   ekapkgs-update = callPackage ./package.nix { };
 
+  # Evaluates package sets (`iets eval-jobs`). Not packaged in ekapkgs.
+  iets = callPackage ./iets.nix { };
+
   ekapkgs-update-web-frontend = callPackage ./package-web-frontend.nix { };
 
   ekapkgs-update-web = callPackage ./package-web.nix { };

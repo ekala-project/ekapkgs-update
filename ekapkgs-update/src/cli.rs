@@ -104,7 +104,7 @@ pub enum Commands {
         /// Nix file to evaluate
         #[arg(short, long, default_value = "default.nix")]
         file: String,
-        /// nix-eval-jobs `--select` function applied to the file before
+        /// iets eval-jobs `--select` function applied to the file before
         /// traversal, e.g. 'x: x.buildable' for an entry point that returns
         /// `{ buildable = ...; }`. Requires --eval-file.
         #[arg(long, value_name = "EXPR")]
@@ -526,7 +526,7 @@ pub enum Commands {
         /// Nix file to evaluate
         #[arg(short, long, default_value = "default.nix")]
         file: String,
-        /// nix-eval-jobs `--select` function applied to the file before
+        /// iets eval-jobs `--select` function applied to the file before
         /// traversal, e.g. 'x: x.buildable' for an entry point that returns
         /// `{ buildable = ...; }`. Requires --eval-file.
         #[arg(long, value_name = "EXPR")]

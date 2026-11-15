@@ -182,7 +182,7 @@ fn is_variant_name(segment: &str) -> bool {
 ///
 /// Returns `None` when the package is pinned and must not be auto-updated.
 /// Used where no batch evaluation has already reported mkManyVariants (the
-/// watch indexer gets that from its `nix-eval-jobs --apply` pass instead), so
+/// watch indexer gets that from its `iets eval-jobs --apply` pass instead), so
 /// every caller picks the same release for a package.
 pub async fn effective_strategy(
     eval_entry_point: &str,

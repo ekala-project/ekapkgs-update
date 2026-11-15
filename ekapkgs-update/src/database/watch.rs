@@ -91,10 +91,10 @@ impl SourceHealth {
 /// Outcome of building a repository's upstream index.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutcome {
-    /// `Some` when the index build failed (e.g. nix-eval-jobs crashed).
+    /// `Some` when the index build failed (e.g. iets eval-jobs crashed).
     pub error: Option<String>,
     pub duration_ms: i64,
-    /// Derivations produced by nix-eval-jobs.
+    /// Derivations produced by iets eval-jobs.
     pub evaluated: usize,
     /// Packages with a resolvable upstream source.
     pub indexed: usize,

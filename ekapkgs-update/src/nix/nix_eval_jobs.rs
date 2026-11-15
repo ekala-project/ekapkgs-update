@@ -1,3 +1,6 @@
+//! Types for the JSON lines `iets eval-jobs` prints, one per job: the format
+//! `nix-eval-jobs` introduced, which iets reproduces field for field.
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

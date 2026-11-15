@@ -1,6 +1,6 @@
-//! Evaluation result caching to avoid redundant nix-eval-jobs runs
+//! Evaluation result caching to avoid redundant iets eval-jobs runs
 //!
-//! This module provides caching for nix-eval-jobs evaluation results, keyed by git commit hash.
+//! This module provides caching for iets eval-jobs evaluation results, keyed by git commit hash.
 //! This is particularly useful for rebuild count analysis where we need to compare evaluations
 //! before and after updates.
 
@@ -14,7 +14,7 @@ use tokio::fs;
 use tracing::{debug, info};
 
 use super::nix_eval_jobs::{NixEvalDrv, NixEvalItem};
-use super::run_eval::run_nix_eval_jobs;
+use super::run_eval::run_eval_jobs;
 
 /// Cached evaluation result for a specific commit and eval file
 #[derive(Serialize, Deserialize, Debug)]
@@ -109,9 +109,9 @@ impl CachedEvaluation {
         }
     }
 
-    /// Perform a fresh evaluation using nix-eval-jobs
+    /// Perform a fresh evaluation using iets eval-jobs
     async fn evaluate_fresh(eval_file: &str) -> anyhow::Result<HashMap<String, DrvInfo>> {
-        let stream = run_nix_eval_jobs(eval_file.to_owned());
+        let stream = run_eval_jobs(eval_file.to_owned());
         let mut packages = HashMap::new();
 
         pin_mut!(stream);

@@ -547,7 +547,7 @@ in
         example = 12;
         description = ''
           How often (in hours) to rebuild the full upstream index via
-          `nix-eval-jobs`. The index maps upstream sources to Nix attr_paths.
+          `iets eval-jobs`. The index maps upstream sources to Nix attr_paths.
         '';
       };
 
@@ -594,7 +594,7 @@ in
                 default = "default.nix";
                 description = ''
                   Nix file (relative to the repo root) enumerated with
-                  `nix-eval-jobs` to discover packages.
+                  `iets eval-jobs` to discover packages.
                 '';
               };
               select = lib.mkOption {
@@ -602,7 +602,7 @@ in
                 default = null;
                 example = "x: x.buildable";
                 description = ''
-                  `nix-eval-jobs --select` function applied to
+                  `iets eval-jobs --select` function applied to
                   `entrypoint`, for entry points that return nested sets
                   (e.g. `{ buildable = ...; }`) instead of the packages
                   themselves. Dotted keys in the selected set (`"cmake.v4"`)

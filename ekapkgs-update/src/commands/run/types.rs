@@ -3,7 +3,7 @@
 pub struct UpdateRequest {
     pub attr_path: String,
     /// Derivation store path for failure recording. `None` when the request
-    /// originates from a source that doesn't have nix-eval-jobs output (e.g.
+    /// originates from a source that doesn't have iets eval-jobs output (e.g.
     /// the `watch` command).
     pub drv_path: Option<String>,
     pub current_version: String,

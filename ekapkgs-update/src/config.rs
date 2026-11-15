@@ -74,12 +74,12 @@ pub struct RepoConfig {
     /// GitHub) or a full URL like `github.com/owner/repo`.
     pub upstream: String,
 
-    /// Nix file (relative to the repo root) enumerated with `nix-eval-jobs`
+    /// Nix file (relative to the repo root) enumerated with `iets eval-jobs`
     /// to discover packages.
     #[serde(default = "default_entrypoint")]
     pub entrypoint: String,
 
-    /// Optional nix-eval-jobs `--select` function applied to `entrypoint`
+    /// Optional iets eval-jobs `--select` function applied to `entrypoint`
     /// before traversal, e.g. `x: x.buildable` when the entry point returns
     /// `{ buildable = { ... }; }` instead of the packages themselves. Dotted
     /// keys in the selected set (`"cmake.v4"`) are treated as attribute paths.

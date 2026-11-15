@@ -19,7 +19,7 @@ ekapkgs-update watch
 ```
 startup ── recover interrupted state ── register repos
    │
-   ├─ for each repo: sync (fast-forward) ── index (nix-eval-jobs)
+   ├─ for each repo: sync (fast-forward) ── index (iets eval-jobs)
    │
    ├─ poll immediately (bootstrap: record baselines, dispatch nothing)
    │
@@ -53,7 +53,7 @@ current directory is never fetched or merged (`unmanaged`).
 
 ### 2. Index
 
-`nix-eval-jobs` evaluates the repository. For each package, the indexer
+`iets eval-jobs` evaluates the repository. For each package, the indexer
 records the following in `upstream_index`:
 
 - the upstream source

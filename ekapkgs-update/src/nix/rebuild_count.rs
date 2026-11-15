@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::eval_cache::{CachedEvaluation, DrvInfo, extract_hash_from_drv_path};
 use super::nix_eval_jobs::NixEvalItem;
-use super::run_eval::run_nix_eval_jobs;
+use super::run_eval::run_eval_jobs;
 
 /// Results of a rebuild analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ async fn evaluate_in_worktree(
 
     debug!("Evaluating in worktree: {}", eval_file_str);
 
-    let stream = run_nix_eval_jobs(eval_file_str);
+    let stream = run_eval_jobs(eval_file_str);
     let mut packages = HashMap::new();
 
     pin_mut!(stream);

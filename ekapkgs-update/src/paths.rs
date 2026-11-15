@@ -6,8 +6,8 @@
 //! incantation (and the associated error handling) inline.
 //!
 //! Layout under the cache root:
-//! - `eval-cache/{commit}-{file_hash}.json` — cached `nix-eval-jobs` output
-//! - `logs/nix-eval-jobs.stderr.log` — captured stderr from nix-eval-jobs
+//! - `eval-cache/{commit}-{file_hash}.json` — cached `iets eval-jobs` output
+//! - `logs/eval-jobs.<entry-point>.stderr.log` — captured stderr from iets eval-jobs
 //! - `worktrees/update-{attr-path}/` — per-package git worktrees
 //! - `updates.db` — SQLite tracking database (default location)
 //!
@@ -43,7 +43,7 @@ pub fn cache_dir() -> Result<Utf8PathBuf> {
         .map_err(|p| anyhow::anyhow!("Cache directory path is not valid UTF-8: {}", p.display()))
 }
 
-/// Returns the directory used to store cached `nix-eval-jobs` results.
+/// Returns the directory used to store cached `iets eval-jobs` results.
 ///
 /// # Errors
 /// Propagates errors from [`cache_dir`].
@@ -51,7 +51,7 @@ pub fn eval_cache_dir() -> Result<Utf8PathBuf> {
     Ok(cache_dir()?.join("eval-cache"))
 }
 
-/// Returns the directory used to store nix-eval-jobs stderr logs.
+/// Returns the directory used to store iets eval-jobs stderr logs.
 ///
 /// # Errors
 /// Propagates errors from [`cache_dir`].

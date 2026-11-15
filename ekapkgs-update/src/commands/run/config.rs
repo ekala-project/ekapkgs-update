@@ -47,10 +47,10 @@ pub fn warn_if_branch_concurrency_ignored(commit_strategy: CommitStrategy, reque
 /// Configuration for automated run mode
 #[derive(Debug, Clone, Serialize)]
 pub struct RunConfig {
-    /// Nix file entry point enumerated with nix-eval-jobs
+    /// Nix file entry point enumerated with iets eval-jobs
     pub file: String,
 
-    /// nix-eval-jobs `--select` applied to `file` before traversal
+    /// iets eval-jobs `--select` applied to `file` before traversal
     pub select: Option<String>,
 
     /// Nix file attr paths are evaluated, located and built against.
@@ -206,7 +206,7 @@ impl RunConfig {
         let eval_file = eval_file.unwrap_or_else(|| file.clone());
 
         info!(
-            "Running nix-eval-jobs on: {}{}",
+            "Running iets eval-jobs on: {}{}",
             file,
             select
                 .as_deref()
