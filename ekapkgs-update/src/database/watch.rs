@@ -5,10 +5,13 @@
 //! These tables are written by `ekapkgs-update watch` and read by the web
 //! dashboard's Watch page.
 
-use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use std::collections::HashMap;
 
-use super::Database;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use sqlx::Row;
+
+use super::{Database, parse_rfc3339};
 
 /// Static configuration of a watched repository.
 #[derive(Debug, Clone, Default)]
@@ -73,6 +76,16 @@ impl SourceHealth {
             Self::Moved => "moved",
         }
     }
+
+    /// Parse a stored value; unknown values are treated as [`Self::Ok`].
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "error" => Self::Error,
+            "not_found" => Self::NotFound,
+            "moved" => Self::Moved,
+            _ => Self::Ok,
+        }
+    }
 }
 
 /// Outcome of building a repository's upstream index.
@@ -89,7 +102,31 @@ pub struct IndexOutcome {
     pub skipped: usize,
     /// Evaluation errors.
     pub errors: usize,
+    /// What the index was built from (see [`RepoIndexState::config`]).
+    pub config: Option<String>,
 }
+
+/// A repo's last index build, as recorded in `watched_repos`.
+#[derive(Debug, Clone, Default)]
+pub struct RepoIndexState {
+    /// `indexing`, `ok` or `error`.
+    pub status: Option<String>,
+    pub last_indexed_at: Option<DateTime<Utc>>,
+    pub indexed_count: i64,
+    /// Fingerprint of the binary, entry points and select expression the
+    /// index was built from.
+    pub config: Option<String>,
+}
+
+/// When an upstream source was last polled, and how that went.
+#[derive(Debug, Clone, Copy)]
+pub struct SourcePollState {
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub health: SourceHealth,
+}
+
+/// `(upstream_type, upstream_key, instance)`, instance `''` when absent.
+pub type SourceKey = (String, String, String);
 
 /// Kind of a `watch_cycles` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +311,7 @@ impl Database {
                 indexed_count = ?,
                 index_skipped = ?,
                 index_errors = ?,
+                index_config = ?,
                 updated_at = ?
             WHERE name = ?
             "#,
@@ -286,6 +324,7 @@ impl Database {
         .bind(to_i64(outcome.indexed))
         .bind(to_i64(outcome.skipped))
         .bind(to_i64(outcome.errors))
+        .bind(outcome.config.as_deref())
         .bind(&now)
         .bind(name)
         .execute(&self.pool)
@@ -296,6 +335,24 @@ impl Database {
 
     /// Record the first completed poll for a repository (baselines recorded).
     /// Later calls keep the original timestamp.
+    /// The repo's last recorded index build (`None` for an unknown repo).
+    pub async fn repo_index_state(&self, name: &str) -> Result<Option<RepoIndexState>> {
+        let row = sqlx::query(
+            "SELECT index_status, last_indexed_at, indexed_count, index_config \
+             FROM watched_repos WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .context("read repo index state")?;
+        Ok(row.map(|row| RepoIndexState {
+            status: row.get("index_status"),
+            last_indexed_at: parse_rfc3339(row.get("last_indexed_at")),
+            indexed_count: row.get::<Option<i64>, _>("indexed_count").unwrap_or(0),
+            config: row.get("index_config"),
+        }))
+    }
+
     pub async fn mark_repo_bootstrapped(&self, name: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -442,6 +499,33 @@ impl Database {
     }
 
     // ── upstream_sources ─────────────────────────────────────────────
+
+    /// When every recorded upstream source was last polled, and its health.
+    pub async fn source_poll_states(&self) -> Result<HashMap<SourceKey, SourcePollState>> {
+        let rows = sqlx::query(
+            "SELECT upstream_type, upstream_key, instance, last_polled_at, health \
+             FROM upstream_sources",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("read upstream source poll state")?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    (
+                        row.get("upstream_type"),
+                        row.get("upstream_key"),
+                        row.get("instance"),
+                    ),
+                    SourcePollState {
+                        last_polled_at: parse_rfc3339(row.get("last_polled_at")),
+                        health: SourceHealth::parse(row.get::<&str, _>("health")),
+                    },
+                )
+            })
+            .collect())
+    }
 
     /// Record the result of polling an upstream source.
     ///
@@ -601,6 +685,7 @@ mod tests {
                 indexed: 7,
                 skipped: 2,
                 errors: 1,
+                config: None,
             },
         )
         .await
@@ -843,5 +928,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health(&db).await, ("ok".to_owned(), None));
+    }
+
+    #[tokio::test]
+    async fn resume_state_readers() {
+        let db = setup_db().await;
+        assert!(db.repo_index_state("core").await.unwrap().is_none());
+        db.upsert_watched_repo(&WatchedRepoInfo {
+            name: "core",
+            path: "/r",
+            entrypoint: "/r/default.nix",
+            ..WatchedRepoInfo::default()
+        })
+        .await
+        .unwrap();
+        db.record_repo_index_result(
+            "core",
+            &IndexOutcome {
+                indexed: 7,
+                config: Some("cfg".to_owned()),
+                ..IndexOutcome::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = db.repo_index_state("core").await.unwrap().unwrap();
+        assert_eq!(state.status.as_deref(), Some("ok"));
+        assert_eq!(state.indexed_count, 7);
+        assert_eq!(state.config.as_deref(), Some("cfg"));
+        assert!(state.last_indexed_at.is_some());
+
+        db.record_source_poll(
+            "gitlab",
+            "o/r",
+            Some("gitlab.gnome.org"),
+            &SourcePoll::Failure {
+                error: "404",
+                health: SourceHealth::NotFound,
+            },
+        )
+        .await
+        .unwrap();
+        let states = db.source_poll_states().await.unwrap();
+        let state = states
+            .get(&(
+                "gitlab".to_owned(),
+                "o/r".to_owned(),
+                "gitlab.gnome.org".to_owned(),
+            ))
+            .unwrap();
+        assert_eq!(state.health, SourceHealth::NotFound);
+        assert!(state.last_polled_at.is_some());
     }
 }

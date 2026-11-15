@@ -242,6 +242,7 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 **Event loop** (`commands/watch/listener.rs`):
 
 - The first poll runs immediately after the startup index. After that, polls run every `poll_interval`, and sync + re-index runs every `index_refresh`.
+- **Restarts resume from the database.** At startup every repo is synced, but a repo's index is reused when its last build succeeded within `index_refresh`, indexed something, and has the same `watched_repos.index_config` (`index_config`: binary path, entry points, `select`; a new deploy or config change re-indexes; `index_reuse_remaining`). The re-index timer starts from the oldest reused index. Each poll cycle only polls sources that are due by `upstream_sources.last_polled_at` (`source_due`: half a poll interval of slack; `not_found` sources daily); a cycle with nothing due records no `watch_cycles` row.
 - Each poll is a `watch_cycles` row. Each source's health is recorded in `upstream_sources`, and each package's observation in `updates` (`record_observation`).
 - **Observe-only bootstrap:** the first observation of a package records `baseline_version` and dispatches nothing. Only releases newer than the baseline are dispatched; the backlog is left to `run`.
 - `dispatch_decision` (pure, unit-tested) evaluates, in order: Baseline, UpToDate, Backlog, AlreadyProposed, Backoff (same failed version only), Dispatch.

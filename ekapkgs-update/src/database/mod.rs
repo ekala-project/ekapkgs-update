@@ -58,8 +58,8 @@ use tracing::{debug, info, warn};
 pub use types::{FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus};
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
 pub use watch::{
-    IndexOutcome, RepoSyncStatus, SourceHealth, SourcePoll, WatchCycleKind, WatchCycleStats,
-    WatchedRepoInfo,
+    IndexOutcome, RepoIndexState, RepoSyncStatus, SourceHealth, SourceKey, SourcePoll,
+    SourcePollState, WatchCycleKind, WatchCycleStats, WatchedRepoInfo,
 };
 
 use crate::vcs_sources::{SemverStrategy, VersionPolicy};
