@@ -226,7 +226,8 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
   (Semaphore-limited)         per-entry VersionPolicy, backoff, open-PR guard, alias dedup
         │ new version detected
         ▼
-  sync affected checkouts, create session, run_service ──── per-request overrides for
+  dispatched per source as polled: on first dispatch create session + spawn run_service;
+  sync each repo before its first update; requests streamed ──── per-request overrides for
                                                               eval_entry_point, pr_config, fork
 ```
 
@@ -234,7 +235,7 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 
 **Repo provisioning** (`commands/watch/mod.rs`): On startup, clones repos that don't exist and creates GitHub forks via API if needed. Resolves each `RepoConfig` into a `ResolvedRepo` with absolute paths and `PrConfig` (`managed = true`; legacy single-repo mode is `managed = false`, name `''`, the user's own working copy). Then it closes out state left by a killed process (`recover_interrupted_watch_state`), registers repos in `watched_repos` and forgets repos removed from the config (`retain_watched_repos`, which also drops their `upstream_index` rows).
 
-**Sync** (`commands/watch/sync.rs`): At startup, before every index build and before every batch of updates (only the repos the batch touches), managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten, and unmanaged checkouts are never fetched or merged. Worktrees are created from `HEAD`, so this is what keeps updates current.
+**Sync** (`commands/watch/sync.rs`): At startup, before every index build and before a repo's first update in each poll cycle, managed checkouts are fetched from the remote matching the upstream, then fast-forwarded (`merge --ff-only`) to `<remote>/<base>`. Divergence, or a non-base branch checked out, is logged and recorded as `diverged`, and the stale tree is kept. History is never rewritten, and unmanaged checkouts are never fetched or merged. Worktrees are created from `HEAD`, so this is what keeps updates current.
 
 **Index builder** (`commands/watch/index.rs`): One `iets eval-jobs` pass per repo with an `--apply` function (`INDEX_APPLY_EXPR`) that extracts version, pname, description, homepage, source URLs, `meta.position`, variants/Python flags and `passthru.ekapkgs-update` settings — no per-package `nix-instantiate` (that took hours). Skips packages defined outside the repo (`meta.position` in the Nix store), pinned variants, opt-outs and packages without a recognizable upstream (the pname→PyPI guess is only allowed for Python packages). The strategy comes from `infer_update_strategy(...).resolve(has_variants)`. Entries (with `drv_path` and the `VersionPolicy`) are written in one transaction by `replace_upstream_index`, which also prunes the repo's stale rows unless the evaluation looks incomplete (stream error, nothing evaluated, or under half the previous count; `prune_decision`). Every indexed package is registered in `updates` (`upsert_package_info`).
 
@@ -250,7 +251,8 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 - **Observe-only bootstrap:** the first observation of a package records `baseline_version` and dispatches nothing. Only releases newer than the baseline are dispatched; the backlog is left to `run`.
 - `dispatch_decision` (pure, unit-tested) evaluates, in order: Baseline, UpToDate, Backlog, AlreadyProposed, Backoff (same failed version only), Dispatch.
 - `resolve_siblings` collapses aliases (same repo, current and target version) to the shortest attr path.
-- **Lazy sessions:** an update session (`SessionMode::Watch`) is created only when a cycle dispatches at least one update. Dispatched requests carry the indexed `drv_path` and the repo's `eval_entry_point`, `pr_config` and `fork`.
+- **Streaming dispatch:** updates are dispatched as soon as their source has been polled, not after the whole sweep (`Dispatcher` in `listener.rs`), so builds overlap polling. The cycle still waits for every dispatched update before it ends.
+- **Lazy sessions:** an update session (`SessionMode::Watch`) and its `run_service` task are created on a cycle's first dispatch. Dispatched requests carry the indexed `drv_path` and the repo's `eval_entry_point`, `pr_config` and `fork`.
 - Polling volume: one feed request per source per cycle (~5k sources for corepkgs+ekapkgs), so keep the poll interval in the tens of minutes or more.
 
 **NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database (`/var/lib/ekapkgs-update/updates.db` via the generated config file), `Restart=always`. `watch.repos` option configures multi-repo mode (`select`, `evalEntrypoint`). Module notes:
@@ -536,7 +538,7 @@ API integrations (via reqwest):
 4. **Extra nix-build args** — Set once via `OnceLock` in `commands/update/build.rs`. Second call is a no-op.
 5. **Database pool** — `Database` is `Clone` (shared pool). Safe to pass across async tasks.
 6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only single-shot CLI commands (`retry`, `apply`) change the cwd.
-7. **Managed checkout sync** — `sync::sync_repo` only runs from the watch loop between events (startup, re-index, before an update batch), never while update worktrees are being created. Do not call it concurrently with `perform_update`.
+7. **Managed checkout sync** — `sync::sync_repo` only runs from the watch loop: at startup, at re-index, and in a poll cycle before a repo's first update is sent (other repos' updates may be running then, but never that repo's). Do not call it concurrently with `perform_update` on the same repo.
 8. **Worktree paths** — `perform_update` resolves the repo root with `git rev-parse --show-toplevel` and maps both the entry point and the package file into the worktree relative to it. Files outside the repository (e.g. `meta.position` in the Nix store) are skipped, never edited.
 9. **Package attribute expressions** — select packages as `let pkgs = import <entry> { }; in pkgs.<attr>`, never `with import <entry> { }; <attr>`. Attr paths can be quoted (`"389-ds-base"`), which is not an expression under `with`, and bare names under `with` lose to builtins such as `map` or `toString`.
 
