@@ -161,7 +161,7 @@ pub async fn create_pr_for_update(
     info!("Pushed branch '{}' to remote", branch_name);
 
     // Create pull request
-    let pr_title = format!("{}: {} -> {}", attr_path, metadata.version, new_version);
+    let pr_title = crate::git::update_title(attr_path, &metadata.version, new_version);
     let pr_body = create_pr_body(attr_path, metadata, new_version, diff_markdown.as_deref());
 
     debug!("Creating pull request");
@@ -189,18 +189,16 @@ fn create_commit_message(
     new_version: &str,
     tests_passed: bool,
 ) -> String {
-    if tests_passed {
-        format!(
-            "Update {attr_path} from {old_version} to {new_version}\n\nTests: passthru.tests \
-             passed\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
-             <noreply@ekapkgs.org>"
-        )
+    let title = crate::git::update_title(attr_path, old_version, new_version);
+    let tests = if tests_passed {
+        "\n\nTests: passthru.tests passed"
     } else {
-        format!(
-            "Update {attr_path} from {old_version} to {new_version}\n\n🤖 Generated with \
-             ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>"
-        )
-    }
+        ""
+    };
+    format!(
+        "{title}{tests}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
+         <noreply@ekapkgs.org>"
+    )
 }
 
 /// Create PR body with package metadata

@@ -222,6 +222,12 @@ pub async fn cleanup_worktree(repo_dir: &Path, worktree_path: &Path) -> anyhow::
     Ok(())
 }
 
+/// Title of an update: the commit subject and PR title, e.g. `python3Packages.foo: 1.0 -> 1.1`.
+#[must_use]
+pub fn update_title(attr_path: &str, old_version: &str, new_version: &str) -> String {
+    format!("{attr_path}: {old_version} -> {new_version}")
+}
+
 /// Create a git branch, commit changes, and push to remote
 /// Returns the branch name
 ///
@@ -263,8 +269,9 @@ pub async fn create_and_push_branch(
 
     // Create commit message
     let commit_message = format!(
-        "Update {attr_path} from {old_version} to {new_version}\n\n🤖 Generated with \
-         ekapkgs-update\n\nCo-Authored-By: ekapkgs-update <noreply@ekapkgs.org>"
+        "{}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
+         <noreply@ekapkgs.org>",
+        update_title(attr_path, old_version, new_version)
     );
 
     // Commit changes
@@ -519,6 +526,14 @@ async fn get_default_branch(cwd: Option<&Path>, remote: &str) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_title_uses_attr_path_arrow_format() {
+        assert_eq!(
+            update_title("python3Packages.requests", "2.31.0", "2.32.0"),
+            "python3Packages.requests: 2.31.0 -> 2.32.0"
+        );
+    }
 
     #[test]
     fn pr_head_qualifies_fork_branches() {

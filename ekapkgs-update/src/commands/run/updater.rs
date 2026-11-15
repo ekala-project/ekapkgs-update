@@ -971,7 +971,7 @@ pub(super) async fn perform_direct_update(
         )
         .await;
 
-    let commit_msg = format!("{attr_path}: {current_version} -> {new_version}");
+    let commit_msg = crate::git::update_title(attr_path, current_version, new_version);
 
     match update_result {
         Ok((removed_patches, test_result)) => {
@@ -1200,7 +1200,7 @@ async fn create_pr_for_update(
         .flatten();
 
     // Create PR title and body
-    let title = format!("Update {attr_path} from {old_version} to {new_version}");
+    let title = crate::git::update_title(attr_path, old_version, new_version);
     let mut body = format!(
         "## Summary\n\nThis PR updates `{attr_path}` from version {old_version} to \
          {new_version}.\n\n## Changes\n\n- Updated package version\n- Updated source hash"
@@ -1366,7 +1366,7 @@ async fn prompt_for_pr_confirmation(
     let branch_name = format!("update/{sanitized_attr}/{new_version}");
 
     // Create PR title
-    let title = format!("Update {attr_path} from {old_version} to {new_version}");
+    let title = crate::git::update_title(attr_path, old_version, new_version);
 
     // Build PR body (same logic as in create_pr_for_update, but simplified for preview)
     let mut body = format!(

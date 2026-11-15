@@ -70,10 +70,11 @@ pub async fn create_git_commit(
     }
 
     // Create commit with formatted message
+    let title = crate::git::update_title(attr_path, old_version, new_version);
     let commit_message = if tests_passed {
-        format!("{attr_path}: {old_version} -> {new_version}\n\nTests: passthru.tests passed")
+        format!("{title}\n\nTests: passthru.tests passed")
     } else {
-        format!("{attr_path}: {old_version} -> {new_version}")
+        title
     };
     let commit_output = Command::new("git")
         .args(["commit", "-m", &commit_message])
