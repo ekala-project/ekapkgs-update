@@ -350,7 +350,16 @@ impl UpstreamSource {
             });
         }
         if let Some(rest) = url.strip_prefix("mirror://sourceforge/") {
-            let pname = rest.split('/').next()?;
+            // Also seen: mirror://sourceforge/project/<pkg>/... and
+            // mirror://sourceforge//<pkg>/...
+            let mut segments = rest.split('/').filter(|s| !s.is_empty()).peekable();
+            if segments
+                .peek()
+                .is_some_and(|s| *s == "project" || *s == "projects")
+            {
+                segments.next();
+            }
+            let pname = segments.next()?;
             return Some(UpstreamSource::DirectoryListing {
                 base_url: format!("https://sourceforge.net/projects/{pname}/files/"),
                 pname: pname.to_owned(),

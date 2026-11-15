@@ -80,6 +80,28 @@ fn test_from_url_pypi_mirror_single_letter() {
 }
 
 #[test]
+fn test_from_url_sourceforge_mirror_shapes() {
+    for url in [
+        "mirror://sourceforge/conspy/conspy-1.16.tar.gz",
+        "mirror://sourceforge/project/conspy/conspy-1.16-1/conspy-1.16.tar.gz",
+        "mirror://sourceforge/projects/conspy/files/conspy-1.16.tar.gz",
+        "mirror://sourceforge//conspy/files/conspy-1.16.tar.gz",
+    ] {
+        let source = UpstreamSource::from_url(url);
+        assert!(
+            matches!(
+                source,
+                Some(UpstreamSource::DirectoryListing { ref base_url, ref pname })
+                    if pname == "conspy"
+                        && base_url == "https://sourceforge.net/projects/conspy/files/"
+            ),
+            "{url}: {source:?}"
+        );
+    }
+    assert!(UpstreamSource::from_url("mirror://sourceforge/project/").is_none());
+}
+
+#[test]
 fn test_description_github() {
     let source = UpstreamSource::GitHub {
         owner: "owner".to_owned(),
