@@ -39,6 +39,10 @@ pub(super) struct DirtyEntry {
     pub path: String,
     /// The path does not exist in `HEAD` (untracked, or newly added to the index).
     pub new_file: bool,
+    /// The deletion is already staged (`git rm`, e.g. by a Claude fix): the path
+    /// is in neither the index nor the worktree, so `git add` must not be given
+    /// it (an unmatched pathspec aborts the whole `git add`).
+    pub staged_deletion: bool,
 }
 
 /// Snapshot of the working tree taken before an update.
@@ -78,15 +82,18 @@ pub(super) fn parse_porcelain_z(output: &[u8]) -> Vec<DirtyEntry> {
         entries.push(DirtyEntry {
             path: path.to_owned(),
             new_file,
+            staged_deletion: index == 'D',
         });
 
         // Renames and copies are followed by the original path.
         if matches!(index, 'R' | 'C') {
             if let Some(orig) = tokens.next() {
                 if index == 'R' {
+                    // The rename already stages the original path's removal.
                     entries.push(DirtyEntry {
                         path: orig.to_owned(),
                         new_file: false,
+                        staged_deletion: true,
                     });
                 }
             }
@@ -154,7 +161,14 @@ impl DirtySnapshot {
     }
 
     /// Stage the package directory plus every path dirtied since the snapshot.
-    pub(super) async fn stage(&self, attr_path: &str, pkg_dir: &str) {
+    ///
+    /// Deletions that are already staged are left out of `git add`: the path
+    /// no longer matches anything, and git would reject the whole command.
+    ///
+    /// # Errors
+    /// If `git add` fails. The index may then hold only part of the update
+    /// (whatever the update staged itself), so the caller must not commit it.
+    pub(super) async fn stage(&self, attr_path: &str, pkg_dir: &str) -> anyhow::Result<()> {
         let introduced = match self.introduced().await {
             Ok(entries) => entries,
             Err(e) => {
@@ -163,24 +177,33 @@ impl DirtySnapshot {
             },
         };
 
-        let extra: Vec<&str> = introduced.iter().map(|e| e.path.as_str()).collect();
+        let extra: Vec<&str> = introduced
+            .iter()
+            .filter(|e| !e.staged_deletion)
+            .map(|e| e.path.as_str())
+            .collect();
         if !extra.is_empty() {
             debug!("{}: Staging changed paths: {}", attr_path, extra.join(", "));
         }
 
-        let mut args = vec!["add", "-A", "--", pkg_dir];
-        args.extend(extra);
-        match git(&self.root, &args).await {
-            Ok(output) if !output.status.success() => {
-                warn!(
-                    "{}: git add failed: {}",
-                    attr_path,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            },
-            Err(e) => warn!("{}: Failed to stage changes: {:#}", attr_path, e),
-            Ok(_) => {},
+        let mut args = vec!["add", "-A", "--"];
+        // A package directory the update removed entirely has nothing left
+        // to add; its removal is staged or listed in `extra`.
+        if Path::new(pkg_dir).exists() {
+            args.push(pkg_dir);
         }
+        args.extend(extra);
+        if args.len() == 3 {
+            return Ok(());
+        }
+        let output = git(&self.root, &args).await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     /// Restore every path dirtied since the snapshot (in `pkg_dir` or
@@ -278,6 +301,15 @@ mod tests {
         DirtyEntry {
             path: path.to_owned(),
             new_file,
+            staged_deletion: false,
+        }
+    }
+
+    fn staged_deletion(path: &str) -> DirtyEntry {
+        DirtyEntry {
+            path: path.to_owned(),
+            new_file: false,
+            staged_deletion: true,
         }
     }
 
@@ -292,10 +324,11 @@ mod tests {
             ),
             (b"A  new.nix\0", vec![entry("new.nix", true)]),
             (b" D gone.nix\0", vec![entry("gone.nix", false)]),
+            (b"D  removed.nix\0", vec![staged_deletion("removed.nix")]),
             (b"MM both.nix\0", vec![entry("both.nix", false)]),
             (
                 b"R  new name.nix\0old name.nix\0",
-                vec![entry("new name.nix", true), entry("old name.nix", false)],
+                vec![entry("new name.nix", true), staged_deletion("old name.nix")],
             ),
             (b"C  copy.nix\0orig.nix\0", vec![entry("copy.nix", true)]),
             (
@@ -423,7 +456,10 @@ mod tests {
         let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
         simulate_update(&root);
 
-        snapshot.stage("foo", &pkg_dir.to_string_lossy()).await;
+        snapshot
+            .stage("foo", &pkg_dir.to_string_lossy())
+            .await
+            .unwrap();
 
         let out = git(&root, &["diff", "--cached", "--name-only"])
             .await
@@ -441,5 +477,73 @@ mod tests {
                 "shared.nix"
             ]
         );
+    }
+
+    /// A Claude fix that `git rm`s a file (blake3's Cargo.lock) next to the
+    /// version bump: the whole update is staged, not just the deletion.
+    #[tokio::test]
+    async fn test_stage_with_deletion_already_staged() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let pkg_dir = root.join("pkgs/foo");
+        std::fs::write(pkg_dir.join("Cargo.lock"), "lock").unwrap();
+        sh(&root, &["add", "pkgs/foo/Cargo.lock"]).await;
+        sh(&root, &["commit", "-q", "-m", "lock"]).await;
+
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        std::fs::write(pkg_dir.join("default.nix"), "v2").unwrap();
+        std::fs::write(root.join("shared.nix"), "fixed").unwrap();
+        sh(&root, &["rm", "-q", "pkgs/foo/Cargo.lock"]).await;
+
+        snapshot
+            .stage("foo", &pkg_dir.to_string_lossy())
+            .await
+            .unwrap();
+
+        let out = git(&root, &["diff", "--cached", "--name-status"])
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "D\tpkgs/foo/Cargo.lock\nM\tpkgs/foo/default.nix\nM\tshared.nix\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage_reports_git_add_failure() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let pkg_dir = root.join("pkgs/foo");
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        simulate_update(&root);
+        // Another git process holds the index.
+        std::fs::write(root.join(".git/index.lock"), "").unwrap();
+
+        let err = snapshot
+            .stage("foo", &pkg_dir.to_string_lossy())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("git add failed"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_revert_restores_staged_deletion() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let pkg_dir = root.join("pkgs/foo");
+        std::fs::write(pkg_dir.join("Cargo.lock"), "lock").unwrap();
+        sh(&root, &["add", "pkgs/foo/Cargo.lock"]).await;
+        sh(&root, &["commit", "-q", "-m", "lock"]).await;
+
+        let snapshot = DirtySnapshot::take(&pkg_dir).await.unwrap();
+        std::fs::write(pkg_dir.join("default.nix"), "v2").unwrap();
+        sh(&root, &["rm", "-q", "pkgs/foo/Cargo.lock"]).await;
+
+        snapshot.revert("foo", &pkg_dir.to_string_lossy()).await;
+
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+        assert_eq!(read("pkgs/foo/Cargo.lock"), "lock");
+        assert_eq!(read("pkgs/foo/default.nix"), "v1");
+        assert_eq!(status_of(&root, "pkgs/foo").await, "");
     }
 }

@@ -801,17 +801,23 @@ async fn take_snapshot(
 /// Stage and commit a branch-mode update. Must be called with the git mutex
 /// held.
 ///
-/// If the commit fails (pre-commit hook, missing identity, nothing staged),
-/// every path the update dirtied is reverted, index included, so that its
-/// edits are not swept into the next update's commit.
+/// If staging or the commit fails (`git add` error, pre-commit hook, missing
+/// identity, nothing staged), every path the update dirtied is reverted, index
+/// included, so that its edits are not swept into the next update's commit.
 async fn commit_or_revert(
     snapshot: &super::branch_git::DirtySnapshot,
     attr_path: &str,
     pkg_dir: &str,
     commit_msg: &str,
 ) -> anyhow::Result<()> {
-    snapshot.stage(attr_path, pkg_dir).await;
-    if let Err(e) = git_commit(pkg_dir, commit_msg).await {
+    // A partial index must never be committed: without the version bump the
+    // commit would claim an update it doesn't contain, and the rest would be
+    // left dirty for the next update to ignore.
+    let committed = match snapshot.stage(attr_path, pkg_dir).await {
+        Ok(()) => git_commit(pkg_dir, commit_msg).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = committed {
         info!(
             "{}: Reverting {} after failed commit...",
             attr_path, pkg_dir
