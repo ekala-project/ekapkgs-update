@@ -4,8 +4,11 @@ use std::sync::OnceLock;
 
 use anyhow::Context;
 use regex::Regex;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+use crate::vcs_sources::HttpStatusError;
 
 /// SourceHut GraphQL tag/reference information
 #[derive(Debug, Deserialize)]
@@ -13,43 +16,73 @@ pub struct SourcehutReference {
     pub name: String,
 }
 
-/// Response from the references query
+/// One page of a repository's references.
 #[derive(Debug, Deserialize)]
-struct ReferencesData {
+struct ReferenceCursor {
     results: Vec<SourcehutReference>,
+    cursor: Option<String>,
 }
 
-/// Repository data from the GraphQL API
 #[derive(Debug, Deserialize)]
 struct RepositoryData {
-    references: ReferencesData,
+    references: ReferenceCursor,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserData {
+    repository: Option<RepositoryData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseData {
+    user: Option<UserData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlError {
+    message: String,
 }
 
 /// Top-level GraphQL response
 #[derive(Debug, Deserialize)]
 struct GraphqlResponse {
     data: Option<ResponseData>,
-}
-
-/// Data field in the GraphQL response
-#[derive(Debug, Deserialize)]
-struct ResponseData {
-    repository: Option<RepositoryData>,
+    #[serde(default)]
+    errors: Vec<GraphqlError>,
 }
 
 /// GraphQL query variables
 #[derive(Debug, Serialize)]
-struct QueryVariables {
-    owner: String,
-    name: String,
+struct QueryVariables<'a> {
+    username: &'a str,
+    name: &'a str,
+    cursor: Option<&'a str>,
 }
 
 /// GraphQL query payload
 #[derive(Debug, Serialize)]
-struct GraphqlQuery {
-    query: String,
-    variables: QueryVariables,
+struct GraphqlQuery<'a> {
+    query: &'static str,
+    variables: QueryVariables<'a>,
 }
+
+/// git.sr.ht looks repositories up by owner and name through `user`; the
+/// top-level `repository` field only takes a resource ID.
+const REFERENCES_QUERY: &str = r"
+    query($username: String!, $name: String!, $cursor: Cursor) {
+        user(username: $username) {
+            repository(name: $name) {
+                references(cursor: $cursor) {
+                    results { name }
+                    cursor
+                }
+            }
+        }
+    }
+";
+
+/// Upper bound on reference pages fetched per repository.
+const MAX_REFERENCE_PAGES: usize = 20;
 
 /// Represents a SourceHut repository with owner and name
 #[derive(Debug)]
@@ -111,82 +144,87 @@ pub async fn fetch_sourcehut_tags(
     token: Option<&str>,
 ) -> anyhow::Result<Vec<SourcehutReference>> {
     let url = "https://git.sr.ht/query";
+    let username = owner.trim_start_matches('~');
 
-    debug!("Fetching tags from SourceHut for {}/{}", owner, repo);
-
-    // GraphQL query to fetch all references
-    let query = r#"
-        query($owner: String!, $name: String!) {
-            repository(owner: $owner, name: $name) {
-                references {
-                    results {
-                        name
-                    }
-                }
-            }
-        }
-    "#
-    .to_owned();
-
-    let graphql_query = GraphqlQuery {
-        query,
-        variables: QueryVariables {
-            owner: owner.to_owned(),
-            name: repo.to_owned(),
-        },
-    };
+    debug!("Fetching tags from SourceHut for ~{}/{}", username, repo);
 
     let client = reqwest::Client::new();
-    let mut request = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&graphql_query);
+    let mut tags = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_REFERENCE_PAGES {
+        let mut request = client.post(url).json(&GraphqlQuery {
+            query: REFERENCES_QUERY,
+            variables: QueryVariables {
+                username,
+                name: repo,
+                cursor: cursor.as_deref(),
+            },
+        });
+        if let Some(token_str) = token {
+            request = request.header("Authorization", format!("Bearer {token_str}"));
+        }
 
-    // Add authorization header if token is provided
-    if let Some(token_str) = token {
-        request = request.header("Authorization", format!("Bearer {token_str}"));
-    }
-
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
+        let response = request
+            .send()
             .await
-            .unwrap_or_else(|_| String::from("(unable to read response)"));
-        anyhow::bail!("SourceHut GraphQL API request failed with status {status}: {error_text}");
-    }
+            .with_context(|| format!("POST {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("(unable to read response)"));
+            return Err(anyhow::Error::new(HttpStatusError::new(
+                "SourceHut GraphQL API request",
+                status,
+            ))
+            .context(error_text));
+        }
 
-    let graphql_response: GraphqlResponse = response
-        .json()
-        .await
-        .with_context(|| format!("decode JSON from {url}"))?;
-
-    let repository_data = graphql_response
-        .data
-        .and_then(|d| d.repository)
-        .with_context(|| format!("Repository {owner}/{repo} not found"))?;
-
-    // Filter for tags (references starting with "refs/tags/")
-    let tags: Vec<SourcehutReference> = repository_data
-        .references
-        .results
-        .into_iter()
-        .filter_map(|reference| {
+        let body: GraphqlResponse = response
+            .json()
+            .await
+            .with_context(|| format!("decode JSON from {url}"))?;
+        let page = references_page(body, username, repo)?;
+        tags.extend(page.results.into_iter().filter_map(|reference| {
             reference
                 .name
                 .strip_prefix("refs/tags/")
                 .map(|tag_name| SourcehutReference {
                     name: tag_name.to_owned(),
                 })
-        })
-        .collect();
+        }));
+        cursor = page.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
 
     Ok(tags)
+}
+
+/// The references page in a GraphQL response. A missing user or repository is
+/// reported as a 404 so callers can tell it from a transient failure.
+fn references_page(
+    body: GraphqlResponse,
+    username: &str,
+    repo: &str,
+) -> anyhow::Result<ReferenceCursor> {
+    if !body.errors.is_empty() {
+        let messages: Vec<&str> = body.errors.iter().map(|e| e.message.as_str()).collect();
+        anyhow::bail!("SourceHut GraphQL errors: {}", messages.join("; "));
+    }
+    body.data
+        .and_then(|d| d.user)
+        .and_then(|u| u.repository)
+        .map(|r| r.references)
+        .ok_or_else(|| {
+            anyhow::Error::new(HttpStatusError::new(
+                "SourceHut GraphQL API request",
+                StatusCode::NOT_FOUND,
+            ))
+            .context(format!("SourceHut repository ~{username}/{repo} not found"))
+        })
 }
 
 #[cfg(test)]
@@ -227,6 +265,36 @@ mod tests {
         let url = "https://github.com/owner/repo";
         let result = parse_sourcehut_url(url);
         assert!(result.is_none());
+    }
+
+    fn page(json: &str) -> anyhow::Result<ReferenceCursor> {
+        references_page(serde_json::from_str(json).unwrap(), "owner", "repo")
+    }
+
+    #[test]
+    fn references_page_cases() {
+        let ok = page(
+            r#"{"data":{"user":{"repository":{"references":
+                {"results":[{"name":"refs/tags/v1"}],"cursor":"abc"}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.results.len(), 1);
+        assert_eq!(ok.cursor.as_deref(), Some("abc"));
+
+        for missing in [
+            r#"{"data":{"user":null}}"#,
+            r#"{"data":{"user":{"repository":null}}}"#,
+        ] {
+            let err = page(missing).unwrap_err();
+            assert!(
+                HttpStatusError::find(&err).is_some_and(HttpStatusError::is_not_found),
+                "{missing}: {err:#}"
+            );
+        }
+
+        let err = page(r#"{"errors":[{"message":"Unknown argument"}],"data":null}"#).unwrap_err();
+        assert!(HttpStatusError::find(&err).is_none());
+        assert!(format!("{err:#}").contains("Unknown argument"));
     }
 
     #[test]

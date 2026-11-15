@@ -237,10 +237,11 @@ pub fn upstream_source_from_index(
             })
         },
         "sourcehut" => {
-            let key = upstream_key.strip_prefix('~').unwrap_or(upstream_key);
+            // Older indexes stored `~~owner/repo`.
+            let key = upstream_key.trim_start_matches('~');
             let (owner, repo) = key.split_once('/')?;
             Some(UpstreamSource::SourceHut {
-                owner: owner.to_owned(),
+                owner: format!("~{owner}"),
                 repo: repo.to_owned(),
             })
         },
@@ -372,17 +373,21 @@ mod tests {
     #[test]
     fn roundtrip_sourcehut() {
         let source = UpstreamSource::SourceHut {
-            owner: "sircmpwn".to_owned(),
+            owner: "~sircmpwn".to_owned(),
             repo: "scdoc".to_owned(),
         };
-        let reconstructed = upstream_source_from_index(
-            source.source_type(),
-            &source.source_key(),
-            source.instance(),
-        )
-        .unwrap();
-        assert_eq!(reconstructed.source_type(), "sourcehut");
-        assert_eq!(reconstructed.source_key(), "~sircmpwn/scdoc");
+        assert_eq!(source.source_key(), "~sircmpwn/scdoc");
+        // Keys written before the doubled `~` was fixed still resolve.
+        for key in ["~sircmpwn/scdoc", "~~sircmpwn/scdoc"] {
+            let reconstructed =
+                upstream_source_from_index(source.source_type(), key, source.instance()).unwrap();
+            assert_eq!(reconstructed.source_type(), "sourcehut");
+            assert_eq!(reconstructed.source_key(), "~sircmpwn/scdoc");
+            assert!(matches!(
+                reconstructed,
+                UpstreamSource::SourceHut { ref owner, .. } if owner == "~sircmpwn"
+            ));
+        }
     }
 
     #[test]
