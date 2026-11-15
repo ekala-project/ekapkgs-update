@@ -606,7 +606,10 @@ impl UpstreamSource {
         match self {
             Self::GitHub { owner, repo } => format!("{owner}/{repo}"),
             Self::GitLab { owner, project, .. } => format!("{owner}/{project}"),
-            Self::SourceHut { owner, repo } => format!("~{owner}/{repo}"),
+            // `owner` keeps the `~` of the URL (`parse_sourcehut_url`).
+            Self::SourceHut { owner, repo } => {
+                format!("~{}/{repo}", owner.trim_start_matches('~'))
+            },
             Self::PyPI { pname } => pname.clone(),
             Self::DirectoryListing { base_url, .. } => base_url.clone(),
             Self::Script { script_path } => script_path.clone(),
