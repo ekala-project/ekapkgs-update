@@ -425,6 +425,51 @@ struct SourceOutcome {
     observations: Vec<Observation>,
 }
 
+/// Why packages whose source polled fine but listed nothing are not observed.
+const NO_RELEASES: &str = "upstream lists no releases or tags";
+
+/// Record every configured package tracking a source as `upstream_error`
+/// when the source could not be observed (poll failed, no releases, or not
+/// pollable). Without this a newly indexed package stays `pending` forever.
+async fn record_unobserved(
+    db: &Database,
+    source_row: &UpstreamIndexEntry,
+    configured: &HashSet<String>,
+    error: &str,
+) {
+    let (kind, key) = (
+        source_row.upstream_type.as_str(),
+        source_row.upstream_key.as_str(),
+    );
+    let entries = match db
+        .get_attr_paths_for_source(kind, key, source_row.instance.as_deref())
+        .await
+    {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("{}/{}: failed to load packages: {:#}", kind, key, e);
+            return;
+        },
+    };
+    for entry in entries {
+        if !configured.contains(&entry.repo_name) {
+            continue;
+        }
+        let Some(current) = entry.current_version.as_deref().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if let Err(e) = db
+            .record_upstream_error(&entry.repo_name, &entry.attr_path, current, error)
+            .await
+        {
+            warn!(
+                "{}: failed to record upstream error: {:#}",
+                entry.attr_path, e
+            );
+        }
+    }
+}
+
 /// Poll one source and record observations for every package tracking it.
 async fn poll_one_source(
     db: &Database,
@@ -441,6 +486,13 @@ async fn poll_one_source(
 
     let Some(source) = upstream_source_from_index(kind, key, instance) else {
         debug!("{}/{}: cannot reconstruct upstream source", kind, key);
+        record_unobserved(
+            db,
+            source_row,
+            configured,
+            "cannot poll this upstream source",
+        )
+        .await;
         return outcome;
     };
 
@@ -465,6 +517,7 @@ async fn poll_one_source(
             {
                 warn!("{}/{}: failed to record poll failure: {:#}", kind, key, e);
             }
+            record_unobserved(db, source_row, configured, &message).await;
             return outcome;
         },
     };
@@ -489,6 +542,7 @@ async fn poll_one_source(
         Err(e) => warn!("{}/{}: failed to record poll: {:#}", kind, key, e),
     }
     if releases.is_empty() {
+        record_unobserved(db, source_row, configured, NO_RELEASES).await;
         return outcome;
     }
 
