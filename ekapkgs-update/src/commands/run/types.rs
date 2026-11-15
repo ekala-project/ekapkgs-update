@@ -36,7 +36,10 @@ pub enum UpdateResult {
         new_version: String,
     },
     /// Not attempted / not applicable (e.g. rebuild threshold exceeded,
-    /// worktree setup failed). Not recorded as a package failure.
+    /// worktree setup failed). Not recorded as a package failure. Also used
+    /// when the tree already has the target version (a sibling attribute
+    /// sharing the file was updated first); that case is recorded as an
+    /// up-to-date observation.
     Skipped(String),
     /// The update was attempted and failed; already recorded in the
     /// database (failure log, backoff). Carries a one-line summary.

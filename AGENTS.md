@@ -181,7 +181,7 @@ Progress (`packages_evaluated`, `packages_backoff`) is written to the session ev
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
 3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update`. It always runs one update at a time (`updater_concurrency`, with a warning if `--concurrent-updates` asked for more), serializes git operations via `Arc<Mutex<()>>`, and has no PR support
-5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup or branch-mode working-tree snapshot failed, or rebuild limit; the `updates` row is left untouched so the next poll/run retries) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
+5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup or branch-mode working-tree snapshot failed, or rebuild limit; the `updates` row is left untouched so the next poll/run retries; or the tree already has the target version, see below) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
 6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
 
 ### Update Workflow (`commands/update/mod.rs`)
@@ -197,6 +197,8 @@ The 9-phase workflow for each package:
 7. **Testing** — Run passthru.tests (if configured)
 8. **AgentFix** — *(run/watch with `--claude-fix`, on failure)* Claude Code fix attempt
 9. **PrCreation** — Commit + push + create PR via GitHub REST API
+
+With an explicit target version (always the case in `run`/`watch`), the workflow stops after MetadataExtraction with `AlreadyAtVersion` when the evaluated version has already reached it (`version_at_least`). This happens in branch mode when several attributes share one file (`arro3-core`/`-io`/`-compute`): the first update bumps the file, and the rest find it done. The updater records those as an up-to-date observation (`record_no_update`) and returns `Skipped`, not a failure.
 
 Every phase is wrapped with `PhaseTracker::run` / `start` (`commands/update/instrumentation.rs`). The standalone `update` command uses `PhaseTracker::disabled()`. A phase failure is classified into an `UpdateError` (`UpdateError::classify`), and `tracker.last_failure()` gives the caller the structured cause.
 
