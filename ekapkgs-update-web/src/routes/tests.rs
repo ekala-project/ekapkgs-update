@@ -129,14 +129,17 @@ INSERT INTO watch_cycles (id, kind, repo_name, started_at, completed_at, duratio
 
 INSERT INTO upstream_sources (upstream_type, upstream_key, instance, latest_version,
     latest_tag, release_count, latest_changed_at, first_seen_at, last_polled_at,
-    last_success_at, last_error, consecutive_failures) VALUES
+    last_success_at, last_error, consecutive_failures, health, moved_to) VALUES
   ('github', 'BurntSushi/ripgrep', '', '14.1.0', '14.1.0', 40, AGO(250), AGO(10000), AGO(30),
-    AGO(30), NULL, 0),
+    AGO(30), NULL, 0, 'ok', NULL),
   ('github', 'jqlang/jq', '', NULL, NULL, NULL, NULL, AGO(10000), AGO(30), NULL,
-    'HTTP 404 Not Found', 3),
-  ('pypi', 'requests', '', '2.32.0', NULL, 150, AGO(5000), AGO(10000), AGO(30), AGO(30), NULL, 0),
+    'HTTP 404 Not Found', 3, 'not_found', NULL),
+  ('github', 'rust-lang-nursery/rustfmt', '', '1.8.0', 'v1.8.0', 30, AGO(900), AGO(10000),
+    AGO(30), AGO(30), NULL, 0, 'moved', 'rust-lang/rustfmt'),
+  ('pypi', 'requests', '', '2.32.0', NULL, 150, AGO(5000), AGO(10000), AGO(30), AGO(30), NULL, 0,
+    'ok', NULL),
   ('gitlab', 'GNOME/glib', 'gitlab.gnome.org', NULL, NULL, NULL, NULL, AGO(100), NULL, NULL,
-    NULL, 0);
+    NULL, 0, 'ok', NULL);
 
 INSERT INTO upstream_index (repo_name, attr_path, upstream_type, upstream_key, instance,
     current_version, src_url, indexed_at, pname, semver_strategy, version_regex,
@@ -653,7 +656,24 @@ async fn api_watch() {
     assert_eq!(watch["cycle_counts"]["index"], 1);
     assert!(watch["last_poll"].is_object());
     assert!(!watch["source_types"].as_array().unwrap().is_empty());
-    assert!(!watch["failing_sources"].as_array().unwrap().is_empty());
+    let problems = watch["problem_sources"].as_array().unwrap();
+    let keys: Vec<_> = problems
+        .iter()
+        .map(|s| {
+            (
+                s["upstream_key"].as_str().unwrap(),
+                s["health"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("jqlang/jq", "not_found"),
+            ("rust-lang-nursery/rustfmt", "moved")
+        ]
+    );
+    assert_eq!(problems[1]["moved_to"], "rust-lang/rustfmt");
     assert!(watch["recent_releases"].is_array());
 
     let index = api(&app, "/api/watch?kind=index").await;

@@ -480,24 +480,6 @@ indexRow ctx e =
         ]
 
 
-sourceBadge : Api.Source -> Format.Badge
-sourceBadge s =
-    if s.consecutiveFailures > 0 then
-        Format.badge ("failing ×" ++ String.fromInt s.consecutiveFailures)
-            (if s.consecutiveFailures >= 3 then
-                "critical"
-
-             else
-                "serious"
-            )
-
-    else if s.lastPolledAt == Nothing then
-        Format.badge "not polled" "neutral"
-
-    else
-        Format.badge "ok" "good"
-
-
 sourceRow : Ctx -> Api.Source -> Html msg
 sourceRow ctx s =
     tr []
@@ -524,7 +506,8 @@ sourceRow ctx s =
             )
         , td []
             (List.concat
-                [ [ View.badge (sourceBadge s), text " ", View.ts ctx.now s.lastPolledAt ]
+                [ [ View.sourceBadge s, text " ", View.ts ctx.now s.lastPolledAt ]
+                , View.sourceMovedTo s
                 , case nonEmpty s.lastError of
                     Just err ->
                         [ div [ class "small tone-text-critical clip", title err ] [ text err ] ]

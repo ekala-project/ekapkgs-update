@@ -59,7 +59,8 @@ pub use types::{FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus
 pub(crate) use updates::version_at_least;
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
 pub use watch::{
-    IndexOutcome, RepoSyncStatus, SourcePoll, WatchCycleKind, WatchCycleStats, WatchedRepoInfo,
+    IndexOutcome, RepoSyncStatus, SourceHealth, SourcePoll, WatchCycleKind, WatchCycleStats,
+    WatchedRepoInfo,
 };
 
 use crate::vcs_sources::{SemverStrategy, VersionPolicy};
@@ -489,13 +490,28 @@ impl Database {
         }
 
         let pruned = if prune {
-            sqlx::query("DELETE FROM upstream_index WHERE repo_name = ? AND indexed_at != ?")
-                .bind(repo_name)
-                .bind(&now)
-                .execute(&mut *tx)
-                .await
-                .context("prune upstream_index for repo")?
-                .rows_affected()
+            let pruned =
+                sqlx::query("DELETE FROM upstream_index WHERE repo_name = ? AND indexed_at != ?")
+                    .bind(repo_name)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .context("prune upstream_index for repo")?
+                    .rows_affected();
+            // Sources no repo's packages are indexed against any more (e.g.
+            // a URL now parsed differently) would otherwise stay on the
+            // dashboard with their last health forever.
+            sqlx::query(
+                "DELETE FROM upstream_sources WHERE NOT EXISTS ( \
+                 SELECT 1 FROM upstream_index i \
+                 WHERE i.upstream_type = upstream_sources.upstream_type \
+                   AND i.upstream_key = upstream_sources.upstream_key \
+                   AND COALESCE(i.instance, '') = upstream_sources.instance)",
+            )
+            .execute(&mut *tx)
+            .await
+            .context("prune orphaned upstream_sources")?;
+            pruned
         } else {
             0
         };

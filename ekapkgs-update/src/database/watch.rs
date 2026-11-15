@@ -49,6 +49,32 @@ impl RepoSyncStatus {
     }
 }
 
+/// Health of an upstream source as of its last poll (`upstream_sources.health`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceHealth {
+    /// Polled successfully at the indexed location.
+    Ok,
+    /// Poll failed for a possibly transient reason (network, rate limit, 5xx).
+    Error,
+    /// HTTP 404/410: deleted, made private, renamed without a redirect, or
+    /// the package points at the wrong location.
+    NotFound,
+    /// Polled successfully, but only through a redirect to another
+    /// repository (`moved_to`).
+    Moved,
+}
+
+impl SourceHealth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::NotFound => "not_found",
+            Self::Moved => "moved",
+        }
+    }
+}
+
 /// Outcome of building a repository's upstream index.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutcome {
@@ -107,9 +133,14 @@ pub enum SourcePoll<'a> {
         latest_version: Option<&'a str>,
         latest_tag: Option<&'a str>,
         release_count: usize,
+        /// Where the source redirected to, when it has moved
+        /// (e.g. `new-owner/repo`).
+        moved_to: Option<&'a str>,
     },
     Failure {
         error: &'a str,
+        /// [`SourceHealth::Error`] or [`SourceHealth::NotFound`].
+        health: SourceHealth,
     },
 }
 
@@ -443,14 +474,20 @@ impl Database {
                 latest_version,
                 latest_tag,
                 release_count,
+                moved_to,
             } => {
+                let health = if moved_to.is_some() {
+                    SourceHealth::Moved
+                } else {
+                    SourceHealth::Ok
+                };
                 sqlx::query(
                     r#"
                     INSERT INTO upstream_sources
                         (upstream_type, upstream_key, instance, latest_version, latest_tag,
                          release_count, latest_changed_at, first_seen_at, last_polled_at,
-                         last_success_at, last_error, consecutive_failures)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+                         last_success_at, last_error, consecutive_failures, health, moved_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
                     ON CONFLICT(upstream_type, upstream_key, instance) DO UPDATE SET
                         latest_changed_at = CASE
                             WHEN excluded.latest_version IS NULL
@@ -464,7 +501,9 @@ impl Database {
                         last_polled_at = excluded.last_polled_at,
                         last_success_at = excluded.last_success_at,
                         last_error = NULL,
-                        consecutive_failures = 0
+                        consecutive_failures = 0,
+                        health = excluded.health,
+                        moved_to = excluded.moved_to
                     "#,
                 )
                 .bind(upstream_type)
@@ -477,6 +516,8 @@ impl Database {
                 .bind(&now)
                 .bind(&now)
                 .bind(&now)
+                .bind(health.as_str())
+                .bind(moved_to)
                 .execute(&self.pool)
                 .await
                 .context("record successful source poll")?;
@@ -486,17 +527,18 @@ impl Database {
                     (Some(prev), Some(new)) if prev != new
                 ))
             },
-            SourcePoll::Failure { error } => {
+            SourcePoll::Failure { error, health } => {
                 sqlx::query(
                     r#"
                     INSERT INTO upstream_sources
                         (upstream_type, upstream_key, instance, first_seen_at, last_polled_at,
-                         last_error, consecutive_failures)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                         last_error, consecutive_failures, health)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?)
                     ON CONFLICT(upstream_type, upstream_key, instance) DO UPDATE SET
                         last_polled_at = excluded.last_polled_at,
                         last_error = excluded.last_error,
-                        consecutive_failures = upstream_sources.consecutive_failures + 1
+                        consecutive_failures = upstream_sources.consecutive_failures + 1,
+                        health = excluded.health
                     "#,
                 )
                 .bind(upstream_type)
@@ -505,6 +547,7 @@ impl Database {
                 .bind(&now)
                 .bind(&now)
                 .bind(error)
+                .bind(health.as_str())
                 .execute(&self.pool)
                 .await
                 .context("record failed source poll")?;
@@ -670,6 +713,7 @@ mod tests {
             latest_version: Some(v),
             latest_tag: Some(v),
             release_count: 5,
+            moved_to: None,
         };
 
         // First observation is a baseline, not a new release.
@@ -685,14 +729,30 @@ mod tests {
         );
         // Failures do not lose the known version.
         assert!(
-            !db.record_source_poll("github", "o/r", None, &SourcePoll::Failure { error: "503" })
-                .await
-                .unwrap()
+            !db.record_source_poll(
+                "github",
+                "o/r",
+                None,
+                &SourcePoll::Failure {
+                    error: "503",
+                    health: SourceHealth::Error,
+                }
+            )
+            .await
+            .unwrap()
         );
         assert!(
-            !db.record_source_poll("github", "o/r", None, &SourcePoll::Failure { error: "503" })
-                .await
-                .unwrap()
+            !db.record_source_poll(
+                "github",
+                "o/r",
+                None,
+                &SourcePoll::Failure {
+                    error: "503",
+                    health: SourceHealth::Error,
+                }
+            )
+            .await
+            .unwrap()
         );
         let row = sqlx::query("SELECT * FROM upstream_sources WHERE upstream_key = 'o/r'")
             .fetch_one(db.pool())
@@ -726,5 +786,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn source_poll_records_health() {
+        let db = setup_db().await;
+        let health = |db: &Database| {
+            let pool = db.pool().clone();
+            async move {
+                let row = sqlx::query(
+                    "SELECT health, moved_to FROM upstream_sources WHERE upstream_key = 'o/r'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                (
+                    row.get::<String, _>("health"),
+                    row.get::<Option<String>, _>("moved_to"),
+                )
+            }
+        };
+        let fail = |health| SourcePoll::Failure {
+            error: "GitHub tags API request failed with status: 404 Not Found",
+            health,
+        };
+        let ok = |moved_to| SourcePoll::Success {
+            latest_version: Some("1.0"),
+            latest_tag: Some("v1.0"),
+            release_count: 1,
+            moved_to,
+        };
+
+        db.record_source_poll("github", "o/r", None, &fail(SourceHealth::NotFound))
+            .await
+            .unwrap();
+        assert_eq!(health(&db).await, ("not_found".to_owned(), None));
+
+        db.record_source_poll("github", "o/r", None, &ok(Some("new/r")))
+            .await
+            .unwrap();
+        assert_eq!(
+            health(&db).await,
+            ("moved".to_owned(), Some("new/r".to_owned()))
+        );
+
+        // A transient failure keeps the known new location.
+        db.record_source_poll("github", "o/r", None, &fail(SourceHealth::Error))
+            .await
+            .unwrap();
+        assert_eq!(
+            health(&db).await,
+            ("error".to_owned(), Some("new/r".to_owned()))
+        );
+
+        db.record_source_poll("github", "o/r", None, &ok(None))
+            .await
+            .unwrap();
+        assert_eq!(health(&db).await, ("ok".to_owned(), None));
     }
 }

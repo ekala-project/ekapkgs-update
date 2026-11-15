@@ -861,3 +861,63 @@ async fn incomplete_index_keeps_stale_entries() {
     assert_eq!(pruned, 1);
     assert_eq!(db.upstream_index_count(Some("corepkgs")).await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn replace_upstream_index_prunes_orphaned_sources() {
+    use ekapkgs_update::database::{SourceHealth, SourcePoll};
+
+    let db = setup_db().await;
+    let entry = |attr, key| new_entry(attr, key, "1.0", policy(SemverStrategy::Latest));
+    db.replace_upstream_index(
+        "ekapkgs",
+        &[
+            entry("tidyp", "downloads/petdance"),
+            entry("rg", "BurntSushi/ripgrep"),
+        ],
+        true,
+    )
+    .await
+    .unwrap();
+    for key in ["downloads/petdance", "BurntSushi/ripgrep"] {
+        db.record_source_poll(
+            "github",
+            key,
+            None,
+            &SourcePoll::Failure {
+                error: "404",
+                health: SourceHealth::NotFound,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let sources = |db: &Database| {
+        let pool = db.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT upstream_key FROM upstream_sources ORDER BY upstream_key",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // An incomplete evaluation (no prune) keeps everything.
+    db.replace_upstream_index("ekapkgs", &[entry("tidyp", "petdance/tidyp")], false)
+        .await
+        .unwrap();
+    assert_eq!(sources(&db).await.len(), 2);
+
+    db.replace_upstream_index(
+        "ekapkgs",
+        &[
+            entry("tidyp", "petdance/tidyp"),
+            entry("rg", "BurntSushi/ripgrep"),
+        ],
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sources(&db).await, vec!["BurntSushi/ripgrep".to_owned()]);
+}

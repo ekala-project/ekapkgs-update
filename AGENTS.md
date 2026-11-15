@@ -96,7 +96,7 @@ ekapkgs-update/                     # Main CLI crate
         mod.rs                      #   WatchConfig, ResolvedRepo, repo provisioning (clone/fork)
         sync.rs                     #   Fast-forward-only checkout sync (startup, re-index, before update batches)
         index.rs                    #   Per-repo upstream index: one nix-eval-jobs pass with --apply → upstream_index
-        feeds.rs                    #   Feed polling (RSS/Atom/API), per-entry version policy, UpstreamSource reconstruction
+        feeds.rs                    #   Feed polling (RSS/Atom/API), per-entry version policy, UpstreamSource reconstruction, source health (moved/not found)
         listener.rs                 #   Event loop: poll cycles, observe-only bootstrap, dispatch decisions
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
@@ -107,6 +107,7 @@ ekapkgs-update/                     # Main CLI crate
     llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
+      http_status.rs                #   HttpStatusError: typed non-success status from release endpoints (404/410 = not found)
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab supports custom instances)
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
@@ -237,6 +238,8 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 **Index builder** (`commands/watch/index.rs`): One `nix-eval-jobs` pass per repo with an `--apply` function (`INDEX_APPLY_EXPR`) that extracts version, pname, description, homepage, source URLs, `meta.position`, variants/Python flags and `passthru.ekapkgs-update` settings — no per-package `nix-instantiate` (that took hours). Skips packages defined outside the repo (`meta.position` in the Nix store), pinned variants, opt-outs and packages without a recognizable upstream (the pname→PyPI guess is only allowed for Python packages). The strategy comes from `infer_update_strategy(...).resolve(has_variants)`. Entries (with `drv_path` and the `VersionPolicy`) are written in one transaction by `replace_upstream_index`, which also prunes the repo's stale rows unless the evaluation looks incomplete (stream error, nothing evaluated, or under half the previous count; `prune_decision`). Every indexed package is registered in `updates` (`upsert_package_info`).
 
 **Feed poller** (`commands/watch/feeds.rs`): Uses RSS/Atom feeds for GitHub (`releases.atom`, then `tags.atom` for tags-only projects) and PyPI (cheaper than API), falls back to `UpstreamSource::fetch_all_releases()` for GitLab/SourceHut/DirectoryListing. GitHub tags come from the `/releases/tag/<tag>` link, not the entry title (the title is the release name). `update_version_for_entry` applies the entry's stored `VersionPolicy`.
+
+**Source health** (`upstream_sources.health`, `SourceHealth`): `ok`, `error` (transient: network, rate limit, 5xx), `not_found` (a release endpoint returned 404/410 — `HttpStatusError::is_not_found`, found via `failure_health`: deleted, private, or a wrong owner/repo in the package) or `moved` (polled fine, but a GitHub feed redirected to another repo; `relocation` compares the final feed URL, and `moved_to` holds the new `owner/repo`). Only the feed shows the new name: the GitHub API redirects to `/repositories/<id>`. Release fetchers must return `HttpStatusError` for non-success statuses, not a formatted `bail!`, or 404s are classified as transient. Sources no `upstream_index` row references any more are deleted when an index build prunes (`replace_upstream_index`), so corrected URL parses don't leave dead rows on the dashboard. The dashboard's watch page lists them as "Problem sources" (`problem_sources`).
 
 **Event loop** (`commands/watch/listener.rs`):
 

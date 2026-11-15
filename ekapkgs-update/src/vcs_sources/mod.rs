@@ -10,6 +10,10 @@ use semver::Version;
 use tokio::process::Command;
 use tracing::{debug, info, trace, warn};
 
+mod http_status;
+
+pub use http_status::HttpStatusError;
+
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
 use crate::pypi::fetch_pypi_releases;
@@ -1185,10 +1189,7 @@ async fn fetch_directory_listing_releases(
         .with_context(|| format!("GET {base_url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "Directory listing request failed with status: {}",
-            response.status()
-        );
+        return Err(HttpStatusError::new("Directory listing request", response.status()).into());
     }
 
     let body = response.text().await?;

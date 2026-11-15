@@ -19,6 +19,8 @@ module View exposing
     , rankedBars
     , segbar
     , selectField
+    , sourceBadge
+    , sourceMovedTo
     , statusBadge
     , textField
     , ts
@@ -74,6 +76,35 @@ badge b =
 statusBadge : String -> Html msg
 statusBadge =
     Format.statusBadge >> badge
+
+
+{-| Poll health of an upstream source.
+-}
+sourceBadge : Api.Source -> Html msg
+sourceBadge s =
+    badge (Format.sourceBadge s.health s.consecutiveFailures (s.lastPolledAt /= Nothing))
+
+
+{-| Where a moved source lives now (nothing unless it has moved).
+-}
+sourceMovedTo : Api.Source -> List (Html msg)
+sourceMovedTo s =
+    case ( s.health, s.movedTo ) of
+        ( "moved", Just dest ) ->
+            [ div [ class "small tone-text-warn" ]
+                [ text "now at "
+                , case Format.upstreamUrl s.upstreamType dest (Just s.instance) of
+                    Just u ->
+                        a [ href u, rel "noopener noreferrer", target "_blank" ] [ text dest ]
+
+                    Nothing ->
+                        text dest
+                , text " — update the package source"
+                ]
+            ]
+
+        _ ->
+            []
 
 
 {-| A version, shortened, with the full value on hover.
