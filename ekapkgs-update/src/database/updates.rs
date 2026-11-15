@@ -498,6 +498,31 @@ impl Database {
         Ok(prev)
     }
 
+    /// Record that a `watch` poll could not observe a package's upstream: the
+    /// source failed, listed no releases, or cannot be polled. The status
+    /// becomes `upstream_error` with `error` as the reason; the previously
+    /// known latest version, the baseline and the backoff are kept, so the
+    /// next successful observation picks up where this one left off.
+    pub async fn record_upstream_error(
+        &self,
+        repo_name: &str,
+        attr_path: &str,
+        current_version: &str,
+        error: &str,
+    ) -> Result<()> {
+        let prev = self.get_update_record(repo_name, attr_path).await?;
+        let state = reconcile(prev.as_ref(), current_version, None, Some(error));
+        self.write_observation(
+            repo_name,
+            attr_path,
+            current_version,
+            &state,
+            prev.as_ref().and_then(|r| r.baseline_version.as_deref()),
+            prev.as_ref().and_then(|r| r.next_attempt),
+        )
+        .await
+    }
+
     /// Record a successful update (built and committed / PR opened).
     ///
     /// Sets the status to `proposed`, clears failure bookkeeping and resets the
@@ -1191,5 +1216,46 @@ mod tests {
         assert_eq!(rec.status, UpdateStatus::UpstreamError);
         assert_eq!(rec.last_error.as_deref(), Some("rate limited"));
         assert!(!db.should_check_update("", "foo").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn watch_upstream_error_keeps_baseline_and_recovers() {
+        let db = setup_db().await;
+        let info = PackageInfo::default();
+        db.upsert_package_info("r", "foo", "1.0", &info)
+            .await
+            .unwrap();
+        db.record_observation("r", "foo", "1.0", "1.1")
+            .await
+            .unwrap();
+
+        db.record_upstream_error("r", "foo", "1.0", "404 Not Found")
+            .await
+            .unwrap();
+        let rec = db.get_update_record("r", "foo").await.unwrap().unwrap();
+        assert_eq!(rec.status, UpdateStatus::UpstreamError);
+        assert_eq!(rec.last_error.as_deref(), Some("404 Not Found"));
+        assert_eq!(rec.latest_upstream_version.as_deref(), Some("1.1"));
+        assert_eq!(rec.baseline_version.as_deref(), Some("1.1"));
+        assert!(rec.next_attempt.is_none());
+
+        // The next successful poll restores the observed state.
+        db.record_observation("r", "foo", "1.0", "1.1")
+            .await
+            .unwrap();
+        let rec = db.get_update_record("r", "foo").await.unwrap().unwrap();
+        assert_eq!(rec.status, UpdateStatus::Outdated);
+        assert_eq!(rec.last_error, None);
+
+        // A pending package whose source never answers leaves `pending`.
+        db.upsert_package_info("r", "bar", "2.0", &info)
+            .await
+            .unwrap();
+        db.record_upstream_error("r", "bar", "2.0", "no releases")
+            .await
+            .unwrap();
+        let rec = db.get_update_record("r", "bar").await.unwrap().unwrap();
+        assert_eq!(rec.status, UpdateStatus::UpstreamError);
+        assert_eq!(rec.baseline_version, None);
     }
 }
