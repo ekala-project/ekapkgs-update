@@ -1,9 +1,14 @@
 //! Main event loop for the watch command.
 //!
-//! 1. On startup every repo is synced (fast-forward) and indexed.
-//! 2. All indexed upstream sources are polled immediately, then every
-//!    `poll_interval`. Each poll is recorded in `watch_cycles`; each source's
-//!    health in `upstream_sources`; each package's observation in `updates`.
+//! 1. On startup every repo is synced (fast-forward) and indexed, unless its
+//!    last successful index is younger than `index_refresh_interval` and was
+//!    built from the same binary and configuration (a restart reuses it).
+//! 2. Poll cycles run immediately, then every `poll_interval`. A cycle polls
+//!    only the sources that are due according to `upstream_sources`
+//!    (`last_polled_at`), so a restart does not re-poll everything; sources
+//!    that were not found are rechecked daily. Each poll is recorded in
+//!    `watch_cycles`; each source's health in `upstream_sources`; each
+//!    package's observation in `updates`.
 //! 3. The first observation of a package records its baseline and dispatches
 //!    nothing (observe-only bootstrap). Later releases newer than the
 //!    baseline are dispatched to the updater service.
@@ -29,8 +34,8 @@ use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
 use crate::database::{
-    Database, IndexOutcome, SessionMode, SessionStatus, SourcePoll, UpdateRecord,
-    UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
+    Database, IndexOutcome, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
+    SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
 };
 use crate::vcs_sources::{Release, compare_version_components};
 
@@ -40,6 +45,8 @@ const POLL_CONCURRENCY: usize = 8;
 const CYCLE_RETENTION_DAYS: i64 = 7;
 /// Shortest allowed poll / index interval (`interval` panics on zero).
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// How often a source that answered 404/410 is checked again.
+const NOT_FOUND_RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `(repo, attr_path, version)` already reported by a dry-run dispatch.
 type DryRunReported = HashSet<(String, String, String)>;
@@ -53,17 +60,18 @@ pub async fn run_watch_loop(
     index_refresh_interval: Duration,
     session_config: serde_json::Value,
 ) -> anyhow::Result<()> {
-    refresh_repos(&repos, &db).await;
-    let mut sources = load_sources(&db, None).await;
-
     let poll_interval = poll_interval.max(MIN_INTERVAL);
     let index_refresh_interval = index_refresh_interval.max(MIN_INTERVAL);
 
-    // The first poll tick fires immediately: that poll records baselines.
+    let next_index = refresh_repos(&repos, &db, Some(index_refresh_interval)).await;
+    let mut sources = load_sources(&db, None).await;
+
+    // The first poll tick fires immediately (polling only the sources that
+    // are due); on a fresh database that poll records baselines.
     let mut poll_ticker = tokio::time::interval(poll_interval);
     poll_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut index_ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + index_refresh_interval,
+        tokio::time::Instant::now() + next_index.max(MIN_INTERVAL),
         index_refresh_interval,
     );
     index_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -77,6 +85,7 @@ pub async fn run_watch_loop(
             _ = poll_ticker.tick() => {
                 run_poll_cycle(
                     &sources,
+                    poll_interval,
                     &repos,
                     &db,
                     &updater_config,
@@ -87,7 +96,7 @@ pub async fn run_watch_loop(
             },
             _ = index_ticker.tick() => {
                 info!("Refreshing repositories and upstream indexes...");
-                refresh_repos(&repos, &db).await;
+                refresh_repos(&repos, &db, None).await;
                 sources = load_sources(&db, Some(sources)).await;
             },
             _ = tokio::signal::ctrl_c() => {
@@ -126,16 +135,115 @@ async fn load_sources(
 
 /// Sync and re-index every repo (sequentially: each index build already
 /// runs nix-eval-jobs with many workers).
-async fn refresh_repos(repos: &[ResolvedRepo], db: &Database) {
+///
+/// With `reuse_within`, a repo whose last index is still reusable
+/// ([`index_reuse_remaining`]) is synced but not re-indexed. Returns how long
+/// until the oldest reused index expires (`reuse_within` when every repo
+/// was indexed, or the full refresh interval is unknown).
+async fn refresh_repos(
+    repos: &[ResolvedRepo],
+    db: &Database,
+    reuse_within: Option<Duration>,
+) -> Duration {
+    let mut next = reuse_within.unwrap_or(Duration::MAX);
     for repo in repos {
         sync::sync_repo(repo, db).await;
-        index_repo(repo, db).await;
+        let config = index_config(repo);
+        if let Some(interval) = reuse_within {
+            let state = db
+                .repo_index_state(&repo.name)
+                .await
+                .map_err(|e| warn!("[{}] Failed to read index state: {:#}", repo.label(), e))
+                .ok()
+                .flatten();
+            if let Some(remaining) =
+                index_reuse_remaining(state.as_ref(), &config, Utc::now(), interval)
+            {
+                info!(
+                    "[{}] Reusing the upstream index from {} ago (re-index in {})",
+                    repo.label(),
+                    humantime(interval.saturating_sub(remaining)),
+                    humantime(remaining)
+                );
+                next = next.min(remaining);
+                continue;
+            }
+        }
+        index_repo(repo, db, config).await;
+    }
+    next
+}
+
+/// What an index build depends on besides the checkout: the running binary
+/// (a new build may index differently), the entry points and the select
+/// expression.
+fn index_config(repo: &ResolvedRepo) -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    format!(
+        "exe={exe}\nenumerate={}\nselect={}\neval={}",
+        repo.enumerate_entry_point,
+        repo.select.as_deref().unwrap_or(""),
+        repo.eval_entry_point
+    )
+}
+
+/// How much longer a repo's last index can be reused, or `None` when the
+/// repo must be indexed now: the last build failed, was interrupted, indexed
+/// nothing, was built from another binary or configuration, or is older than
+/// `interval`.
+fn index_reuse_remaining(
+    state: Option<&RepoIndexState>,
+    config: &str,
+    now: DateTime<Utc>,
+    interval: Duration,
+) -> Option<Duration> {
+    let state = state?;
+    if state.status.as_deref() != Some("ok")
+        || state.indexed_count <= 0
+        || state.config.as_deref() != Some(config)
+    {
+        return None;
+    }
+    let age = (now - state.last_indexed_at?).to_std().ok()?;
+    interval.checked_sub(age).filter(|r| !r.is_zero())
+}
+
+/// Whether a source should be polled in this cycle. A source is due half a
+/// poll interval before its next scheduled poll, so a source polled late in
+/// the previous cycle is not skipped until the one after; sources that were
+/// not found are rechecked every [`NOT_FOUND_RECHECK`].
+fn source_due(
+    state: Option<&SourcePollState>,
+    now: DateTime<Utc>,
+    poll_interval: Duration,
+) -> bool {
+    let Some(last) = state.and_then(|s| s.last_polled_at) else {
+        return true;
+    };
+    let interval = if state.is_some_and(|s| s.health == SourceHealth::NotFound) {
+        NOT_FOUND_RECHECK.max(poll_interval)
+    } else {
+        poll_interval
+    };
+    // A last poll in the future (clock change) counts as just polled.
+    let elapsed = (now - last).to_std().unwrap_or_default();
+    elapsed + poll_interval / 2 >= interval
+}
+
+fn humantime(d: Duration) -> String {
+    let mins = d.as_secs() / 60;
+    if mins >= 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m")
     }
 }
 
 /// Build one repo's index, recording it as an `index` watch cycle and in
 /// `watched_repos`.
-async fn index_repo(repo: &ResolvedRepo, db: &Database) {
+async fn index_repo(repo: &ResolvedRepo, db: &Database, config: String) {
     let cycle = db
         .start_watch_cycle(WatchCycleKind::Index, Some(&repo.name))
         .await
@@ -160,6 +268,7 @@ async fn index_repo(repo: &ResolvedRepo, db: &Database) {
         indexed: stats.indexed,
         skipped: stats.skipped,
         errors: stats.errors,
+        config: Some(config),
     };
 
     if let Err(e) = db.record_repo_index_result(&repo.name, &outcome).await {
@@ -421,15 +530,54 @@ async fn poll_one_source(
     outcome
 }
 
-/// Run one poll cycle, recording it in `watch_cycles`.
+/// The sources due for polling now ([`source_due`]); every source when the
+/// poll state cannot be read.
+async fn due_sources(
+    db: &Database,
+    sources: &[UpstreamIndexEntry],
+    poll_interval: Duration,
+) -> Vec<UpstreamIndexEntry> {
+    let states = db.source_poll_states().await.unwrap_or_else(|e| {
+        warn!(
+            "Failed to read source poll state, polling every source: {:#}",
+            e
+        );
+        HashMap::new()
+    });
+    let now = Utc::now();
+    sources
+        .iter()
+        .filter(|s| {
+            let key = (
+                s.upstream_type.clone(),
+                s.upstream_key.clone(),
+                s.instance.clone().unwrap_or_default(),
+            );
+            source_due(states.get(&key), now, poll_interval)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Run one poll cycle over the sources that are due, recording it in
+/// `watch_cycles` (no cycle when nothing is due).
 async fn run_poll_cycle(
     sources: &[UpstreamIndexEntry],
+    poll_interval: Duration,
     repos: &[ResolvedRepo],
     db: &Database,
     updater_config: &UpdaterServiceConfig,
     session_config: &serde_json::Value,
     dry_run_reported: &mut DryRunReported,
 ) {
+    let due = due_sources(db, sources, poll_interval).await;
+    if due.is_empty() {
+        debug!(
+            "No upstream source is due ({} polled recently)",
+            sources.len()
+        );
+        return;
+    }
     let cycle_id = db
         .start_watch_cycle(WatchCycleKind::Poll, None)
         .await
@@ -438,7 +586,8 @@ async fn run_poll_cycle(
     let started = Instant::now();
     let mut stats = WatchCycleStats::default();
     let result = poll_cycle(
-        sources,
+        &due,
+        sources.len(),
         repos,
         db,
         updater_config,
@@ -488,7 +637,8 @@ async fn run_poll_cycle(
 }
 
 async fn poll_cycle(
-    sources: &[UpstreamIndexEntry],
+    due: &[UpstreamIndexEntry],
+    total: usize,
     repos: &[ResolvedRepo],
     db: &Database,
     updater_config: &UpdaterServiceConfig,
@@ -498,15 +648,17 @@ async fn poll_cycle(
     stats: &mut WatchCycleStats,
 ) -> anyhow::Result<()> {
     info!(
-        "Polling {} upstream sources for new releases...",
-        sources.len()
+        "Polling {} of {} upstream sources for new releases ({} polled recently)...",
+        due.len(),
+        total,
+        total - due.len()
     );
+    let now = Utc::now();
     let configured: Arc<HashSet<String>> = Arc::new(repos.iter().map(|r| r.name.clone()).collect());
     let semaphore = Arc::new(Semaphore::new(POLL_CONCURRENCY));
-    let now = Utc::now();
 
     let mut tasks = JoinSet::new();
-    for source_row in sources {
+    for source_row in due {
         let source_row = source_row.clone();
         let db = db.clone();
         let configured = Arc::clone(&configured);
@@ -644,6 +796,98 @@ async fn poll_cycle(
 mod tests {
     use super::*;
     use crate::database::UpdateStatus;
+
+    const MIN: Duration = Duration::from_secs(60);
+
+    fn ago(now: DateTime<Utc>, minutes: i64) -> DateTime<Utc> {
+        now - chrono::Duration::minutes(minutes)
+    }
+
+    #[test]
+    fn source_due_cases() {
+        let now = Utc::now();
+        let hour = 60 * MIN;
+        let polled = |minutes, health| SourcePollState {
+            last_polled_at: Some(ago(now, minutes)),
+            health,
+        };
+        for (state, due) in [
+            (None, true),
+            (
+                Some(SourcePollState {
+                    last_polled_at: None,
+                    health: SourceHealth::Ok,
+                }),
+                true,
+            ),
+            // Restart shortly after a poll: not due.
+            (Some(polled(5, SourceHealth::Ok)), false),
+            (Some(polled(29, SourceHealth::Ok)), false),
+            // Polled late in the previous cycle: still due on this tick.
+            (Some(polled(30, SourceHealth::Ok)), true),
+            (Some(polled(61, SourceHealth::Error)), true),
+            (Some(polled(61, SourceHealth::Moved)), true),
+            // Not found: daily.
+            (Some(polled(61, SourceHealth::NotFound)), false),
+            (Some(polled(23 * 60 + 30, SourceHealth::NotFound)), true),
+            // Last poll in the future (clock change).
+            (Some(polled(-30, SourceHealth::Ok)), false),
+        ] {
+            assert_eq!(source_due(state.as_ref(), now, hour), due, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn index_reuse_cases() {
+        let now = Utc::now();
+        let day = 24 * 60 * MIN;
+        let ok = |minutes, config: &str| RepoIndexState {
+            status: Some("ok".to_owned()),
+            last_indexed_at: Some(ago(now, minutes)),
+            indexed_count: 1305,
+            config: Some(config.to_owned()),
+        };
+        let remaining = |state: Option<RepoIndexState>| {
+            index_reuse_remaining(state.as_ref(), "cfg", now, day).map(|d| d.as_secs() / 60)
+        };
+        assert_eq!(remaining(Some(ok(60, "cfg"))), Some(23 * 60));
+        assert_eq!(remaining(None), None);
+        assert_eq!(remaining(Some(ok(24 * 60, "cfg"))), None, "expired");
+        assert_eq!(remaining(Some(ok(60, "other"))), None, "config changed");
+        assert_eq!(
+            remaining(Some(RepoIndexState {
+                config: None,
+                ..ok(60, "cfg")
+            })),
+            None,
+            "built before the fingerprint was recorded"
+        );
+        assert_eq!(
+            remaining(Some(RepoIndexState {
+                indexed_count: 0,
+                ..ok(60, "cfg")
+            })),
+            None,
+            "indexed nothing"
+        );
+        for status in [None, Some("error"), Some("indexing")] {
+            assert_eq!(
+                remaining(Some(RepoIndexState {
+                    status: status.map(str::to_owned),
+                    ..ok(60, "cfg")
+                })),
+                None,
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            remaining(Some(RepoIndexState {
+                last_indexed_at: None,
+                ..ok(60, "cfg")
+            })),
+            None
+        );
+    }
 
     fn record(baseline: Option<&str>) -> UpdateRecord {
         UpdateRecord {

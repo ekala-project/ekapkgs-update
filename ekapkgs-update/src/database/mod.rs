@@ -59,8 +59,8 @@ pub use types::{FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus
 pub(crate) use updates::version_at_least;
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
 pub use watch::{
-    IndexOutcome, RepoSyncStatus, SourceHealth, SourcePoll, WatchCycleKind, WatchCycleStats,
-    WatchedRepoInfo,
+    IndexOutcome, RepoIndexState, RepoSyncStatus, SourceHealth, SourceKey, SourcePoll,
+    SourcePollState, WatchCycleKind, WatchCycleStats, WatchedRepoInfo,
 };
 
 use crate::vcs_sources::{SemverStrategy, VersionPolicy};
