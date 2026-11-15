@@ -346,7 +346,7 @@ Databases from before 20261111: `20261113_legacy_failure_backfill.sql` marks pac
 ### CommitStrategy (`cli.rs`)
 
 - **Worktrees** (default): Each update in an isolated git worktree. Full concurrency and PR support.
-- **Branch**: Direct commits to the current branch. No PRs. Updates run one at a time: `updater_concurrency` (`commands/run/config.rs`) clamps `--concurrent-updates` to 1 in `run_service`, for both `run` and `watch`, and logs a warning. The checker still uses the requested value. All updates share one working tree, and `branch_git::DirtySnapshot` treats every path dirtied after an update started as that update's own. Two updates in flight would commit each other's files, or revert them mid-build. Git operations are also serialized via `Arc<Mutex<()>>`.
+- **Branch**: Direct commits to the current branch. No PRs. Updates run one at a time: `updater_concurrency` (`commands/run/config.rs`) clamps `--concurrent-updates` to 1 in `run_service`, for both `run` and `watch`, and logs a warning. The checker still uses the requested value. All updates share one working tree, and `branch_git::DirtySnapshot` treats every path dirtied after an update started as that update's own. Deletions the update already staged (a Claude fix's `git rm`) are not passed to `git add`, whose unmatched pathspec would abort it, and a failed `git add` fails and reverts the update rather than committing a partial index. Two updates in flight would commit each other's files, or revert them mid-build. Git operations are also serialized via `Arc<Mutex<()>>`.
 
 ### PR Review (`commands/review.rs`)
 
