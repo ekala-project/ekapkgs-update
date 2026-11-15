@@ -12,9 +12,12 @@
 //! 3. The first observation of a package records its baseline and dispatches
 //!    nothing (observe-only bootstrap). Later releases newer than the
 //!    baseline are dispatched to the updater service.
-//! 4. An update session is created only for poll cycles that dispatch work.
-//!    The affected managed checkouts are fast-forwarded first, so update
-//!    worktrees (created from `HEAD`) start from the current upstream branch.
+//! 4. Updates are dispatched as soon as their source has been polled, so they
+//!    build while the rest of the sweep is still polling. An update session
+//!    (and its updater service) is created on a cycle's first dispatch. Each
+//!    managed checkout is fast-forwarded before its repo's first update of
+//!    the cycle, so update worktrees (created from `HEAD`) start from the
+//!    current upstream branch. The cycle ends when every update has finished.
 //! 5. Repos are re-synced and re-indexed every `index_refresh_interval`.
 
 use std::collections::{HashMap, HashSet};
@@ -32,7 +35,7 @@ use super::feeds::{
 };
 use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
-use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
+use crate::commands::run::{UpdateRequest, UpdaterServiceConfig, UpdaterStats};
 use crate::database::{
     Database, IndexOutcome, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
     SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
@@ -725,125 +728,220 @@ async fn poll_cycle(
         });
     }
 
-    let mut observations = Vec::new();
+    // Updates start as soon as a polled source yields one, so building
+    // overlaps with the rest of the sweep instead of waiting for it.
+    let mut dispatcher = Dispatcher::new(
+        repos,
+        db,
+        updater_config,
+        session_config,
+        cycle_id,
+        dry_run_reported,
+    );
+    let mut packages_observed = 0;
+    let mut backoff = 0;
+    let mut observed_repos: HashSet<String> = HashSet::new();
     while let Some(joined) = tasks.join_next().await {
         stats.sources_polled += 1;
-        match joined {
-            Ok(outcome) => {
-                stats.sources_failed += usize::from(outcome.failed);
-                stats.new_releases += usize::from(outcome.new_release);
-                observations.extend(outcome.observations);
-            },
+        let outcome = match joined {
+            Ok(outcome) => outcome,
             Err(e) => {
                 warn!("Source poll task panicked: {}", e);
                 stats.sources_failed += 1;
+                continue;
             },
+        };
+        stats.sources_failed += usize::from(outcome.failed);
+        stats.new_releases += usize::from(outcome.new_release);
+        packages_observed += outcome.observations.len();
+        for o in &outcome.observations {
+            match o.decision {
+                Decision::Baseline => stats.bootstrap = true,
+                Decision::Backoff => backoff += 1,
+                Decision::Dispatch => dispatcher.dispatch(o).await,
+                _ => {},
+            }
+            observed_repos.insert(o.entry.repo_name.clone());
         }
     }
 
-    stats.packages_observed = observations.len();
-    stats.bootstrap = observations
-        .iter()
-        .any(|o| o.decision == Decision::Baseline);
-    let backoff = observations
-        .iter()
-        .filter(|o| o.decision == Decision::Backoff)
-        .count();
-
-    let mut observed_repos: Vec<&str> = observations
-        .iter()
-        .map(|o| o.entry.repo_name.as_str())
-        .collect();
-    observed_repos.sort_unstable();
-    observed_repos.dedup();
+    stats.packages_observed = packages_observed;
     for repo in &observed_repos {
         if let Err(e) = db.mark_repo_bootstrapped(repo).await {
             debug!("[{}] Failed to mark bootstrapped: {:#}", repo, e);
         }
     }
 
-    let mut requests: Vec<UpdateRequest> = observations
-        .iter()
-        .filter(|o| o.decision == Decision::Dispatch)
-        .filter_map(|o| {
-            let repo = repos.iter().find(|r| r.name == o.entry.repo_name)?;
-            info!(
-                "[{}] {}: new release {} -> {}",
-                repo.label(),
-                o.entry.attr_path,
-                o.current,
-                o.latest
-            );
-            Some(UpdateRequest {
-                attr_path: o.entry.attr_path.clone(),
-                drv_path: o.entry.drv_path.clone(),
-                current_version: o.current.clone(),
-                new_version: o.latest.clone(),
-                repo_name: Some(repo.name.clone()),
-                eval_entry_point: Some(repo.eval_entry_point.clone()),
-                pr_config: repo.pr_config.clone(),
-                fork: Some(repo.fork.clone()),
-            })
-        })
-        .collect();
-    if updater_config.dry_run {
-        requests.retain(|r| {
-            dry_run_reported.insert((
-                r.repo().to_owned(),
-                r.attr_path.clone(),
-                r.new_version.clone(),
-            ))
-        });
-    }
-    if requests.is_empty() {
-        return Ok(());
-    }
-    requests.sort_by(|a, b| (a.repo(), &a.attr_path).cmp(&(b.repo(), &b.attr_path)));
-    stats.dispatched = requests.len();
+    dispatcher.finish(stats, packages_observed, backoff).await
+}
 
-    // Base the update worktrees on the current upstream branch. Nothing else
-    // touches the checkouts while this runs: the loop handles one event at a
-    // time and waits for the batch to finish. (Fast-forward only; unmanaged
-    // checkouts are never touched.)
-    if !updater_config.dry_run {
-        let affected: HashSet<&str> = requests.iter().map(UpdateRequest::repo).collect();
-        for repo in repos.iter().filter(|r| affected.contains(r.name.as_str())) {
-            sync::sync_repo(repo, db).await;
+/// Feeds a poll cycle's dispatched updates to an updater service that is
+/// started (with its session) on the first dispatch.
+struct Dispatcher<'a> {
+    repos: &'a [ResolvedRepo],
+    db: &'a Database,
+    updater_config: &'a UpdaterServiceConfig,
+    session_config: &'a serde_json::Value,
+    cycle_id: Option<i64>,
+    dry_run_reported: &'a mut DryRunReported,
+    /// Repos whose checkout was synced before their first update this cycle.
+    synced: HashSet<String>,
+    service: Option<RunningService>,
+    dispatched: usize,
+    /// Set when the session could not be created; nothing more is dispatched.
+    error: Option<anyhow::Error>,
+}
+
+struct RunningService {
+    session_id: String,
+    tx: mpsc::UnboundedSender<UpdateRequest>,
+    handle: tokio::task::JoinHandle<UpdaterStats>,
+}
+
+impl<'a> Dispatcher<'a> {
+    fn new(
+        repos: &'a [ResolvedRepo],
+        db: &'a Database,
+        updater_config: &'a UpdaterServiceConfig,
+        session_config: &'a serde_json::Value,
+        cycle_id: Option<i64>,
+        dry_run_reported: &'a mut DryRunReported,
+    ) -> Self {
+        Self {
+            repos,
+            db,
+            updater_config,
+            session_config,
+            cycle_id,
+            dry_run_reported,
+            synced: HashSet::new(),
+            service: None,
+            dispatched: 0,
+            error: None,
         }
     }
 
-    // Lazy session: only cycles that dispatch work get one.
-    let mut config = session_config.clone();
-    if let Some(obj) = config.as_object_mut() {
-        obj.insert("cycle_id".to_owned(), serde_json::json!(cycle_id));
-        obj.insert("dispatched".to_owned(), serde_json::json!(requests.len()));
+    async fn dispatch(&mut self, o: &Observation) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(repo) = self.repos.iter().find(|r| r.name == o.entry.repo_name) else {
+            return;
+        };
+        let dry_run = self.updater_config.dry_run;
+        if dry_run
+            && !self.dry_run_reported.insert((
+                repo.name.clone(),
+                o.entry.attr_path.clone(),
+                o.latest.clone(),
+            ))
+        {
+            return;
+        }
+        info!(
+            "[{}] {}: new release {} -> {}",
+            repo.label(),
+            o.entry.attr_path,
+            o.current,
+            o.latest
+        );
+
+        // Base the repo's update worktrees (created from `HEAD`) on the
+        // current upstream branch. Its first update of the cycle has not been
+        // sent yet, so none of its worktrees exist; other repos' updates may
+        // be running, but they use separate checkouts. (Fast-forward only;
+        // unmanaged checkouts are never touched.)
+        if !dry_run && self.synced.insert(repo.name.clone()) {
+            sync::sync_repo(repo, self.db).await;
+        }
+
+        let request = UpdateRequest {
+            attr_path: o.entry.attr_path.clone(),
+            drv_path: o.entry.drv_path.clone(),
+            current_version: o.current.clone(),
+            new_version: o.latest.clone(),
+            repo_name: Some(repo.name.clone()),
+            eval_entry_point: Some(repo.eval_entry_point.clone()),
+            pr_config: repo.pr_config.clone(),
+            fork: Some(repo.fork.clone()),
+        };
+        let service = match self.service.as_mut() {
+            Some(service) => service,
+            None => match self.start().await {
+                Ok(service) => self.service.insert(service),
+                Err(e) => {
+                    warn!("Failed to start update session, not dispatching: {:#}", e);
+                    self.error = Some(e);
+                    return;
+                },
+            },
+        };
+        if service.tx.send(request).is_ok() {
+            self.dispatched += 1;
+        } else {
+            self.error = Some(anyhow::anyhow!("updater channel closed"));
+        }
     }
-    let session_id = db
-        .create_session(SessionMode::Watch, Some(config.to_string()))
-        .await?;
-    stats.session_id = Some(session_id.clone());
 
-    let mut cycle_config = updater_config.clone();
-    cycle_config.session_id = session_id.clone();
-    let (tx, rx) = mpsc::unbounded_channel();
-    for req in requests {
-        tx.send(req)
-            .map_err(|_| anyhow::anyhow!("updater channel closed"))?;
+    /// Lazy session: only cycles that dispatch work get one.
+    async fn start(&self) -> anyhow::Result<RunningService> {
+        let mut config = self.session_config.clone();
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert("cycle_id".to_owned(), serde_json::json!(self.cycle_id));
+        }
+        let session_id = self
+            .db
+            .create_session(SessionMode::Watch, Some(config.to_string()))
+            .await?;
+        let mut cycle_config = self.updater_config.clone();
+        cycle_config.session_id = session_id.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let db = self.db.clone();
+        let handle = tokio::spawn(async move { cycle_config.run_service(rx, db).await });
+        Ok(RunningService {
+            session_id,
+            tx,
+            handle,
+        })
     }
-    drop(tx);
 
-    let outcome = cycle_config.run_service(rx, db.clone()).await;
-    stats.updated = outcome.updated + outcome.dry_run;
-    stats.failed = outcome.failed;
-
-    let status = if outcome.failed > 0 {
-        SessionStatus::Failed
-    } else {
-        SessionStatus::Completed
-    };
-    db.finalize_session(&session_id, status, stats.packages_observed, backoff)
-        .await?;
-    Ok(())
+    /// Close the channel, wait for the dispatched updates and finalize the
+    /// session.
+    async fn finish(
+        self,
+        stats: &mut WatchCycleStats,
+        packages_observed: usize,
+        backoff: usize,
+    ) -> anyhow::Result<()> {
+        stats.dispatched = self.dispatched;
+        if let Some(RunningService {
+            session_id,
+            tx,
+            handle,
+        }) = self.service
+        {
+            stats.session_id = Some(session_id.clone());
+            drop(tx);
+            let outcome = handle.await.unwrap_or_else(|e| {
+                warn!("Updater service panicked: {}", e);
+                UpdaterStats {
+                    failed: self.dispatched,
+                    ..UpdaterStats::default()
+                }
+            });
+            stats.updated = outcome.updated + outcome.dry_run;
+            stats.failed = outcome.failed;
+            let status = if outcome.failed > 0 {
+                SessionStatus::Failed
+            } else {
+                SessionStatus::Completed
+            };
+            self.db
+                .finalize_session(&session_id, status, packages_observed, backoff)
+                .await?;
+        }
+        self.error.map_or(Ok(()), Err)
+    }
 }
 
 #[cfg(test)]
