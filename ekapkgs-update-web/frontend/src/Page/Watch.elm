@@ -36,7 +36,7 @@ type alias Data =
     , perPage : Int
     , lastPoll : Maybe Api.Cycle
     , sourceTypes : List Api.SourceTypeCount
-    , failingSources : List Api.Source
+    , problemSources : List Api.Source
     , recentReleases : List Api.Source
     }
 
@@ -53,7 +53,7 @@ decoder =
         |> Api.required "per_page" D.int
         |> Api.nullable "last_poll" Api.cycle
         |> Api.required "source_types" (D.list Api.sourceTypeCount)
-        |> Api.required "failing_sources" (D.list Api.source)
+        |> Api.required "problem_sources" (D.list Api.source)
         |> Api.required "recent_releases" (D.list Api.source)
 
 
@@ -91,7 +91,7 @@ view ctx data =
                     , viewCycles ctx data
                     , div [ class "grid-2" ]
                         [ viewTypes data.sourceTypes
-                        , viewFailing ctx.now data.failingSources
+                        , viewProblems ctx.now data.problemSources
                         ]
                     , viewRecent ctx.now data.recentReleases
                     ]
@@ -213,6 +213,12 @@ viewTiles now data =
         failingTotal =
             List.sum (List.map .failing data.sourceTypes)
 
+        notFoundTotal =
+            List.sum (List.map .notFound data.sourceTypes)
+
+        movedTotal =
+            List.sum (List.map .moved data.sourceTypes)
+
         backlog =
             List.sum (List.map .backlogCount data.repos)
 
@@ -235,6 +241,14 @@ viewTiles now data =
         , div [ class "tile" ]
             [ span [ class "tile-label" ] (dot "serious" (failingTotal > 0) ++ [ text "Failing sources" ])
             , span [ class "tile-value" ] [ text (Format.thousands failingTotal) ]
+            ]
+        , div [ class "tile" ]
+            [ span [ class "tile-label" ] (dot "critical" (notFoundTotal > 0) ++ [ text "Not found" ])
+            , span [ class "tile-value" ] [ text (Format.thousands notFoundTotal) ]
+            ]
+        , div [ class "tile" ]
+            [ span [ class "tile-label" ] (dot "warn" (movedTotal > 0) ++ [ text "Moved" ])
+            , span [ class "tile-value" ] [ text (Format.thousands movedTotal) ]
             ]
         , div [ class "tile" ]
             [ a [ class "tile-link", href "/packages?status=backlog" ]
@@ -558,6 +572,10 @@ viewTypes types =
                 ++ " sources, "
                 ++ Format.thousands t.failing
                 ++ " failing, "
+                ++ Format.thousands t.notFound
+                ++ " not found, "
+                ++ Format.thousands t.moved
+                ++ " moved, "
                 ++ Format.thousands t.neverPolled
                 ++ " never polled"
 
@@ -585,6 +603,8 @@ viewTypes types =
                 [ td [] [ text t.upstreamType ]
                 , td [ class "num" ] [ text (Format.thousands t.total) ]
                 , td [ class "num" ] [ text (Format.thousands t.neverPolled) ]
+                , td [ class "num" ] [ text (Format.thousands t.notFound) ]
+                , td [ class "num" ] [ text (Format.thousands t.moved) ]
                 , td []
                     [ span [ class "meter" ]
                         [ span
@@ -607,29 +627,11 @@ viewTypes types =
          else
             [ ol [ class "hbars" ] (List.map bar types)
             , table [ class "table compact" ]
-                [ thead [] [ tr [] [ th_ "Type", thNum "Sources", thNum "Never polled", th_ "Failing" ] ]
+                [ thead [] [ tr [] [ th_ "Type", thNum "Sources", thNum "Never polled", thNum "Not found", thNum "Moved", th_ "Failing" ] ]
                 , tbody [] (List.map row types)
                 ]
             ]
         )
-
-
-sourceBadge : Api.Source -> Format.Badge
-sourceBadge s =
-    if s.consecutiveFailures > 0 then
-        Format.badge ("failing ×" ++ String.fromInt s.consecutiveFailures)
-            (if s.consecutiveFailures >= 3 then
-                "critical"
-
-             else
-                "serious"
-            )
-
-    else if s.lastPolledAt == Nothing then
-        Format.badge "not polled" "neutral"
-
-    else
-        Format.badge "ok" "good"
 
 
 sourceName : Api.Source -> List (Html Msg)
@@ -645,23 +647,25 @@ sourceName s =
     ]
 
 
-viewFailing : Time.Posix -> List Api.Source -> Html Msg
-viewFailing now sources =
-    section [ class "panel", attribute "aria-labelledby" "failing-sources" ]
-        [ header [ class "panel-head" ] [ h2 [ id "failing-sources" ] [ text "Failing sources" ] ]
+viewProblems : Time.Posix -> List Api.Source -> Html Msg
+viewProblems now sources =
+    section [ class "panel", attribute "aria-labelledby" "problem-sources" ]
+        [ header [ class "panel-head" ] [ h2 [ id "problem-sources" ] [ text "Problem sources" ] ]
         , if List.isEmpty sources then
-            p [ class "muted" ] [ text "Every polled source answered on its last poll." ]
+            p [ class "muted" ] [ text "Every polled source answered at its indexed location." ]
 
           else
             div [ class "table-wrap" ]
-                [ table [ class "table compact" ]
-                    [ thead [] [ tr [] [ th_ "Source", th_ "Failures", th_ "Last success", thNum "Packages" ] ]
+                [ p [ class "muted small" ]
+                    [ text "Not found: deleted, private, or the package points at the wrong location. Moved: still answering through a redirect; point the package at the new location." ]
+                , table [ class "table compact" ]
+                    [ thead [] [ tr [] [ th_ "Source", th_ "Health", th_ "Last success", thNum "Packages" ] ]
                     , tbody []
                         (List.map
                             (\s ->
                                 tr []
-                                    [ td [] (sourceName s ++ errorLine s.lastError)
-                                    , td [] [ View.badge (sourceBadge s) ]
+                                    [ td [] (sourceName s ++ View.sourceMovedTo s ++ errorLine s.lastError)
+                                    , td [] [ View.sourceBadge s ]
                                     , td [] [ View.ts now s.lastSuccessAt ]
                                     , td [ class "num" ] [ text (Format.thousands s.packageCount) ]
                                     ]
@@ -736,5 +740,5 @@ viewRecentRow now s =
         , td [] [ View.ts now s.latestChangedAt ]
         , td [ class "num" ] [ text (optCount s.releaseCount) ]
         , td [ class "num" ] [ text (Format.thousands s.packageCount) ]
-        , td [] [ View.badge (sourceBadge s) ]
+        , td [] [ View.sourceBadge s ]
         ]

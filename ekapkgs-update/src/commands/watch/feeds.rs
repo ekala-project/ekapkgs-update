@@ -10,8 +10,9 @@ use std::cmp::Ordering;
 use anyhow::Context;
 use tracing::{debug, warn};
 
-use crate::database::UpstreamIndexEntry;
-use crate::vcs_sources::{Release, UpstreamSource, compare_version_components};
+use crate::database::{SourceHealth, UpstreamIndexEntry};
+use crate::github::parse_github_url;
+use crate::vcs_sources::{HttpStatusError, Release, UpstreamSource, compare_version_components};
 
 /// Decide whether an indexed package should be updated, given the releases
 /// polled for its upstream source.
@@ -30,15 +31,32 @@ pub fn update_version_for_entry(
     (compare_version_components(&version, current) == Ordering::Greater).then_some(version)
 }
 
+/// Releases polled from an upstream source.
+#[derive(Debug, Default)]
+pub struct PolledSource {
+    pub releases: Vec<Release>,
+    /// Where the source answered from when it redirected to another
+    /// repository (a GitHub rename or transfer), as `owner/repo`.
+    pub moved_to: Option<String>,
+}
+
 /// Poll a single upstream source for its releases.
 ///
 /// Uses RSS/Atom feeds when available (GitHub, PyPI) and falls back to API
-/// polling for platforms without feed support.
-pub async fn poll_source(source: &UpstreamSource) -> anyhow::Result<Vec<Release>> {
+/// polling for platforms without feed support. A feed that redirects to
+/// another repository marks the source as moved (the GitHub API redirects to
+/// a numeric repository id, so only the feed shows the new name).
+pub async fn poll_source(source: &UpstreamSource) -> anyhow::Result<PolledSource> {
+    let mut moved_to = None;
     for feed_url in source.feed_urls() {
         match poll_feed(&feed_url).await {
-            Ok(releases) if !releases.is_empty() => return Ok(releases),
-            Ok(_) => {
+            Ok((releases, final_url)) => {
+                if moved_to.is_none() {
+                    moved_to = relocation(source, &final_url);
+                }
+                if !releases.is_empty() {
+                    return Ok(PolledSource { releases, moved_to });
+                }
                 debug!(
                     "{}/{}: feed {} returned no entries",
                     source.source_type(),
@@ -59,17 +77,39 @@ pub async fn poll_source(source: &UpstreamSource) -> anyhow::Result<Vec<Release>
     }
 
     // Fall back to existing API-based fetching
-    source.fetch_all_releases().await.with_context(|| {
+    let releases = source.fetch_all_releases().await.with_context(|| {
         format!(
             "API poll failed for {}/{}",
             source.source_type(),
             source.source_key()
         )
-    })
+    })?;
+    Ok(PolledSource { releases, moved_to })
 }
 
-/// Fetch and parse an RSS or Atom feed, returning releases.
-async fn poll_feed(url: &str) -> anyhow::Result<Vec<Release>> {
+/// The repository a source answered from, when a request for it was
+/// redirected elsewhere (`owner/repo`). Case-only differences are not moves.
+pub fn relocation(source: &UpstreamSource, final_url: &str) -> Option<String> {
+    let UpstreamSource::GitHub { owner, repo } = source else {
+        return None;
+    };
+    let actual = parse_github_url(final_url)?;
+    (!actual.owner.eq_ignore_ascii_case(owner) || !actual.repo.eq_ignore_ascii_case(repo))
+        .then(|| format!("{}/{}", actual.owner, actual.repo))
+}
+
+/// Health of a source whose poll failed with `err`.
+pub fn failure_health(err: &anyhow::Error) -> SourceHealth {
+    if HttpStatusError::find(err).is_some_and(HttpStatusError::is_not_found) {
+        SourceHealth::NotFound
+    } else {
+        SourceHealth::Error
+    }
+}
+
+/// Fetch and parse an RSS or Atom feed, returning releases and the URL
+/// that answered (after redirects).
+async fn poll_feed(url: &str) -> anyhow::Result<(Vec<Release>, String)> {
     let client = reqwest::Client::builder()
         .user_agent("ekapkgs-update/0.1")
         .timeout(std::time::Duration::from_secs(30))
@@ -84,13 +124,14 @@ async fn poll_feed(url: &str) -> anyhow::Result<Vec<Release>> {
     if !response.status().is_success() {
         anyhow::bail!("feed {} returned HTTP {}", url, response.status());
     }
+    let final_url = response.url().to_string();
 
     let body = response
         .bytes()
         .await
         .with_context(|| format!("read feed body from {url}"))?;
 
-    parse_feed_bytes(&body)
+    Ok((parse_feed_bytes(&body)?, final_url))
 }
 
 /// Parse raw RSS/Atom feed bytes into releases.
@@ -395,6 +436,71 @@ mod tests {
         assert_eq!(
             explicit.description(),
             "Directory listing: libpng (https://sourceforge.net/projects/libpng/files/)"
+        );
+    }
+
+    #[test]
+    fn relocation_cases() {
+        let gh = UpstreamSource::GitHub {
+            owner: "rust-lang-nursery".to_owned(),
+            repo: "rustfmt".to_owned(),
+        };
+        for (final_url, expected) in [
+            (
+                "https://github.com/rust-lang-nursery/rustfmt/releases.atom",
+                None,
+            ),
+            (
+                "https://github.com/Rust-Lang-Nursery/RustFmt/releases.atom",
+                None,
+            ),
+            (
+                "https://github.com/rust-lang/rustfmt/releases.atom",
+                Some("rust-lang/rustfmt"),
+            ),
+            (
+                "https://github.com/rust-lang-nursery/rustfmt-old/tags.atom",
+                Some("rust-lang-nursery/rustfmt-old"),
+            ),
+            ("https://github.com/login?return_to=x", None),
+        ] {
+            assert_eq!(
+                relocation(&gh, final_url).as_deref(),
+                expected,
+                "{final_url}"
+            );
+        }
+        let pypi = UpstreamSource::PyPI {
+            pname: "requests".to_owned(),
+        };
+        assert_eq!(
+            relocation(&pypi, "https://pypi.org/rss/project/other/releases.xml"),
+            None
+        );
+    }
+
+    #[test]
+    fn failure_health_cases() {
+        use reqwest::StatusCode;
+        let status = |code| -> anyhow::Error {
+            anyhow::Error::new(HttpStatusError::new("GitHub tags API request", code))
+                .context("API poll failed for github/o/r")
+        };
+        assert_eq!(
+            failure_health(&status(StatusCode::NOT_FOUND)),
+            SourceHealth::NotFound
+        );
+        assert_eq!(
+            failure_health(&status(StatusCode::GONE)),
+            SourceHealth::NotFound
+        );
+        assert_eq!(
+            failure_health(&status(StatusCode::FORBIDDEN)),
+            SourceHealth::Error
+        );
+        assert_eq!(
+            failure_health(&anyhow::anyhow!("error sending request")),
+            SourceHealth::Error
         );
     }
 

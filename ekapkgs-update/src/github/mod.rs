@@ -6,6 +6,8 @@ use anyhow::Context;
 use regex::Regex;
 use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
+
+use crate::vcs_sources::HttpStatusError;
 use tracing::debug;
 
 /// User-Agent value sent with every GitHub API request.
@@ -183,10 +185,7 @@ pub async fn fetch_github_tags(
             .with_context(|| format!("GET {url}"))?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GitHub tags API request failed with status: {}",
-                response.status()
-            );
+            return Err(HttpStatusError::new("GitHub tags API request", response.status()).into());
         }
 
         let tags: Vec<GithubTag> = response
@@ -240,10 +239,7 @@ pub async fn fetch_github_releases(
         .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "GitHub releases API request failed with status: {}",
-            response.status()
-        );
+        return Err(HttpStatusError::new("GitHub releases API request", response.status()).into());
     }
 
     let releases: Vec<GithubRelease> = response

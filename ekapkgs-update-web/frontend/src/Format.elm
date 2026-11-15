@@ -33,6 +33,7 @@ module Format exposing
     , shortId
     , shortSha
     , shortVersion
+    , sourceBadge
     , statusBadge
     , thousands
     , tone
@@ -790,6 +791,35 @@ type alias Badge =
 badge : String -> String -> Badge
 badge label t =
     { label = label, tone = t }
+
+
+{-| Badge for an upstream source's poll health: its `health` value, its
+consecutive failures and whether it has been polled at all.
+-}
+sourceBadge : String -> Int -> Bool -> Badge
+sourceBadge health failures polled =
+    case health of
+        "not_found" ->
+            badge "not found" "critical"
+
+        "moved" ->
+            badge "moved" "warn"
+
+        _ ->
+            if failures > 0 then
+                badge ("failing ×" ++ String.fromInt failures)
+                    (if failures >= 3 then
+                        "critical"
+
+                     else
+                        "serious"
+                    )
+
+            else if not polled then
+                badge "not polled" "neutral"
+
+            else
+                badge "ok" "good"
 
 
 {-| Badge for a raw status value, labelled with the humanised value.

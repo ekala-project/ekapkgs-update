@@ -855,7 +855,7 @@ viewWatch now w =
                         (text (Format.thousands sourcesTotal)
                             :: (if sourcesFailing > 0 then
                                     [ text " · "
-                                    , a [ href "/watch#failing-sources", class "tone-text-serious" ]
+                                    , a [ href "/watch#problem-sources", class "tone-text-serious" ]
                                         [ text (Format.thousands sourcesFailing ++ " failing") ]
                                     ]
 

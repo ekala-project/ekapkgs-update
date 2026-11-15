@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use anyhow::Context;
 use regex::Regex;
 use serde::Deserialize;
+
+use crate::vcs_sources::HttpStatusError;
 use tracing::debug;
 
 /// GitLab release information from the API
@@ -123,10 +125,7 @@ pub async fn fetch_gitlab_tags(
     let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "GitLab tags API request failed with status: {}",
-            response.status()
-        );
+        return Err(HttpStatusError::new("GitLab tags API request", response.status()).into());
     }
 
     let tags: Vec<GitlabTag> = response
@@ -170,10 +169,7 @@ pub async fn fetch_gitlab_releases(
     let response = request.send().await.with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "GitLab releases API request failed with status: {}",
-            response.status()
-        );
+        return Err(HttpStatusError::new("GitLab releases API request", response.status()).into());
     }
 
     let releases: Vec<GitlabRelease> = response

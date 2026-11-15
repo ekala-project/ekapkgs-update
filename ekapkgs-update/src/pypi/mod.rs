@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use serde::Deserialize;
+
+use crate::vcs_sources::HttpStatusError;
 use tracing::debug;
 
 pub mod sdist;
@@ -64,7 +66,7 @@ pub async fn fetch_pypi_releases(pname: &str) -> anyhow::Result<PypiResponse> {
         .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!("PyPI API request failed with status: {}", response.status());
+        return Err(HttpStatusError::new("PyPI API request", response.status()).into());
     }
 
     let pypi_response: PypiResponse = response
@@ -108,7 +110,7 @@ pub async fn fetch_release_files(pname: &str, version: &str) -> anyhow::Result<V
         .with_context(|| format!("GET {url}"))?;
 
     if !response.status().is_success() {
-        anyhow::bail!("PyPI API request failed with status: {}", response.status());
+        return Err(HttpStatusError::new("PyPI API request", response.status()).into());
     }
 
     let release: PypiReleaseResponse = response

@@ -651,6 +651,8 @@ type alias Source =
     , lastSuccessAt : Maybe String
     , lastError : Maybe String
     , consecutiveFailures : Int
+    , health : String
+    , movedTo : Maybe String
     , packageCount : Int
     }
 
@@ -670,6 +672,8 @@ source =
         |> mstr "last_success_at"
         |> mstr "last_error"
         |> int "consecutive_failures"
+        |> str "health"
+        |> mstr "moved_to"
         |> int "package_count"
 
 
@@ -677,6 +681,8 @@ type alias SourceTypeCount =
     { upstreamType : String
     , total : Int
     , failing : Int
+    , notFound : Int
+    , moved : Int
     , neverPolled : Int
     }
 
@@ -687,6 +693,8 @@ sourceTypeCount =
         |> str "upstream_type"
         |> int "total"
         |> int "failing"
+        |> int "not_found"
+        |> int "moved"
         |> int "never_polled"
 
 

@@ -32,7 +32,16 @@ day =
 suite : Test
 suite =
     describe "Format"
-        [ cases "parseTs"
+        [ cases "sourceBadge"
+            (\( health, failures, polled ) -> Format.sourceBadge health failures polled)
+            [ ( ( "ok", 0, True ), Format.badge "ok" "good" )
+            , ( ( "ok", 0, False ), Format.badge "not polled" "neutral" )
+            , ( ( "error", 1, True ), Format.badge "failing ×1" "serious" )
+            , ( ( "error", 3, True ), Format.badge "failing ×3" "critical" )
+            , ( ( "not_found", 1, True ), Format.badge "not found" "critical" )
+            , ( ( "moved", 0, True ), Format.badge "moved" "warn" )
+            ]
+        , cases "parseTs"
             (Format.parseTs >> Maybe.map Time.posixToMillis)
             [ ( "1970-01-01T00:00:00Z", Just 0 )
             , ( "1969-12-31T23:59:59Z", Just -1000 )

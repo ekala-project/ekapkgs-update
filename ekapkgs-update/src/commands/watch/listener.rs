@@ -22,7 +22,9 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
-use super::feeds::{poll_source, update_version_for_entry, upstream_source_from_index};
+use super::feeds::{
+    PolledSource, failure_health, poll_source, update_version_for_entry, upstream_source_from_index,
+};
 use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
@@ -333,10 +335,11 @@ async fn poll_one_source(
         return outcome;
     };
 
-    let releases = match poll_source(&source).await {
-        Ok(releases) => releases,
+    let PolledSource { releases, moved_to } = match poll_source(&source).await {
+        Ok(polled) => polled,
         Err(e) => {
             let message = format!("{e:#}");
+            let health = failure_health(&e);
             debug!("{}/{}: poll failed: {}", kind, key, message);
             outcome.failed = true;
             if let Err(e) = db
@@ -344,7 +347,10 @@ async fn poll_one_source(
                     kind,
                     key,
                     instance,
-                    &SourcePoll::Failure { error: &message },
+                    &SourcePoll::Failure {
+                        error: &message,
+                        health,
+                    },
                 )
                 .await
             {
@@ -365,6 +371,7 @@ async fn poll_one_source(
                 latest_version: newest_version,
                 latest_tag: newest.map(|r| r.tag_name.as_str()),
                 release_count: releases.len(),
+                moved_to: moved_to.as_deref(),
             },
         )
         .await

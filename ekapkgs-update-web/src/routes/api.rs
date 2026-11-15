@@ -44,6 +44,8 @@ const PACKAGE_LOGS: i64 = 15;
 const SESSION_LOGS: i64 = 20;
 /// Sources listed in each watch-page table.
 const WATCH_SOURCES: i64 = 25;
+/// Problem sources on the watch page (not found / moved / failing).
+const PROBLEM_SOURCES: i64 = 200;
 /// Rows in the analytics "top" tables.
 const TOP_ROWS: i64 = 10;
 /// Session statuses and modes the session filters accept.
@@ -110,6 +112,8 @@ pub async fn stats(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         "upstream_sources": {
             "total": sources.iter().map(|s| s.total).sum::<i64>(),
             "failing": sources.iter().map(|s| s.failing).sum::<i64>(),
+            "not_found": sources.iter().map(|s| s.not_found).sum::<i64>(),
+            "moved": sources.iter().map(|s| s.moved).sum::<i64>(),
         },
     })))
 }
@@ -330,7 +334,7 @@ pub async fn watch(
         "per_page": limit,
         "last_poll": watch_q::last_poll(pool).await?,
         "source_types": watch_q::source_type_counts(pool).await?,
-        "failing_sources": watch_q::failing_sources(pool, WATCH_SOURCES).await?,
+        "problem_sources": watch_q::problem_sources(pool, PROBLEM_SOURCES).await?,
         "recent_releases": watch_q::recent_releases(pool, WATCH_SOURCES).await?,
     })))
 }

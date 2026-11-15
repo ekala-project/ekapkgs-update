@@ -69,7 +69,7 @@ macro_rules! source_columns {
     () => {
         "s.upstream_type, s.upstream_key, s.instance, s.latest_version, s.latest_tag, \
          s.release_count, s.latest_changed_at, s.first_seen_at, s.last_polled_at, \
-         s.last_success_at, s.last_error, s.consecutive_failures, \
+         s.last_success_at, s.last_error, s.consecutive_failures, s.health, s.moved_to, \
          (SELECT COUNT(DISTINCT i.attr_path) FROM upstream_index i \
           WHERE i.upstream_type = s.upstream_type AND i.upstream_key = s.upstream_key \
             AND COALESCE(i.instance, '') = s.instance) AS package_count"

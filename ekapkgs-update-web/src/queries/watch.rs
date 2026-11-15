@@ -140,14 +140,21 @@ pub struct SourceRow {
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub consecutive_failures: i64,
+    /// `ok`, `error`, `not_found` or `moved` (see the 20261115 migration).
+    pub health: String,
+    /// New `owner/repo` of a `moved` source.
+    pub moved_to: Option<String>,
     pub package_count: i64,
 }
 
-/// Sources with consecutive poll failures, worst first.
-pub async fn failing_sources(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<SourceRow>> {
+/// Sources that need attention: not found (deleted or wrong location) first,
+/// then moved, then failing for other reasons, most failures first.
+pub async fn problem_sources(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<SourceRow>> {
     let sql = format!(
-        "SELECT {} FROM upstream_sources s WHERE s.consecutive_failures > 0 \
-         ORDER BY s.consecutive_failures DESC, s.last_polled_at DESC LIMIT ?1",
+        "SELECT {} FROM upstream_sources s \
+         WHERE s.health <> 'ok' OR s.consecutive_failures > 0 \
+         ORDER BY CASE s.health WHEN 'not_found' THEN 0 WHEN 'moved' THEN 1 ELSE 2 END, \
+           s.consecutive_failures DESC, s.upstream_type, s.upstream_key LIMIT ?1",
         source_columns!()
     );
     sqlx::query_as(&sql).bind(limit).fetch_all(pool).await
@@ -169,6 +176,9 @@ pub struct SourceTypeCount {
     pub upstream_type: String,
     pub total: i64,
     pub failing: i64,
+    /// Failing with HTTP 404/410 (a subset of `failing`).
+    pub not_found: i64,
+    pub moved: i64,
     pub never_polled: i64,
 }
 
@@ -177,6 +187,8 @@ pub async fn source_type_counts(pool: &SqlitePool) -> sqlx::Result<Vec<SourceTyp
     sqlx::query_as(
         "SELECT upstream_type, COUNT(*) AS total, \
          COALESCE(SUM(CASE WHEN consecutive_failures > 0 THEN 1 ELSE 0 END), 0) AS failing, \
+         COALESCE(SUM(CASE WHEN health = 'not_found' THEN 1 ELSE 0 END), 0) AS not_found, \
+         COALESCE(SUM(CASE WHEN health = 'moved' THEN 1 ELSE 0 END), 0) AS moved, \
          COALESCE(SUM(CASE WHEN last_polled_at IS NULL THEN 1 ELSE 0 END), 0) AS never_polled \
          FROM upstream_sources GROUP BY upstream_type ORDER BY total DESC, upstream_type",
     )
