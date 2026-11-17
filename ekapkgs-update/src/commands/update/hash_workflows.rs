@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use tracing::{debug, info, warn};
 
-use super::{
-    ReleaseTag, build_nix_expr, update_cargo_hash, update_composer_deps_hash, update_nix_file,
-    update_npm_deps_hash, update_nuget_deps_hash, update_vendor_hash,
-};
+use super::{ReleaseTag, build_nix_expr, build_nix_expr_with, update_hash_attr, update_nix_file};
 use crate::hash_discovery;
+
+/// The invalid hash written to provoke a hash mismatch.
+const FAKE_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 use crate::package::PackageQuery;
 use crate::pypi::sdist::{
     SdistFix, Wheel, WheelFix, plan_sdist_fix, plan_wheel_fix, wheel_url_dist,
@@ -30,8 +30,12 @@ pub async fn update_source_hash(
     release_tag: Option<ReleaseTag<'_>>,
     pypi_pname: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
+    // Files to put back if the source can't be updated
+    let package_dir = file_location.parent().unwrap_or(file_location);
+    let snapshot = super::file_update::package_files(package_dir).await?;
+
     // Step 1: Update version in file with invalid hash
-    let invalid_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let invalid_hash = FAKE_HASH;
     let actual_file_location = update_nix_file(
         eval_entry_point,
         attr_path,
@@ -49,31 +53,27 @@ pub async fn update_source_hash(
         actual_file_location.display()
     );
 
-    if let Some(pypi_pname) = pypi_pname {
-        align_pypi_src(&PypiSrc {
-            query: PackageQuery::new(eval_entry_point, attr_path),
-            attr_path,
-            nix_file: &actual_file_location,
-            pypi_pname,
-            version: new_version,
-        })
-        .await?;
-    }
-
-    // Step 2: Build source to get correct hash
-    let (success, _stdout, stderr) =
-        build_nix_expr(eval_entry_point, attr_path, Some("src")).await?;
-
-    if success {
-        warn!("Build succeeded with invalid hash - this shouldn't happen");
-        anyhow::bail!("Expected hash mismatch error but build succeeded");
-    }
-
-    let correct_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-        anyhow::anyhow!("Could not extract correct hash from build error:\n{stderr}")
-    })?;
-
-    info!("Extracted correct hash: {}", correct_hash);
+    let discovered = discover_source_hash(
+        eval_entry_point,
+        attr_path,
+        &actual_file_location,
+        (old_version, new_version),
+        old_hash,
+        pypi_pname,
+    )
+    .await;
+    let correct_hash = match discovered {
+        Ok(hash) => hash,
+        Err(e) => {
+            // Leave the package as it was: no fake hash, no half-done bump.
+            for (path, content) in &snapshot {
+                if let Err(restore) = tokio::fs::write(path, content).await {
+                    warn!("Could not restore {}: {restore}", path.display());
+                }
+            }
+            return Err(e);
+        },
+    };
 
     // Step 3: Update hash with correct value
     update_nix_file(
@@ -101,6 +101,57 @@ pub async fn update_source_hash(
     info!("Source build successful");
 
     Ok(actual_file_location)
+}
+
+/// Steps 2 of [`update_source_hash`]: with the fake hash written, align a PyPI
+/// source and learn the real hash from the mismatch.
+async fn discover_source_hash(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file: &Path,
+    versions: (&str, &str),
+    old_hash: Option<&str>,
+    pypi_pname: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(pypi_pname) = pypi_pname {
+        align_pypi_src(&PypiSrc {
+            query: PackageQuery::new(eval_entry_point, attr_path),
+            attr_path,
+            nix_file: file,
+            pypi_pname,
+            version: versions.1,
+        })
+        .await?;
+    }
+
+    // Step 2: Build source to get correct hash
+    let (success, _stdout, stderr) =
+        build_nix_expr(eval_entry_point, attr_path, Some("src")).await?;
+
+    if success {
+        warn!("Build succeeded with invalid hash - this shouldn't happen");
+        anyhow::bail!("Expected hash mismatch error but build succeeded");
+    }
+
+    let correct_hash = hash_discovery::extract_hash_for(&stderr, FAKE_HASH).ok_or_else(|| {
+        anyhow::anyhow!("Could not extract correct hash from build error:\n{stderr}")
+    })?;
+
+    info!("Extracted correct hash: {}", correct_hash);
+
+    // A new version with the old source means the fetcher doesn't follow the
+    // version (a literal tag, rev or URL): the "update" would only relabel it.
+    let (old_version, new_version) = versions;
+    if old_version != new_version
+        && old_hash.is_some_and(|old| super::fod_refresh::same_hash(&correct_hash, old))
+    {
+        anyhow::bail!(
+            "The source of {attr_path} did not change from {old_version} to {new_version} \
+             (hash {correct_hash}): its fetcher does not follow the version. Make its \
+             tag/rev/url derive from `version`."
+        );
+    }
+    Ok(correct_hash)
 }
 
 /// A package whose `fetchPypi` source is being checked against PyPI.
@@ -324,82 +375,48 @@ fn url_filename(url: &str) -> Option<&str> {
     url.rsplit('/').next().filter(|name| !name.is_empty())
 }
 
-/// Update cargoHash for Rust packages using the invalid hash discovery pattern
+/// Update `cargoHash` for Rust packages (see [`discover_dependency_hash`]).
 pub async fn update_cargo_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
-    old_cargo_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(old_hash) = old_cargo_hash {
-        info!("Detected Rust package, updating cargoHash");
-
-        // Set invalid cargo hash
-        let invalid_cargo_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_cargo_hash(file_location, old_hash, invalid_cargo_hash).await?;
-
-        info!("Set invalid cargoHash in {}", file_location.display());
-
-        // Build full package to get correct cargo hash
-        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid cargoHash - this shouldn't happen");
-            anyhow::bail!("Expected cargoHash mismatch error but build succeeded");
-        }
-
-        let correct_cargo_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!("Could not extract correct cargoHash from build error:\n{stderr}")
-        })?;
-
-        info!("Extracted correct cargoHash: {}", correct_cargo_hash);
-
-        // Update cargoHash with correct value
-        update_cargo_hash(file_location, invalid_cargo_hash, &correct_cargo_hash).await?;
-
-        info!("Updated cargoHash in {}", file_location.display());
-    }
-
-    Ok(())
+    old_hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(old_hash) = old_hash else {
+        return Ok(None);
+    };
+    info!("Detected Rust package, updating cargoHash");
+    discover_dependency_hash(
+        eval_entry_point,
+        attr_path,
+        file_location,
+        "cargoHash",
+        old_hash,
+    )
+    .await
+    .map(Some)
 }
 
-/// Update vendorHash for Go packages using the invalid hash discovery pattern
+/// Update `vendorHash` for Go packages (see [`discover_dependency_hash`]).
 pub async fn update_vendor_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
-    old_vendor_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(old_hash) = old_vendor_hash {
-        info!("Detected Go package, updating vendorHash");
-
-        // Set invalid vendor hash
-        let invalid_vendor_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_vendor_hash(file_location, old_hash, invalid_vendor_hash).await?;
-
-        info!("Set invalid vendorHash in {}", file_location.display());
-
-        // Build full package to get correct vendor hash
-        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid vendorHash - this shouldn't happen");
-            anyhow::bail!("Expected vendorHash mismatch error but build succeeded");
-        }
-
-        let correct_vendor_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!("Could not extract correct vendorHash from build error:\n{stderr}")
-        })?;
-
-        info!("Extracted correct vendorHash: {}", correct_vendor_hash);
-
-        // Update vendorHash with correct value
-        update_vendor_hash(file_location, invalid_vendor_hash, &correct_vendor_hash).await?;
-
-        info!("Updated vendorHash in {}", file_location.display());
-    }
-
-    Ok(())
+    old_hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(old_hash) = old_hash else {
+        return Ok(None);
+    };
+    info!("Detected Go package, updating vendorHash");
+    discover_dependency_hash(
+        eval_entry_point,
+        attr_path,
+        file_location,
+        "vendorHash",
+        old_hash,
+    )
+    .await
+    .map(Some)
 }
 
 /// Build package with automatic recovery from reversed patches
@@ -598,143 +615,120 @@ pub async fn run_package_tests(
     }
 }
 
-/// Update npmDepsHash for Node.js packages using the invalid hash discovery pattern
+/// Update `npmDepsHash` for Node.js packages (see [`discover_dependency_hash`]).
 pub async fn update_npm_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
-    old_npm_deps_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(old_hash) = old_npm_deps_hash {
-        info!("Detected Node.js package, updating npmDepsHash");
-
-        // Set invalid npm deps hash
-        let invalid_npm_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_npm_deps_hash(file_location, old_hash, invalid_npm_deps_hash).await?;
-
-        info!("Set invalid npmDepsHash in {}", file_location.display());
-
-        // Build full package to get correct npm deps hash
-        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid npmDepsHash - this shouldn't happen");
-            anyhow::bail!("Expected npmDepsHash mismatch error but build succeeded");
-        }
-
-        let correct_npm_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!("Could not extract correct npmDepsHash from build error:\n{stderr}")
-        })?;
-
-        info!("Extracted correct npmDepsHash: {}", correct_npm_deps_hash);
-
-        // Update npmDepsHash with correct value
-        update_npm_deps_hash(file_location, invalid_npm_deps_hash, &correct_npm_deps_hash).await?;
-
-        info!("Updated npmDepsHash in {}", file_location.display());
-    }
-
-    Ok(())
+    old_hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(old_hash) = old_hash else {
+        return Ok(None);
+    };
+    info!("Detected Node.js package, updating npmDepsHash");
+    discover_dependency_hash(
+        eval_entry_point,
+        attr_path,
+        file_location,
+        "npmDepsHash",
+        old_hash,
+    )
+    .await
+    .map(Some)
 }
 
-/// Update nugetDeps hash for .NET packages using the invalid hash discovery pattern
+/// Update `nugetDeps` for .NET packages (see [`discover_dependency_hash`]).
 pub async fn update_nuget_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
-    old_nuget_deps_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(old_hash) = old_nuget_deps_hash {
-        info!("Detected .NET package, updating nugetDeps hash");
-
-        // Set invalid nuget deps hash
-        let invalid_nuget_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_nuget_deps_hash(file_location, old_hash, invalid_nuget_deps_hash).await?;
-
-        info!("Set invalid nugetDeps hash in {}", file_location.display());
-
-        // Build full package to get correct nuget deps hash
-        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid nugetDeps hash - this shouldn't happen");
-            anyhow::bail!("Expected nugetDeps hash mismatch error but build succeeded");
-        }
-
-        let correct_nuget_deps_hash = hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-            anyhow::anyhow!("Could not extract correct nugetDeps hash from build error:\n{stderr}")
-        })?;
-
-        info!(
-            "Extracted correct nugetDeps hash: {}",
-            correct_nuget_deps_hash
-        );
-
-        // Update nugetDeps hash with correct value
-        update_nuget_deps_hash(
-            file_location,
-            invalid_nuget_deps_hash,
-            &correct_nuget_deps_hash,
-        )
-        .await?;
-
-        info!("Updated nugetDeps hash in {}", file_location.display());
-    }
-
-    Ok(())
+    old_hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(old_hash) = old_hash else {
+        return Ok(None);
+    };
+    info!("Detected .NET package, updating nugetDeps");
+    discover_dependency_hash(
+        eval_entry_point,
+        attr_path,
+        file_location,
+        "nugetDeps",
+        old_hash,
+    )
+    .await
+    .map(Some)
 }
 
-/// Update composerDepsHash for PHP packages using the invalid hash discovery pattern
+/// Update `composerDepsHash` for PHP packages (see [`discover_dependency_hash`]).
 pub async fn update_composer_deps_hash_if_needed(
     eval_entry_point: &str,
     attr_path: &str,
     file_location: &Path,
-    old_composer_deps_hash: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(old_hash) = old_composer_deps_hash {
-        info!("Detected PHP package, updating composerDepsHash");
+    old_hash: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(old_hash) = old_hash else {
+        return Ok(None);
+    };
+    info!("Detected PHP package, updating composerDepsHash");
+    discover_dependency_hash(
+        eval_entry_point,
+        attr_path,
+        file_location,
+        "composerDepsHash",
+        old_hash,
+    )
+    .await
+    .map(Some)
+}
 
-        // Set invalid composer deps hash
-        let invalid_composer_deps_hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        update_composer_deps_hash(file_location, old_hash, invalid_composer_deps_hash).await?;
+/// Discover a dependency hash bound by `attr` with the invalid hash pattern:
+/// write the fake hash, build the package, take the `got:` hash from the
+/// mismatch and write it.
+///
+/// If no hash can be discovered (the fetch fails for another reason, or the
+/// build unexpectedly succeeds), `old_hash` is written back so the file is
+/// never left with the fake hash.
+async fn discover_dependency_hash(
+    eval_entry_point: &str,
+    attr_path: &str,
+    file_location: &Path,
+    attr: &str,
+    old_hash: &str,
+) -> anyhow::Result<String> {
+    update_hash_attr(file_location, attr, old_hash, FAKE_HASH).await?;
+    info!("Set invalid {attr} in {}", file_location.display());
 
-        info!(
-            "Set invalid composerDepsHash in {}",
-            file_location.display()
-        );
+    // --keep-going: another stale FOD (one this update refreshes later) may
+    // fail first; the mismatch wanted is the one for the fake hash.
+    let build = build_nix_expr_with(eval_entry_point, attr_path, None, &["--keep-going"]).await;
+    let discovered = match build {
+        Ok((true, _, _)) => Err(anyhow::anyhow!(
+            "Expected {attr} mismatch error but build succeeded"
+        )),
+        Ok((false, _, stderr)) => {
+            hash_discovery::extract_hash_for(&stderr, FAKE_HASH).ok_or_else(|| {
+                anyhow::anyhow!("Could not extract correct {attr} from build error:\n{stderr}")
+            })
+        },
+        Err(e) => Err(e),
+    };
+    let hash = match discovered {
+        Ok(hash) => hash,
+        Err(e) => {
+            if let Err(restore) = update_hash_attr(file_location, attr, FAKE_HASH, old_hash).await {
+                warn!(
+                    "Could not restore {attr} in {}: {restore:#}",
+                    file_location.display()
+                );
+            }
+            return Err(e);
+        },
+    };
 
-        // Build full package to get correct composer deps hash
-        let (success, _stdout, stderr) = build_nix_expr(eval_entry_point, attr_path, None).await?;
-
-        if success {
-            warn!("Build succeeded with invalid composerDepsHash - this shouldn't happen");
-            anyhow::bail!("Expected composerDepsHash mismatch error but build succeeded");
-        }
-
-        let correct_composer_deps_hash =
-            hash_discovery::extract_hash(&stderr).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Could not extract correct composerDepsHash from build error:\n{stderr}"
-                )
-            })?;
-
-        info!(
-            "Extracted correct composerDepsHash: {}",
-            correct_composer_deps_hash
-        );
-
-        // Update composerDepsHash with correct value
-        update_composer_deps_hash(
-            file_location,
-            invalid_composer_deps_hash,
-            &correct_composer_deps_hash,
-        )
-        .await?;
-
-        info!("Updated composerDepsHash in {}", file_location.display());
-    }
-
-    Ok(())
+    info!("Extracted correct {attr}: {hash}");
+    update_hash_attr(file_location, attr, FAKE_HASH, &hash).await?;
+    info!("Updated {attr} in {}", file_location.display());
+    Ok(hash)
 }
 
 /// Discover and update source hashes for non-native platforms.
@@ -751,13 +745,7 @@ pub async fn update_platform_hashes(
 ) -> anyhow::Result<()> {
     use crate::nix::{eval_nix_expr_for_system, normalize_entry_point};
 
-    let native_system = std::env::consts::ARCH.to_owned()
-        + "-"
-        + match std::env::consts::OS {
-            "linux" => "linux",
-            "macos" => "darwin",
-            os => os,
-        };
+    let native_system = super::fod_platforms::native_system();
 
     let normalized_entry = normalize_entry_point(eval_entry_point);
 
@@ -846,7 +834,7 @@ pub async fn update_platform_hashes(
 ///
 /// Uses `nix store prefetch-file --json <url>` to download the file and
 /// compute its hash without requiring a full build.
-async fn prefetch_url_hash(url: &str) -> anyhow::Result<String> {
+pub(super) async fn prefetch_url_hash(url: &str) -> anyhow::Result<String> {
     let output = tokio::process::Command::new("nix")
         .args(["store", "prefetch-file", "--json", url])
         .output()

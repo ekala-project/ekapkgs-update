@@ -221,6 +221,7 @@ pub async fn update_flake_package(
             tests_passed: update_config.run_passthru_tests,
             eval_entry_point: None, // Flake updates don't have traditional eval entry points
             pr_enhancements: &update_config.pr_enhancements,
+            components: &[],
         }
         .execute()
         .await?;

@@ -8,6 +8,7 @@ pub async fn create_git_commit(
     old_version: &str,
     new_version: &str,
     tests_passed: bool,
+    components: &[super::ComponentUpdate],
 ) -> anyhow::Result<()> {
     info!("Creating git commit for update");
 
@@ -71,10 +72,11 @@ pub async fn create_git_commit(
 
     // Create commit with formatted message
     let title = crate::git::update_title(attr_path, old_version, new_version);
+    let components = super::pr::components_commit_lines(components);
     let commit_message = if tests_passed {
-        format!("{title}\n\nTests: passthru.tests passed")
+        format!("{title}{components}\n\nTests: passthru.tests passed")
     } else {
-        title
+        format!("{title}{components}")
     };
     let commit_output = Command::new("git")
         .args(["commit", "-m", &commit_message])

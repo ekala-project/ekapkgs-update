@@ -28,6 +28,16 @@ pub async fn build_nix_expr(
     attr_path: &str,
     attr_suffix: Option<&str>,
 ) -> anyhow::Result<(bool, String, String)> {
+    build_nix_expr_with(eval_entry_point, attr_path, attr_suffix, &[]).await
+}
+
+/// [`build_nix_expr`] with additional `nix-build` arguments (`--keep-going`).
+pub async fn build_nix_expr_with(
+    eval_entry_point: &str,
+    attr_path: &str,
+    attr_suffix: Option<&str>,
+    args: &[&str],
+) -> anyhow::Result<(bool, String, String)> {
     let full_attr = if let Some(suffix) = attr_suffix {
         format!("{attr_path}.{suffix}")
     } else {
@@ -37,7 +47,10 @@ pub async fn build_nix_expr(
     debug!("Building {}", full_attr);
 
     let mut cmd = Command::new("nix-build");
-    cmd.arg(eval_entry_point).arg("-A").arg(&full_attr);
+    cmd.arg(eval_entry_point)
+        .arg("-A")
+        .arg(&full_attr)
+        .args(args);
     for arg in get_extra_nix_build_args() {
         cmd.arg(arg);
     }

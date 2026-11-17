@@ -253,11 +253,24 @@ fn test_align_ref_with_tag() {
             "rev = \"refs/tags/v${version}\";",
         ),
         ("rev = \"v2.2.0\";", "v2.2.0", "rev = \"v2.2.0\";"),
+        // literal still naming the old version (vibe-kanban: the tag carries a
+        // build timestamp, and the scheme changed)
+        (
+            "tag = \"v1.14.6-20260424091429\";",
+            "v2.2.0",
+            "tag = \"v2.2.0\";",
+        ),
+        ("tag = \"v1.14.6\";", "v2.2.0", "tag = \"v2.2.0\";"),
+        (
+            "rev = \"refs/tags/hdf5_1.14.6\";",
+            "2.2.0",
+            "rev = \"refs/tags/2.2.0\";",
+        ),
     ];
     for (ref_line, tag, expected) in cases {
         let content = github_package(ref_line);
         assert!(is_single_ref_from(&content, "hdf5"), "{ref_line}");
-        let aligned = align_ref_with_tag(&content, tag, "2.2.0")
+        let aligned = align_ref_with_tag(&content, tag, "1.14.6", "2.2.0")
             .unwrap_or_else(|e| panic!("{ref_line} / {tag}: {e}"));
         assert_eq!(aligned, github_package(expected), "{ref_line} / {tag}");
     }
@@ -280,10 +293,12 @@ fn test_align_ref_with_tag_refuses() {
         ("rev = \"hdf5_${version}\";", "hdf5-2_2_0"),
         // tag would need escaping
         ("rev = \"hdf5_${version}\";", "a$b-2.2.0"),
+        // literal naming neither version
+        ("tag = \"v0.9.0\";", "v2.2.0"),
     ];
     for (ref_line, tag) in cases {
         let content = github_package(ref_line);
-        let err = align_ref_with_tag(&content, tag, "2.2.0").expect_err(ref_line);
+        let err = align_ref_with_tag(&content, tag, "1.14.6", "2.2.0").expect_err(ref_line);
         assert!(err.is_not_found(), "{ref_line} / {tag}: {err}");
     }
 }
@@ -315,7 +330,7 @@ stdenv.mkDerivation {
 #[test]
 fn test_several_refs_are_left_alone() {
     assert!(!is_single_ref_from(OPENCV_LIKE, "opencv"));
-    assert!(align_ref_with_tag(OPENCV_LIKE, "v5.1.0", "5.1.0").is_err());
+    assert!(align_ref_with_tag(OPENCV_LIKE, "v5.1.0", "5.0.0", "5.1.0").is_err());
     let err = try_fixup_stale_rev(OPENCV_LIKE, "5.1.0", "5.1.0").unwrap_err();
     assert!(err.is_not_found());
 }

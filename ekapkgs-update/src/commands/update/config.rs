@@ -83,7 +83,7 @@ impl UpdateConfig {
         attr_path: String,
         file_location: String,
         version_config: VersionConfig,
-    ) -> anyhow::Result<(Vec<String>, super::TestResult)> {
+    ) -> anyhow::Result<super::UpdateOutcome> {
         super::update_from_file_path(
             eval_entry_point,
             attr_path,
@@ -487,7 +487,7 @@ impl UpdateParams {
             })?
         };
 
-        let (_removed_patches, _test_result) = update_config
+        let _outcome = update_config
             .update_from_file_path(file, attr_path, expr_file_path, version_config)
             .await?;
 

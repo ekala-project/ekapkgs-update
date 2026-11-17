@@ -39,6 +39,10 @@ pub async fn update_nix_file(
     new_hash: Option<&str>,
     release_tag: Option<ReleaseTag<'_>>,
 ) -> anyhow::Result<PathBuf> {
+    if file_path.extension().is_some_and(|ext| ext == "json") {
+        return update_json_data_file(file_path, old_version, new_version, old_hash, new_hash)
+            .await;
+    }
     debug!(
         "Updating Nix file at {} using AST manipulation",
         file_path.display()
@@ -58,6 +62,19 @@ pub async fn update_nix_file(
                 (content, file_path.to_path_buf())
             },
             Err(e) if e.is_not_found() => {
+                // Version kept in a JSON data file next to the expression
+                // (beads-rust: `inherit (data) version;` from hashes.json)
+                if let Some(json) = find_version_in_json(file_path, old_version).await? {
+                    info!("Using data file {}", json.display());
+                    return update_json_data_file(
+                        &json,
+                        old_version,
+                        new_version,
+                        old_hash,
+                        new_hash,
+                    )
+                    .await;
+                }
                 // Version not found - check if this is a mkManyVariants package
                 debug!(
                     "Version not found in {}, checking if mkManyVariants",
@@ -129,7 +146,7 @@ pub async fn update_nix_file(
             if actual_file_path.as_path() == file_path
                 && is_single_ref_from(&updated_content, tag.repo) =>
         {
-            match align_ref_with_tag(&updated_content, tag.name, new_version) {
+            match align_ref_with_tag(&updated_content, tag.name, old_version, new_version) {
                 Ok(aligned) => {
                     if aligned != updated_content {
                         info!("Rewrote git ref to match release tag {}", tag.name);
@@ -158,7 +175,8 @@ pub async fn update_nix_file(
             );
             result
         } else {
-            // Normal file - try AST-based replacement
+            // Normal file - try AST-based replacement, then the hash's value
+            // wherever it is bound (`cliHash = "…";` in a `let`)
             let hash_attrs = ["hash", "sha256", "outputHash", "src-hash"];
 
             hash_attrs
@@ -170,10 +188,15 @@ pub async fn update_nix_file(
                             debug!("Updated {} attribute: {} -> {}", attr_name, old_h, new_h);
                         })
                 })
-                .unwrap_or_else(|| {
-                    warn!("Could not find hash attribute to update in Nix file");
-                    updated_content.clone()
-                })
+                .or_else(|| replace_unique_literal(&updated_content, old_h, new_h))
+                .with_context(|| {
+                    format!(
+                        "source hash {old_h} is not bound by {} and does not appear exactly once \
+                         as a string in {}",
+                        hash_attrs.join("/"),
+                        file_path.display()
+                    )
+                })?
         }
     } else {
         updated_content
@@ -186,127 +209,212 @@ pub async fn update_nix_file(
     Ok(actual_file_path)
 }
 
-/// Update cargoHash attribute in Nix file
-pub async fn update_cargo_hash(
+/// Replace the string literal `"old"` with `"new"` if it appears exactly once.
+///
+/// Hashes are unique strings, so a hash bound under any name (`cliHash`,
+/// `mobyHash`) can be updated by value.
+fn replace_unique_literal(content: &str, old: &str, new: &str) -> Option<String> {
+    let quoted = format!("\"{old}\"");
+    let offsets: Vec<usize> = content.match_indices(&quoted).map(|(i, _)| i).collect();
+    // Several systems sharing one hash (`x86_64-linux = "…"; aarch64-linux =
+    // "…";`, greptile-cli's single JS file): the build machine's line.
+    let host = super::fod_platforms::native_system();
+    let offset = match offsets.as_slice() {
+        [offset] => *offset,
+        [] => return None,
+        several => {
+            let on_host_line: Vec<usize> = several
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let line_start = content[..i].rfind('\n').map_or(0, |n| n + 1);
+                    content[line_start..i]
+                        .trim_start()
+                        .trim_start_matches('"')
+                        .starts_with(&host)
+                })
+                .collect();
+            match on_host_line.as_slice() {
+                [offset] => *offset,
+                _ => return None,
+            }
+        },
+    };
+    debug!("Updated hash by value: {} -> {}", old, new);
+    Some(format!(
+        "{}\"{new}\"{}",
+        &content[..offset],
+        &content[offset + quoted.len()..]
+    ))
+}
+
+/// Replace the hash bound by `attr` (`cargoHash`, `vendorHash`,
+/// `npmDepsHash`, `nugetDeps`, `composerDepsHash`) from `old_hash` to
+/// `new_hash`.
+pub async fn update_hash_attr(
     file_path: &Path,
+    attr: &str,
     old_hash: &str,
     new_hash: &str,
 ) -> anyhow::Result<()> {
-    debug!(
-        "Updating cargoHash in {} using AST manipulation",
-        file_path.display()
-    );
+    debug!("Updating {attr} in {}", file_path.display());
     let content = tokio::fs::read_to_string(file_path)
         .await
         .with_context(|| format!("read nix file {}", file_path.display()))?;
 
-    let updated_content = find_and_update_attr(&content, "cargoHash", new_hash, Some(old_hash))?;
-    debug!("Updated cargoHash attribute: {} -> {}", old_hash, new_hash);
+    // A JSON data file has no Nix to parse.
+    let bound = if file_path.extension().is_some_and(|ext| ext == "json") {
+        None
+    } else {
+        match find_and_update_attr(&content, attr, new_hash, Some(old_hash)) {
+            Ok(updated) => Some(updated),
+            Err(e) if e.is_not_found() => None,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let (target, updated_content) = match bound {
+        Some(updated) => (file_path.to_path_buf(), updated),
+        // Not bound literally (`inherit (data) cargoHash;`): the hash's
+        // only occurrence among the package's files
+        None => {
+            let dir = file_path.parent().unwrap_or(file_path);
+            replace_unique_literal_in_dir(dir, old_hash, new_hash)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "{attr} is not bound literally in {}, and {old_hash} does not \
+                             appear exactly once among the package's files",
+                        file_path.display()
+                    )
+                })?
+        },
+    };
+    debug!(
+        "Updated {attr}: {old_hash} -> {new_hash} in {}",
+        target.display()
+    );
 
-    tokio::fs::write(file_path, updated_content)
+    tokio::fs::write(&target, updated_content)
         .await
-        .with_context(|| format!("write nix file {}", file_path.display()))?;
+        .with_context(|| format!("write {}", target.display()))?;
     Ok(())
 }
 
-/// Update vendorHash attribute in Nix file
-pub async fn update_vendor_hash(
-    file_path: &Path,
-    old_hash: &str,
-    new_hash: &str,
-) -> anyhow::Result<()> {
-    debug!(
-        "Updating vendorHash in {} using AST manipulation",
-        file_path.display()
-    );
-    let content = tokio::fs::read_to_string(file_path)
+/// The `.nix`/`.json` files directly in `dir`, with their content.
+pub(super) async fn package_files(dir: &Path) -> anyhow::Result<Vec<(PathBuf, String)>> {
+    let mut files = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir)
         .await
-        .with_context(|| format!("read nix file {}", file_path.display()))?;
-
-    let updated_content = find_and_update_attr(&content, "vendorHash", new_hash, Some(old_hash))?;
-    debug!("Updated vendorHash attribute: {} -> {}", old_hash, new_hash);
-
-    tokio::fs::write(file_path, updated_content)
-        .await
-        .with_context(|| format!("write nix file {}", file_path.display()))?;
-    Ok(())
+        .with_context(|| format!("read directory {}", dir.display()))?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let wanted = path
+            .extension()
+            .is_some_and(|ext| ext == "nix" || ext == "json");
+        if wanted && entry.file_type().await?.is_file() {
+            let content = tokio::fs::read_to_string(&path).await?;
+            files.push((path, content));
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
-/// Update npmDepsHash attribute in Nix file
-pub async fn update_npm_deps_hash(
-    file_path: &Path,
-    old_hash: &str,
-    new_hash: &str,
-) -> anyhow::Result<()> {
-    debug!(
-        "Updating npmDepsHash in {} using AST manipulation",
-        file_path.display()
-    );
-    let content = tokio::fs::read_to_string(file_path)
-        .await
-        .with_context(|| format!("read nix file {}", file_path.display()))?;
-
-    let updated_content = find_and_update_attr(&content, "npmDepsHash", new_hash, Some(old_hash))?;
-    debug!(
-        "Updated npmDepsHash attribute: {} -> {}",
-        old_hash, new_hash
-    );
-
-    tokio::fs::write(file_path, updated_content)
-        .await
-        .with_context(|| format!("write nix file {}", file_path.display()))?;
-    Ok(())
+/// Replace the string literal `old` where it appears exactly once among
+/// `files`, returning that file and its new content.
+fn plan_unique_literal(
+    files: &[(PathBuf, String)],
+    old: &str,
+    new: &str,
+) -> Option<(PathBuf, String)> {
+    let quoted = format!("\"{old}\"");
+    let mut hits = files.iter().flat_map(|(path, content)| {
+        std::iter::repeat_n((path, content), content.matches(&quoted).count())
+    });
+    let (path, content) = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some((
+        path.clone(),
+        content.replacen(&quoted, &format!("\"{new}\""), 1),
+    ))
 }
 
-/// Update nugetDeps attribute hash in Nix file
-pub async fn update_nuget_deps_hash(
-    file_path: &Path,
-    old_hash: &str,
-    new_hash: &str,
-) -> anyhow::Result<()> {
-    debug!(
-        "Updating nugetDeps hash in {} using AST manipulation",
-        file_path.display()
-    );
-    let content = tokio::fs::read_to_string(file_path)
-        .await
-        .with_context(|| format!("read nix file {}", file_path.display()))?;
-
-    // nugetDeps typically has an outputHash attribute
-    let updated_content = find_and_update_attr(&content, "nugetDeps", new_hash, Some(old_hash))?;
-    debug!("Updated nugetDeps attribute: {} -> {}", old_hash, new_hash);
-
-    tokio::fs::write(file_path, updated_content)
-        .await
-        .with_context(|| format!("write nix file {}", file_path.display()))?;
-    Ok(())
+async fn replace_unique_literal_in_dir(
+    dir: &Path,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<Option<(PathBuf, String)>> {
+    Ok(plan_unique_literal(&package_files(dir).await?, old, new))
 }
 
-/// Update composerDepsHash attribute in Nix file
-pub async fn update_composer_deps_hash(
-    file_path: &Path,
-    old_hash: &str,
-    new_hash: &str,
-) -> anyhow::Result<()> {
-    debug!(
-        "Updating composerDepsHash in {} using AST manipulation",
-        file_path.display()
+/// `"version": "<old>"` replaced, when it appears exactly once.
+fn update_json_version(content: &str, old: &str, new: &str) -> Option<String> {
+    let re = regex::Regex::new(&format!(r#""version"(\s*:\s*)"{}""#, regex::escape(old))).ok()?;
+    let mut matches = re.find_iter(content);
+    let found = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let replaced = re.replace(
+        &content[found.start()..found.end()],
+        |caps: &regex::Captures<'_>| format!(r#""version"{}"{new}""#, &caps[1]),
     );
-    let content = tokio::fs::read_to_string(file_path)
-        .await
-        .with_context(|| format!("read nix file {}", file_path.display()))?;
+    Some(format!(
+        "{}{replaced}{}",
+        &content[..found.start()],
+        &content[found.end()..]
+    ))
+}
 
-    let updated_content =
-        find_and_update_attr(&content, "composerDepsHash", new_hash, Some(old_hash))?;
-    debug!(
-        "Updated composerDepsHash attribute: {} -> {}",
-        old_hash, new_hash
-    );
+/// The one JSON file next to `file_path` holding `"version": "<version>"`.
+async fn find_version_in_json(file_path: &Path, version: &str) -> anyhow::Result<Option<PathBuf>> {
+    let Some(dir) = file_path.parent() else {
+        return Ok(None);
+    };
+    let mut found = package_files(dir)
+        .await?
+        .into_iter()
+        .filter(|(path, content)| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && update_json_version(content, version, version).is_some()
+        });
+    let first = found.next();
+    Ok(if found.next().is_some() {
+        None
+    } else {
+        first.map(|(path, _)| path)
+    })
+}
 
-    tokio::fs::write(file_path, updated_content)
+/// Update the version and (by value) the hash in a JSON data file.
+async fn update_json_data_file(
+    path: &Path,
+    old_version: &str,
+    new_version: &str,
+    old_hash: Option<&str>,
+    new_hash: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let mut content = tokio::fs::read_to_string(path)
         .await
-        .with_context(|| format!("write nix file {}", file_path.display()))?;
-    Ok(())
+        .with_context(|| format!("read {}", path.display()))?;
+    if old_version != new_version {
+        content = update_json_version(&content, old_version, new_version).with_context(|| {
+            format!(
+                "\"version\": \"{old_version}\" does not appear exactly once in {}",
+                path.display()
+            )
+        })?;
+    }
+    if let (Some(old), Some(new)) = (old_hash, new_hash) {
+        content = replace_unique_literal(&content, old, new)
+            .with_context(|| format!("{old} does not appear exactly once in {}", path.display()))?;
+    }
+    tokio::fs::write(path, content)
+        .await
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path.to_path_buf())
 }
 
 /// Attempt to fix a stale commit-SHA `rev` by converting to `finalAttrs`
@@ -364,5 +472,96 @@ fn try_fixup_commit_sha_rev(content: &str, tag: ReleaseTag<'_>, new_version: &st
             debug!("Rev fixup not applicable: {}", e);
             content.to_owned()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{plan_unique_literal, replace_unique_literal, update_json_version};
+
+    #[test]
+    fn json_data_files() {
+        let beads = "{\n  \"version\": \"0.7.3\",\n  \"hash\": \"sha256-src\",\n  \
+                     \"frankensqlite\": { \"version\" : \"0.7.30\" }\n}\n";
+        assert_eq!(
+            update_json_version(beads, "0.7.3", "0.7.6").as_deref(),
+            Some(beads.replacen("\"0.7.3\"", "\"0.7.6\"", 1).as_str())
+        );
+        // Spacing is kept; a longer version is not matched.
+        assert_eq!(
+            update_json_version(beads, "0.7.30", "0.8.0").as_deref(),
+            Some(
+                beads
+                    .replace("\"version\" : \"0.7.30\"", "\"version\" : \"0.8.0\"")
+                    .as_str()
+            )
+        );
+        assert_eq!(update_json_version(beads, "0.7", "0.8"), None);
+        let twice = "{\"version\": \"1.0\", \"x\": {\"version\": \"1.0\"}}";
+        assert_eq!(update_json_version(twice, "1.0", "1.1"), None);
+
+        let files = vec![
+            (
+                PathBuf::from("default.nix"),
+                "inherit (data) cargoHash;".to_owned(),
+            ),
+            (
+                PathBuf::from("hashes.json"),
+                "{\"cargoHash\": \"sha256-old\"}".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            plan_unique_literal(&files, "sha256-old", "sha256-new"),
+            Some((
+                PathBuf::from("hashes.json"),
+                "{\"cargoHash\": \"sha256-new\"}".to_owned()
+            ))
+        );
+        let mut twice = files.clone();
+        twice[0].1 = "x = \"sha256-old\";".to_owned();
+        assert_eq!(
+            plan_unique_literal(&twice, "sha256-old", "sha256-new"),
+            None
+        );
+        assert_eq!(
+            plan_unique_literal(&files, "sha256-missing", "sha256-new"),
+            None
+        );
+    }
+
+    #[test]
+    fn replace_unique_literal_cases() {
+        let docker = r#"cliHash = "sha256-old"; mobyHash = "sha256-moby";"#;
+        let cases = [
+            (
+                docker,
+                "sha256-old",
+                Some(r#"cliHash = "sha256-new"; mobyHash = "sha256-moby";"#),
+            ),
+            (docker, "sha256-missing", None),
+            // Only whole string literals match.
+            (r#"a = "sha256-old2";"#, "sha256-old", None),
+            // Ambiguous.
+            (r#"a = "sha256-old"; b = "sha256-old";"#, "sha256-old", None),
+        ];
+        // Shared by several systems: the build machine's line.
+        let host = crate::commands::update::fod_platforms::native_system();
+        let shared =
+            format!("hashes = {{\n  zz-other = \"sha256-old\";\n  {host} = \"sha256-old\";\n}};\n");
+        assert_eq!(
+            replace_unique_literal(&shared, "sha256-old", "sha256-new"),
+            Some(format!(
+                "hashes = {{\n  zz-other = \"sha256-old\";\n  {host} = \"sha256-new\";\n}};\n"
+            ))
+        );
+        for (content, old, expected) in cases {
+            assert_eq!(
+                replace_unique_literal(content, old, "sha256-new").as_deref(),
+                expected,
+                "{content}"
+            );
+        }
     }
 }
