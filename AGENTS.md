@@ -71,6 +71,10 @@ ekapkgs-update/                     # Main CLI crate
         file_update.rs              #   Version/hash rewriting in .nix files
         build.rs                    #   nix-build invocation, extra args (OnceLock)
         hash_workflows.rs           #   Hash update functions per dep type
+        fod_refresh.rs              #   Closure diff: refresh hashes of every FOD the bump changed (by value)
+        fod_platforms.rs            #   Per-system hash attrsets: prefetch the other systems' hashes
+        components.rs               #   passthru.ekapkgs-update.components: bump independently pinned sources
+        pins.rs                     #   Component pins read from upstream files (meson .wrap, Cargo.lock, go.mod, regex)
         script.rs                   #   nix-update-script support
         flake.rs                    #   Flake package support
         format.rs                   #   nixfmt integration
@@ -166,7 +170,7 @@ iets eval-jobs (streaming JSON)
 
 1. Consumes `iets eval-jobs` output stream
 2. For each package: checks database backoff, extracts `PackageMetadata`
-3. Reads passthru attributes (`skip`, `semver-strategy`, `include-prereleases`, `version-regex`)
+3. Reads passthru attributes (`skip`, `semver-strategy`, `include-prereleases`, `version-regex`; `components` is read later by the update workflow)
 4. Determines `UpstreamSource` from `src.url` or pname
 5. Resolves the strategy via `variant_strategy::effective_strategy` (explicit → attr-path suffix, pinned = skip → mkManyVariants = Minor → Latest) and registers the package (`upsert_package_info`)
 6. Fetches upstream releases, filters by `SemverStrategy`; records the outcome (`record_no_update` / `record_update_available`)
@@ -193,8 +197,8 @@ The 9-phase workflow for each package:
 1. **MetadataExtraction** — Extract `PackageMetadata` via nix-instantiate
 2. **SourceDiscovery** — Determine `UpstreamSource` from metadata
 3. **VersionSelection** — Fetch best compatible release (SemverStrategy + filters)
-4. **SourceHashUpdate** — Update source hash (see Hash Discovery below)
-5. **DependencyHashUpdate** — Update dep hashes (cargoHash, vendorHash, npmDepsHash, etc.)
+4. **SourceHashUpdate** — Update source hash (see Hash Discovery below) and its other systems' hashes, refresh other changed sources, bump `components`, refresh again (see Secondary FODs below)
+5. **DependencyHashUpdate** — Refresh other changed FODs, update dep hashes (cargoHash, vendorHash, npmDepsHash, etc.; their FODs are deferred to this step), then refresh FODs built from them (skipped with `--src-only`)
 6. **Build** — Build with patch recovery (detect and remove obsolete patches)
 7. **Testing** — Run passthru.tests (if configured)
 8. **AgentFix** — *(run/watch with `--claude-fix`, on failure)* Claude Code fix attempt
@@ -271,7 +275,47 @@ This is intentional, not a bug:
 4. Write the correct hash back
 5. Build again to verify
 
-Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has a dedicated `update_*_if_needed` function in `hash_workflows.rs`.
+Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has an `update_*_if_needed` function in `hash_workflows.rs`; the dependency hashes share `discover_dependency_hash`, which writes the old hash back when no hash can be discovered (the fake hash is never left in a file; `fod_refresh` does the same). The discovered hash is the `got:` of the mismatch whose `specified:` is the fake hash (`hash_discovery::extract_hash_for`), and dependency builds run with `--keep-going`: another stale FOD failing first must not lend its hash. A dependency attribute not bound literally (`inherit (data) cargoHash;`) is replaced by value where it appears exactly once among the package's `.nix`/`.json` files.
+
+A version the `.nix` file doesn't bind is looked for in a JSON data file next to it (`"version": "<old>"` exactly once, beads-rust's `hashes.json`); the source hash is then replaced by value in that file.
+
+If the source hash can't be discovered, `update_source_hash` writes the package directory's `.nix`/`.json` files back as they were (no fake hash, no half-done version bump). A source hash shared by several system-keyed lines (greptile-cli's one JS file) is replaced on the build machine's line; the others follow via the per-system refresh.
+
+A version bump whose `src` hash comes back unchanged is an error: the fetcher does not follow the version (a literal tag/rev/URL), and the "update" would only relabel the old source.
+
+### Secondary FODs and Components (`commands/update/fod_refresh.rs`, `components.rs`)
+
+Packages often fetch more than `src`: docker fetches `moby-src` (`tag = "docker-v${version}"`), opencv a `contribSrc`, mission-center two `fetchCargoVendor`s under custom names. No annotation is needed for these:
+
+1. Before any edit, `ClosureSnapshot::capture` instantiates the package and records its `.drv` closure (`nix-store --query --requisites`).
+2. After the version bump, FODs (`nix derivation show`, `outputs.out.hash`) whose `.drv` is not in the snapshot have stale hashes, unless the hash is one this update already discovered (`confirmed`: the `src` hash, the `update_*_if_needed` results).
+3. Each one's hash is located **by value** (SRI, nix32 or base16; exactly one string literal among the `.nix`/`.json` files of the package directory, or exactly one on a line keyed by the build machine's system; a FOD carrying the fake hash itself is located by a single `lib.fakeHash`/`lib.fakeSha256`/`lib.fakeSri`, which unfinished packages leave in), replaced with the fake hash, the FOD's new `.drv` is realised, and the `got:` hash written back. FODs depending on another changed FOD go after it (`next_stale_fod`); `FodScope::Sources` (end of SourceHashUpdate) only takes FODs without changed FOD inputs, `FodScope::All` (end of DependencyHashUpdate) the rest.
+
+The main `src` hash is also found by value when it isn't bound by `hash`/`sha256`/`outputHash`/`src-hash` (docker's `cliHash`); not finding it is an error.
+
+**Per-system hashes** (`fod_platforms.rs`): hash discovery only sees the build machine's FOD. When the hash it wrote sits on a `<system> = "<hash>";` line, the neighbouring system-keyed lines (mistral-vibe's `wheelHashes`, codex's librusty_v8 `hashes`/`srcBindingHashes`) are updated too: the package is instantiated with `--system <system>`, the FOD still carrying that line's old hash is found in its closure, and its URL is prefetched with `nix store prefetch-file`. Only plain downloads qualify (flat hash, http(s) URL, no `postFetch`/`downloadToTemp`; `Fod.download`); other systems are warned about and left alone. This runs for the main `src` (unless `platform-hashes` handles it) and for every refreshed FOD.
+
+Sources pinned independently of the package (docker's runc/containerd, radare2's sdb, codex's librusty_v8) are declared as components (`passthru.ekapkgs-update.components`). `src` is the attr path of the component's FOD relative to the package; let-bound fetchers must be exposed (`passthru = { inherit sdb; }`). Components are only considered while the package itself is updated, and their bumps are listed in commit messages and PR bodies (`ComponentUpdate`, `UpdateOutcome.components`). A component picks its new version one of two ways:
+
+- **`pinned-by`** (`pins.rs`): follow the pin in a file of the package's new source (`pinned-by.source`, default `src`; it is realised first, after the other sources were refreshed). Built-in formats, chosen by `format` or the file name: `meson-wrap` (`*.wrap`: `[wrap-git]` `revision`, `[wrap-file]` `wrapdb_version`/`source_url`), `cargo-lock` and `go-mod` (both need `name`, the crate/module). `regex` (first capture group) is the fallback when there is no format or its lookup fails. The pin may be a commit (replaces a fetched commit), a tag or a version (replaces the version in the component's tag, keeping its scheme, or, for URL-only fetchers like `fetchurl`, every standalone occurrence of the version from the FOD's name: codex's `version` and `baseUrl`). The component follows the pin exactly, downgrades included.
+- Otherwise **release selection**: the upstream comes from the FOD's URL (or `github-repo`), and the version from `get_compatible_release` with the component's own `semver-strategy`/`version-regex`/`include-prereleases`. Commit-pinned components are skipped with a warning.
+
+The tag literal (or, failing that, the version literal) must appear exactly once in the package file. The refresh pass then rehashes the component's FOD (and everything built from it, like a vendored `cargoHash`).
+
+```nix
+passthru = {
+  inherit sdb;
+  ekapkgs-update.components = {
+    sdb = { src = "sdb"; pinned-by.file = "subprojects/sdb.wrap"; };
+    librusty_v8 = { src = "RUSTY_V8_ARCHIVE"; pinned-by = { file = "codex-rs/Cargo.lock"; name = "v8"; }; };
+    runc = {
+      src = "docker-runc.src";
+      pinned-by = { source = "moby-src"; file = "Dockerfile"; regex = "ARG RUNC_VERSION=(.+)"; };
+    };
+    containerd = { src = "docker-containerd.src"; semver-strategy = "minor"; };
+  };
+};
+```
 
 ### PyPI File Names (`pypi/sdist.rs`, `hash_workflows::align_pypi_src`)
 
@@ -298,7 +342,7 @@ Error type: `RewriteError` with an `is_not_found()` method. When `NotFound` is r
 
 ### Git Refs and Release Tags (`commands/update/file_update.rs`, `rewrite/rev_fixup.rs`)
 
-After the version bump, `update_nix_file` checks the file's git ref against the release tag (`ReleaseTag`, only for GitHub/GitLab/SourceHut upstreams via `UpstreamSource::git_repo_name`; other upstreams' `tag_name` is a bare version). A stale commit-SHA `rev` is rewritten to reference the version (`try_fixup_stale_rev`), and a ref built from an older tag scheme is rewritten to the release's tag (`align_ref_with_tag`: HDF5's `rev = "hdf5_${version}"` → `"${version}"`). Both apply only when `is_single_ref_from` holds: the file has exactly one `rev`/`tag` and binds `repo = "<upstream repo>"`. Files with several refs (opencv's pinned third-party sources) are never touched.
+After the version bump, `update_nix_file` checks the file's git ref against the release tag (`ReleaseTag`, only for GitHub/GitLab/SourceHut upstreams via `UpstreamSource::git_repo_name`; other upstreams' `tag_name` is a bare version). A stale commit-SHA `rev` is rewritten to reference the version (`try_fixup_stale_rev`), and a ref built from an older tag scheme is rewritten to the release's tag (`align_ref_with_tag`: HDF5's `rev = "hdf5_${version}"` → `"${version}"`; a literal still naming the old version is replaced by the tag outright, vibe-kanban's `tag = "v0.1.44-20260424091429"` → `"v0.1.46.1794744340"`). Both apply only when `is_single_ref_from` holds: the file has exactly one `rev`/`tag` and binds `repo = "<upstream repo>"`. Files with several refs (opencv's pinned third-party sources) are never touched.
 
 ### mkManyVariants Support
 
@@ -458,6 +502,9 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `SemverStrategy` | `vcs_sources/mod.rs` | Enum: Latest, Major, Minor, Patch |
 | `Release` | `vcs_sources/mod.rs` | Upstream release with version extraction and matching |
 | `UpdatePhase` | `commands/update/types.rs` | Workflow phases (MetadataExtraction … PatchRecovery, Testing, AgentFix, PrCreation); snake_case `as_str()` stored in the DB |
+| `UpdateOutcome` | `commands/update/mod.rs` | Result of `update_from_file_path`: removed patches, test result, component bumps |
+| `ComponentUpdate` | `commands/update/components.rs` | A component bumped along with its package (`name: old -> new`) |
+| `ClosureSnapshot` | `commands/update/fod_refresh.rs` | Pre-bump `.drv` closure used to find changed FODs |
 | `UpdateError` | `commands/update/errors.rs` | Structured errors with LLM-friendly serialization |
 | `RewriteError` | `rewrite/error.rs` | Parse, NotFound, InvalidResult, Regex, Structural |
 | `RunConfig` | `commands/run/config.rs` | Batch mode configuration |

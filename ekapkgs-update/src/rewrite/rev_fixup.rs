@@ -149,6 +149,8 @@ fn is_plain_tag_text(text: &str) -> bool {
 /// - `tag = "v${finalAttrs.version}";` → `tag = "release-${finalAttrs.version}";`
 /// - `tag = version;` → `tag = "v${version}";`
 /// - `rev = "v2.2.0";` → `rev = "2.2.0";`
+/// - `tag = "v0.1.44-20260424091429";` (a literal still naming
+///   `old_version`) → `tag = "v0.1.46.1794744340";`
 ///
 /// A ref that already evaluates to the tag (also as `refs/tags/<tag>`) is
 /// returned unchanged. Call this after the version has been bumped, and only
@@ -158,7 +160,12 @@ fn is_plain_tag_text(text: &str) -> bool {
 /// [`RewriteError::NotFound`] when the file doesn't have exactly one ref, the
 /// ref doesn't derive from the version (commit SHAs, other interpolations), or
 /// the version isn't part of the tag name.
-pub fn align_ref_with_tag(content: &str, tag_name: &str, new_version: &str) -> Result<String> {
+pub fn align_ref_with_tag(
+    content: &str,
+    tag_name: &str,
+    old_version: &str,
+    new_version: &str,
+) -> Result<String> {
     static BINDING: OnceLock<Regex> = OnceLock::new();
     let binding = BINDING.get_or_init(|| {
         Regex::new(r#"(?m)^([ \t]*(?:rev|tag)\s*=\s*)("[^"]*"|[A-Za-z_][\w.]*)(\s*;)"#)
@@ -175,6 +182,9 @@ pub fn align_ref_with_tag(content: &str, tag_name: &str, new_version: &str) -> R
         .ok_or_else(|| RewriteError::attr_not_found("ref alignment (rev/tag value)"))?;
     let value = caps.get(2).expect("group").as_str();
 
+    // A literal that still names the old version is stale whatever its text
+    // around the version looks like, so it is replaced by the tag outright.
+    let mut stale_literal = false;
     // (literal prefix, version reference if interpolated, literal suffix)
     let (prefix, version_ref, suffix) = match value.strip_prefix('"') {
         None if is_version_ref(value) => ("", Some(value), ""),
@@ -198,7 +208,11 @@ pub fn align_ref_with_tag(content: &str, tag_name: &str, new_version: &str) -> R
             } else if is_likely_commit_sha(inner) {
                 return Err(RewriteError::attr_not_found("ref alignment (commit SHA)"));
             } else {
-                split_tag(inner, new_version).map_or_else(
+                let split = split_tag(inner, new_version).or_else(|| {
+                    stale_literal = old_version != new_version && !old_version.is_empty();
+                    split_tag(inner, old_version).filter(|_| stale_literal)
+                });
+                split.map_or_else(
                     || {
                         Err(RewriteError::attr_not_found(
                             "ref alignment (version not in rev)",
@@ -211,7 +225,9 @@ pub fn align_ref_with_tag(content: &str, tag_name: &str, new_version: &str) -> R
     };
 
     let current = format!("{prefix}{new_version}{suffix}");
-    if current == tag_name || current.strip_prefix("refs/tags/") == Some(tag_name) {
+    if !stale_literal
+        && (current == tag_name || current.strip_prefix("refs/tags/") == Some(tag_name))
+    {
         return Ok(content.to_owned());
     }
 

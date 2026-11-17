@@ -9,10 +9,10 @@ use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
 use super::preservation::preserve_failure;
 use super::types::{UpdateRequest, UpdateResult};
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
-use crate::commands::update::AlreadyAtVersion;
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::instrumentation::{PhaseHandle, PhaseTracker};
 use crate::commands::update::types::UpdatePhase;
+use crate::commands::update::{AlreadyAtVersion, UpdateOutcome};
 use crate::database::{Database, FailedUpdate};
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::{eval_nix_expr, normalize_entry_point};
@@ -427,7 +427,11 @@ pub(super) async fn perform_update(
         .await;
 
     match update_result {
-        Ok((removed_patches, test_result)) => {
+        Ok(UpdateOutcome {
+            removed_patches,
+            test_result,
+            components,
+        }) => {
             // Update succeeded (build passed; tests may or may not have)
             info!("{}: Successfully updated to {}", attr_path, new_version);
 
@@ -440,6 +444,8 @@ pub(super) async fn perform_update(
                     removed_patches.join(", ")
                 );
             }
+
+            log_components(attr_path, &components);
 
             let tests_failed = test_result.failed();
 
@@ -532,6 +538,7 @@ pub(super) async fn perform_update(
                                 rebuild_analysis.as_ref(),
                                 pr_enhancements,
                                 &test_result,
+                                &components,
                             ),
                         )
                         .await;
@@ -644,6 +651,7 @@ pub(super) async fn perform_update(
                                         None, // No rebuild analysis for Claude-fixed updates
                                         pr_enhancements,
                                         &crate::commands::update::TestResult::NotRequested,
+                                        &[],
                                     ),
                                 )
                                 .await;
@@ -788,6 +796,13 @@ pub(super) fn handle_result(result: anyhow::Result<UpdateResult>, attr_path: &st
 /// the change was lost (e.g. `git add` failed, or the rewrite landed in an
 /// ignored file). Recording that as `proposed` would claim an update that
 /// does not exist on the branch, so it is reported as a failed commit.
+/// Log the components bumped along with `attr_path`.
+fn log_components(attr_path: &str, components: &[crate::commands::update::ComponentUpdate]) {
+    for component in components {
+        info!("{}: Updated bundled {}", attr_path, component);
+    }
+}
+
 async fn git_commit(pkg_dir: &str, commit_msg: &str) -> anyhow::Result<()> {
     let staged = tokio::process::Command::new("git")
         .args(["-C", pkg_dir, "diff", "--cached", "--quiet"])
@@ -974,7 +989,11 @@ pub(super) async fn perform_direct_update(
     let commit_msg = crate::git::update_title(attr_path, current_version, new_version);
 
     match update_result {
-        Ok((removed_patches, test_result)) => {
+        Ok(UpdateOutcome {
+            removed_patches,
+            test_result,
+            components,
+        }) => {
             // In branch mode, test failures should fail the update so the
             // changes are reverted and recorded for an agent to fix later.
             if let crate::commands::update::TestResult::Failed(ref stderr) = test_result {
@@ -1005,6 +1024,11 @@ pub(super) async fn perform_direct_update(
                 );
             }
 
+            log_components(attr_path, &components);
+            let commit_msg = format!(
+                "{commit_msg}{}",
+                crate::commands::update::components_commit_lines(&components)
+            );
             Ok(commit_direct_update(&attempt, &snapshot, &git_mutex, &pkg_dir, &commit_msg).await)
         },
         Err(e) if e.downcast_ref::<AlreadyAtVersion>().is_some() => {
@@ -1116,6 +1140,7 @@ async fn create_pr_for_update(
     rebuild_analysis: Option<&crate::nix::rebuild_count::RebuildAnalysis>,
     pr_enhancements: &PrEnhancementsConfig,
     test_result: &crate::commands::update::TestResult,
+    components: &[crate::commands::update::ComponentUpdate],
 ) -> anyhow::Result<(String, i64)> {
     // Get GitHub token from environment
     let github_token = std::env::var("GITHUB_TOKEN")
@@ -1205,6 +1230,12 @@ async fn create_pr_for_update(
         "## Summary\n\nThis PR updates `{attr_path}` from version {old_version} to \
          {new_version}.\n\n## Changes\n\n- Updated package version\n- Updated source hash"
     );
+    for component in components {
+        body.push_str(&format!(
+            "\n- Updated bundled {} from {} to {}",
+            component.name, component.old, component.new
+        ));
+    }
 
     // Add optional metadata fields if available
     if let Some(meta) = metadata.as_ref() {

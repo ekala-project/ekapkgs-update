@@ -4,7 +4,7 @@ use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use super::create_git_commit;
+use super::{ComponentUpdate, create_git_commit};
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::git::get_pr_config_from_git;
 use crate::github;
@@ -22,6 +22,8 @@ pub struct PostUpdateParams<'a> {
     pub tests_passed: bool,
     pub eval_entry_point: Option<&'a str>,
     pub pr_enhancements: &'a PrEnhancementsConfig,
+    /// Components bumped along with the package
+    pub components: &'a [ComponentUpdate],
 }
 
 impl<'a> PostUpdateParams<'a> {
@@ -38,6 +40,7 @@ impl<'a> PostUpdateParams<'a> {
             tests_passed,
             eval_entry_point,
             pr_enhancements,
+            components,
         } = self;
 
         if create_pr {
@@ -50,11 +53,19 @@ impl<'a> PostUpdateParams<'a> {
                 tests_passed,
                 eval_entry_point,
                 pr_enhancements,
+                components,
             )
             .await?;
         } else if commit {
             // Just create a commit without PR
-            create_git_commit(attr_path, &metadata.version, new_version, tests_passed).await?;
+            create_git_commit(
+                attr_path,
+                &metadata.version,
+                new_version,
+                tests_passed,
+                components,
+            )
+            .await?;
         }
 
         Ok(())
@@ -71,6 +82,7 @@ pub async fn create_pr_for_update(
     tests_passed: bool,
     eval_entry_point: Option<&str>,
     pr_enhancements: &PrEnhancementsConfig,
+    components: &[ComponentUpdate],
 ) -> anyhow::Result<()> {
     // Get PR configuration - use CLI override or auto-detect from git
     let pr_config = if let Some(remote_name) = upstream {
@@ -127,8 +139,13 @@ pub async fn create_pr_for_update(
     }
 
     // Create commit with bot signature
-    let commit_message =
-        create_commit_message(attr_path, &metadata.version, new_version, tests_passed);
+    let commit_message = create_commit_message(
+        attr_path,
+        &metadata.version,
+        new_version,
+        tests_passed,
+        components,
+    );
 
     debug!("Creating commit");
     let output = Command::new("git")
@@ -162,7 +179,13 @@ pub async fn create_pr_for_update(
 
     // Create pull request
     let pr_title = crate::git::update_title(attr_path, &metadata.version, new_version);
-    let pr_body = create_pr_body(attr_path, metadata, new_version, diff_markdown.as_deref());
+    let pr_body = create_pr_body(
+        attr_path,
+        metadata,
+        new_version,
+        components,
+        diff_markdown.as_deref(),
+    );
 
     debug!("Creating pull request");
     let pr = github::create_pull_request(
@@ -188,15 +211,17 @@ fn create_commit_message(
     old_version: &str,
     new_version: &str,
     tests_passed: bool,
+    components: &[ComponentUpdate],
 ) -> String {
     let title = crate::git::update_title(attr_path, old_version, new_version);
+    let components = components_commit_lines(components);
     let tests = if tests_passed {
         "\n\nTests: passthru.tests passed"
     } else {
         ""
     };
     format!(
-        "{title}{tests}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
+        "{title}{components}{tests}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
          <noreply@ekapkgs.org>"
     )
 }
@@ -206,12 +231,19 @@ fn create_pr_body(
     attr_path: &str,
     metadata: &PackageMetadata,
     new_version: &str,
+    components: &[ComponentUpdate],
     diff_markdown: Option<&str>,
 ) -> String {
     let mut pr_body = format!(
         "## Update {}\n\nUpdates from version {} to {}.",
         attr_path, metadata.version, new_version
     );
+    if !components.is_empty() {
+        pr_body.push_str("\n\n**Bundled components:**\n");
+        for component in components {
+            pr_body.push_str(&format!("\n- {component}"));
+        }
+    }
 
     // Add optional metadata fields
     if let Some(description) = metadata.description.as_ref() {
@@ -233,4 +265,41 @@ fn create_pr_body(
     pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
     pr_body
+}
+
+/// Commit message lines for bumped components (empty without any).
+pub fn components_commit_lines(components: &[ComponentUpdate]) -> String {
+    if components.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = components.iter().map(|c| format!("- {c}")).collect();
+    format!("\n\nComponents:\n{}", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn components_in_commit_message() {
+        let components = [
+            ComponentUpdate {
+                name: "containerd".to_owned(),
+                old: "v2.3.3".to_owned(),
+                new: "v2.4.2".to_owned(),
+            },
+            ComponentUpdate {
+                name: "runc".to_owned(),
+                old: "v1.4.3".to_owned(),
+                new: "v1.5.3".to_owned(),
+            },
+        ];
+        assert_eq!(components_commit_lines(&[]), "");
+        assert_eq!(
+            create_commit_message("docker", "29.7.2", "29.10.0", false, &components),
+            "docker: 29.7.2 -> 29.10.0\n\nComponents:\n- containerd: v2.3.3 -> v2.4.2\n- runc: \
+             v1.4.3 -> v1.5.3\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: \
+             ekapkgs-update <noreply@ekapkgs.org>"
+        );
+    }
 }
