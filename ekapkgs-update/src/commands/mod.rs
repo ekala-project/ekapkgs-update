@@ -10,6 +10,7 @@ pub mod pr_enhancements;
 pub mod prune_maintainers;
 pub mod query;
 pub mod report;
+pub mod reset_failures;
 pub mod retry;
 pub mod review;
 pub mod run;

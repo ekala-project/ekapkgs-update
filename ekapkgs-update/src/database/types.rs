@@ -136,6 +136,38 @@ impl PackageInfo {
     }
 }
 
+/// Which `failed` rows [`Database::reset_failures`] clears the backoff of.
+///
+/// Every set field must match (AND); an empty filter matches every failed row.
+#[derive(Debug, Clone, Default)]
+pub struct FailureResetFilter {
+    /// Only this repo (`''` = the `run` command / legacy watch).
+    pub repo_name: Option<String>,
+    /// Only these attr paths.
+    pub attr_paths: Vec<String>,
+    /// Only rows whose last failure belongs to one of these sessions.
+    pub session_ids: Vec<String>,
+    /// Only rows last attempted at or after this time.
+    pub since: Option<DateTime<Utc>>,
+    /// Only rows last attempted at or before this time.
+    pub until: Option<DateTime<Utc>>,
+    /// Case-insensitive substring of the summary (`last_error`) or of the
+    /// full log of the last failure (`update_logs.error_log`).
+    pub error_match: Option<String>,
+}
+
+/// A row matched by [`Database::reset_failures`], as it was before the reset.
+#[derive(Debug, Clone)]
+pub struct ResetFailure {
+    pub repo_name: String,
+    pub attr_path: String,
+    pub failed_version: Option<String>,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub last_attempted: Option<DateTime<Utc>>,
+    pub next_attempt: Option<DateTime<Utc>>,
+}
+
 /// A failed update attempt to record in `update_logs` and `updates`.
 #[derive(Debug, Clone, Default)]
 pub struct FailedUpdate<'a> {
