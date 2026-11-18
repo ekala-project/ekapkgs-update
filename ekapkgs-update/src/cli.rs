@@ -344,6 +344,40 @@ pub enum Commands {
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
     },
+    /// Clear the failure backoff of failed updates so they are attempted again
+    ///
+    /// For failures that were not the package's fault (e.g. a broken nix
+    /// daemon). Resets `next_attempt` and `failure_count`; the next `run` or
+    /// `watch` poll retries them. Filters combine with AND.
+    ResetFailures {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Only this watched repo ('' = the run command / legacy watch)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Only these attr paths (repeatable)
+        #[arg(long = "attr")]
+        attr_paths: Vec<String>,
+        /// Only failures from these sessions (repeatable)
+        #[arg(long = "session")]
+        sessions: Vec<String>,
+        /// Only failures at or after this time (30m, 6h, 2d, YYYY-MM-DD, RFC 3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only failures at or before this time (same formats as --since)
+        #[arg(long)]
+        until: Option<String>,
+        /// Only failures whose error summary or log contains this text (case-insensitive)
+        #[arg(long)]
+        error_match: Option<String>,
+        /// Reset every failed update when no filter is given
+        #[arg(long)]
+        all: bool,
+        /// List the matching failures without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Retry a failed update from preserved worktree
     Retry {
         /// Path to SQLite database for tracking updates
@@ -934,6 +968,32 @@ impl Commands {
                 output,
             } => commands::report::report(database, package, since_days, output).await,
             Commands::Status { database } => commands::status::status(database).await,
+            Commands::ResetFailures {
+                database,
+                repo,
+                attr_paths,
+                sessions,
+                since,
+                until,
+                error_match,
+                all,
+                dry_run,
+            } => {
+                commands::reset_failures::reset_failures(
+                    commands::reset_failures::ResetFailuresOptions {
+                        database,
+                        repo,
+                        attr_paths,
+                        sessions,
+                        since,
+                        until,
+                        error_match,
+                        all,
+                        dry_run,
+                    },
+                )
+                .await
+            },
             Commands::Retry {
                 database,
                 attr_path,

@@ -106,6 +106,7 @@ ekapkgs-update/                     # Main CLI crate
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
+      reset_failures.rs             # Clear failure backoff of failed updates (filters: repo/attr/session/time/error text)
       log.rs, inspect.rs            # Per-package failure inspection
       query.rs, report.rs, status.rs  # Database query/reporting commands
       prune_maintainers.rs          # Remove deprecated maintainers and teams from .nix files
@@ -389,6 +390,8 @@ Two kinds of backoff:
 - **Failure backoff** (`record_failed_update`): 2 → 4 → 6 days, by `failure_count`. Also sets `failed_version` and `last_error`, and writes `update_logs`; the key is the drv path, or `<repo>:<attr>@<version>` when there is none.
 
 Successful updates (`record_successful_update`) reset `failure_count` and back off 2 days. Watch ignores the check backoff and honours the failure backoff only for the same `failed_version`.
+
+Failures that weren't the package's fault (a broken nix daemon) are retried with `ekapkgs-update reset-failures` (`Database::reset_failures`, `FailureResetFilter`): it clears `next_attempt` and `failure_count` of the matching `failed` rows and keeps `status`/`failed_version`/`last_error` until the retry overwrites them. Filters (`--repo`, `--attr`, `--session`, `--since`/`--until`, `--error-match` against `last_error` or the last failure's full log) combine with AND; no filter needs `--all`; `--dry-run` only lists.
 
 The web dashboard (`ekapkgs-update-web`) reads these tables directly. Keep the migration comments in `migrations/20261111_dashboard_data.sql` in sync with the column semantics.
 

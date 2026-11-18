@@ -6,11 +6,12 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
 use tracing::{debug, info};
 
 use super::types::{
-    FailedUpdate, PackageInfo, UpdateLog, UpdateRecord, UpdateStatus, summarize_error,
+    FailedUpdate, FailureResetFilter, PackageInfo, ResetFailure, UpdateLog, UpdateRecord,
+    UpdateStatus, summarize_error,
 };
 use super::{Database, FIRST_BACKOFF_DAYS, MAX_BACKOFF_DAYS, SECOND_BACKOFF_DAYS, parse_rfc3339};
 use crate::vcs_sources::compare_version_components;
@@ -814,6 +815,136 @@ impl Database {
     }
 }
 
+/// Escape `%`, `_` and `\` for a `LIKE ... ESCAPE '\'` pattern.
+fn like_substring(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for c in needle.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+/// Append the `WHERE` clause selecting the failed rows `filter` matches.
+fn push_failure_filter(qb: &mut QueryBuilder<'_, Sqlite>, filter: &FailureResetFilter) {
+    qb.push(" WHERE status = 'failed'");
+    if let Some(repo) = &filter.repo_name {
+        qb.push(" AND repo_name = ").push_bind(repo.clone());
+    }
+    if !filter.attr_paths.is_empty() {
+        qb.push(" AND attr_path IN (");
+        let mut sep = qb.separated(", ");
+        for attr in &filter.attr_paths {
+            sep.push_bind(attr.clone());
+        }
+        qb.push(")");
+    }
+    if !filter.session_ids.is_empty() {
+        qb.push(" AND last_session_id IN (");
+        let mut sep = qb.separated(", ");
+        for session in &filter.session_ids {
+            sep.push_bind(session.clone());
+        }
+        qb.push(")");
+    }
+    if let Some(since) = filter.since {
+        qb.push(" AND julianday(last_attempted) >= julianday(")
+            .push_bind(since.to_rfc3339())
+            .push(")");
+    }
+    if let Some(until) = filter.until {
+        qb.push(" AND julianday(last_attempted) <= julianday(")
+            .push_bind(until.to_rfc3339())
+            .push(")");
+    }
+    if let Some(needle) = &filter.error_match {
+        let pattern = like_substring(needle);
+        qb.push(" AND (last_error LIKE ")
+            .push_bind(pattern.clone())
+            .push(
+                " ESCAPE '\\' OR EXISTS (SELECT 1 FROM update_logs l \
+                 WHERE l.attr_path = updates.attr_path \
+                   AND COALESCE(l.repo_name, '') = updates.repo_name \
+                   AND l.status = 'failed' \
+                   AND (updates.last_session_id IS NULL \
+                        OR l.session_id = updates.last_session_id) \
+                   AND l.error_log LIKE ",
+            )
+            .push_bind(pattern)
+            .push(" ESCAPE '\\'))");
+    }
+}
+
+impl Database {
+    /// Clear the failure backoff of the `failed` rows `filter` matches, so the
+    /// next `run`/`watch` poll attempts them again.
+    ///
+    /// For failures that were not the package's fault (a broken nix daemon,
+    /// a full disk): `next_attempt` is cleared and `failure_count` reset, so
+    /// they do not step up the backoff of a later genuine failure. `status`,
+    /// `failed_version` and `last_error` are kept for the dashboard until the
+    /// retry overwrites them. With `dry_run`, nothing is changed.
+    ///
+    /// Returns the matched rows as they were before the reset.
+    pub async fn reset_failures(
+        &self,
+        filter: &FailureResetFilter,
+        dry_run: bool,
+    ) -> Result<Vec<ResetFailure>> {
+        let mut tx = self.pool.begin().await.context("begin reset_failures")?;
+
+        let mut select = QueryBuilder::<Sqlite>::new(
+            "SELECT repo_name, attr_path, failed_version, failure_count, last_error, \
+                    last_attempted, next_attempt FROM updates",
+        );
+        push_failure_filter(&mut select, filter);
+        select.push(" ORDER BY repo_name, attr_path");
+        let rows = select
+            .build()
+            .fetch_all(&mut *tx)
+            .await
+            .context("select failed updates to reset")?;
+
+        let matched = rows
+            .iter()
+            .map(|row| {
+                Ok(ResetFailure {
+                    repo_name: row.try_get("repo_name")?,
+                    attr_path: row.try_get("attr_path")?,
+                    failed_version: row.try_get("failed_version")?,
+                    failure_count: row.try_get("failure_count")?,
+                    last_error: row.try_get("last_error")?,
+                    last_attempted: parse_rfc3339(row.try_get("last_attempted")?),
+                    next_attempt: parse_rfc3339(row.try_get("next_attempt")?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if !dry_run && !matched.is_empty() {
+            let mut update = QueryBuilder::<Sqlite>::new(
+                "UPDATE updates SET next_attempt = NULL, failure_count = 0",
+            );
+            push_failure_filter(&mut update, filter);
+            let result = update
+                .build()
+                .execute(&mut *tx)
+                .await
+                .context("reset failure backoff")?;
+            info!(
+                "Reset failure backoff of {} packages",
+                result.rows_affected()
+            );
+        }
+
+        tx.commit().await.context("commit reset_failures")?;
+        Ok(matched)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,6 +1252,101 @@ mod tests {
                 "proposed={proposed} current={current}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reset_failures_filters_and_clears_backoff() {
+        let db = setup_db().await;
+        let fail = |repo, attr, session, log| FailedUpdate {
+            repo_name: repo,
+            attr_path: attr,
+            old_version: Some("1.0"),
+            new_version: Some("1.1"),
+            // The daemon error is deep in the log, not in the summary.
+            error_log: log,
+            phase: Some("build"),
+            session_id: Some(session),
+            ..FailedUpdate::default()
+        };
+        let daemon = "error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket'\n\
+                      error: builder failed\n";
+        let genuine = "error: builder for '/nix/store/x.drv' failed\n";
+        for f in [
+            fail("", "hello", "s1", daemon),
+            fail("", "hello", "s1", daemon),
+            fail("", "world", "s1", genuine),
+            fail("a", "hello", "s2", daemon),
+            fail("", "100%_odd", "s1", genuine),
+        ] {
+            db.record_failed_update(&f).await.unwrap();
+        }
+
+        let attrs = |rows: &[ResetFailure]| {
+            rows.iter()
+                .map(|r| format!("{}:{}", r.repo_name, r.attr_path))
+                .collect::<Vec<_>>()
+        };
+        let by_error = FailureResetFilter {
+            error_match: Some("DAEMON-SOCKET".into()),
+            ..FailureResetFilter::default()
+        };
+        // Dry run lists without changing anything.
+        let rows = db.reset_failures(&by_error, true).await.unwrap();
+        assert_eq!(attrs(&rows), [":hello", "a:hello"]);
+        assert_eq!(rows[0].failure_count, 2);
+        assert!(!db.should_check_update("", "hello").await.unwrap());
+
+        let scoped = FailureResetFilter {
+            repo_name: Some(String::new()),
+            ..by_error.clone()
+        };
+        let rows = db.reset_failures(&scoped, false).await.unwrap();
+        assert_eq!(attrs(&rows), [":hello"]);
+        let rec = db.get_update_record("", "hello").await.unwrap().unwrap();
+        assert_eq!(rec.status, UpdateStatus::Failed);
+        assert_eq!(rec.failure_count, 0);
+        assert!(rec.next_attempt.is_none());
+        assert_eq!(rec.failed_version.as_deref(), Some("1.1"));
+        assert!(db.should_check_update("", "hello").await.unwrap());
+        // Other repos and genuine failures keep their backoff.
+        assert!(!db.should_check_update("a", "hello").await.unwrap());
+        assert!(!db.should_check_update("", "world").await.unwrap());
+
+        // LIKE wildcards in the needle are literal.
+        let wildcard = FailureResetFilter {
+            error_match: Some("%".into()),
+            ..FailureResetFilter::default()
+        };
+        assert!(db.reset_failures(&wildcard, true).await.unwrap().is_empty());
+
+        // Session, attr and time filters.
+        let by_session = FailureResetFilter {
+            session_ids: vec!["s2".into()],
+            ..FailureResetFilter::default()
+        };
+        assert_eq!(
+            attrs(&db.reset_failures(&by_session, true).await.unwrap()),
+            ["a:hello"]
+        );
+        let by_attr = FailureResetFilter {
+            attr_paths: vec!["world".into(), "100%_odd".into()],
+            ..FailureResetFilter::default()
+        };
+        assert_eq!(
+            attrs(&db.reset_failures(&by_attr, true).await.unwrap()),
+            [":100%_odd", ":world"]
+        );
+        let future = FailureResetFilter {
+            since: Some(Utc::now() + Duration::hours(1)),
+            ..FailureResetFilter::default()
+        };
+        assert!(db.reset_failures(&future, true).await.unwrap().is_empty());
+        let past = FailureResetFilter {
+            since: Some(Utc::now() - Duration::hours(1)),
+            until: Some(Utc::now() + Duration::hours(1)),
+            ..FailureResetFilter::default()
+        };
+        assert_eq!(db.reset_failures(&past, true).await.unwrap().len(), 4);
     }
 
     #[tokio::test]
