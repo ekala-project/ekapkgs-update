@@ -141,7 +141,7 @@ pub enum Commands {
         /// Skip updates that would cause more than N rebuilds
         #[arg(long)]
         max_rebuilds: Option<usize>,
-        /// Skip CVE vulnerability checking
+        /// Skip CVE vulnerability checking (PR body section and the package scan)
         #[arg(long)]
         skip_cve: bool,
         /// Skip Repology cross-distribution version checking
@@ -377,6 +377,25 @@ pub enum Commands {
         /// List the matching failures without changing anything
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Scan tracked packages for known vulnerabilities (OSV.dev) and list
+    /// those with high or critical CVEs
+    CveScan {
+        /// Path to SQLite database for tracking updates
+        #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
+        database: String,
+        /// Only packages of this watched repository ("default" = the `run`
+        /// / single-repo packages)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Rescan packages scanned more than this many hours ago
+        #[arg(long, default_value = "24")]
+        max_age_hours: u32,
+        /// Rescan every selected package, however recently it was scanned
+        #[arg(long)]
+        force: bool,
+        /// Only these attribute paths
+        attr_paths: Vec<String>,
     },
     /// Retry a failed update from preserved worktree
     Retry {
@@ -615,6 +634,10 @@ pub enum Commands {
         /// Timeout in seconds for each Claude Code fix attempt
         #[arg(long, default_value = "300")]
         claude_fix_timeout: u64,
+        /// Skip CVE vulnerability checking (the package scan after poll
+        /// cycles and the PR body section)
+        #[arg(long)]
+        skip_cve: bool,
     },
 }
 
@@ -994,6 +1017,15 @@ impl Commands {
                 )
                 .await
             },
+            Commands::CveScan {
+                database,
+                repo,
+                max_age_hours,
+                force,
+                attr_paths,
+            } => {
+                commands::cve_scan::cve_scan(database, repo, attr_paths, max_age_hours, force).await
+            },
             Commands::Retry {
                 database,
                 attr_path,
@@ -1187,6 +1219,7 @@ impl Commands {
                 claude_fix,
                 claude_fix_max_turns,
                 claude_fix_timeout,
+                skip_cve,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
                 let mut watch_config = commands::watch::WatchConfig::from_args(
@@ -1207,6 +1240,7 @@ impl Commands {
                     claude_fix_max_turns,
                     claude_fix_timeout,
                 );
+                watch_config.skip_cve = skip_cve;
                 watch_config.repos = config_file.repos;
                 watch_config.execute().await
             },

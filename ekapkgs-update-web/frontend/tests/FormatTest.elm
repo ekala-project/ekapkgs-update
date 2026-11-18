@@ -41,6 +41,21 @@ suite =
             , ( ( "not_found", 1, True ), Format.badge "not found" "critical" )
             , ( ( "moved", 0, True ), Format.badge "moved" "warn" )
             ]
+        , cases "severityBadge"
+            Format.severityBadge
+            [ ( "critical", Format.badge "critical" "critical" )
+            , ( "high", Format.badge "high" "serious" )
+            , ( "medium", Format.badge "medium" "warn" )
+            , ( "low", Format.badge "low" "neutral" )
+            , ( "unknown", Format.badge "unknown" "neutral" )
+            , ( "", Format.badge "unknown" "neutral" )
+            ]
+        , cases "osvUrl"
+            Format.osvUrl
+            [ ( "CVE-2024-0001", "https://osv.dev/vulnerability/CVE-2024-0001" )
+            , ( "GHSA-aaaa-bbbb-cccc", "https://osv.dev/vulnerability/GHSA-aaaa-bbbb-cccc" )
+            , ( "a/b", "https://osv.dev/vulnerability/a%2Fb" )
+            ]
         , cases "parseTs"
             (Format.parseTs >> Maybe.map Time.posixToMillis)
             [ ( "1970-01-01T00:00:00Z", Just 0 )

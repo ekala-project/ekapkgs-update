@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod audit;
 pub mod autofix;
+pub mod cve_scan;
 pub mod export;
 pub mod inspect;
 pub mod lint;

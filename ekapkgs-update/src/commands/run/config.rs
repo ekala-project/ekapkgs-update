@@ -286,6 +286,7 @@ impl RunConfig {
 
         // Spawn release checker service
         let skip_repology = pr_enhancements.skip_repology;
+        let skip_cve_scan = pr_enhancements.skip_cve_check;
         let checker_concurrency = concurrency;
         let checker_session = session_id.clone();
         let checker_handle = tokio::spawn(async move {
@@ -353,6 +354,18 @@ impl RunConfig {
             .await
         {
             tracing::warn!("Failed to finalize session: {}", e);
+        }
+
+        // Refresh known vulnerabilities of the packages this run checked
+        // (versions may have changed). Failures never fail the run.
+        if !skip_cve_scan {
+            let options = crate::cve::scan::ScanOptions {
+                repo: Some(String::new()),
+                ..crate::cve::scan::ScanOptions::default()
+            };
+            if let Err(e) = crate::cve::scan::scan_due(db.pool(), &options).await {
+                tracing::warn!("CVE scan failed: {:#}", e);
+            }
         }
 
         // Display comprehensive summary

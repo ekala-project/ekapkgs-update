@@ -19,10 +19,21 @@
 //!
 //! The [`ecosystem`] submodule maps package metadata (language, build system) to
 //! OSV ecosystem identifiers (e.g., "PyPI", "crates.io", "npm").
+//!
+//! ## Package Scans
+//!
+//! [`scan::scan_due`] scans every tracked package (`updates`) against OSV,
+//! by repository URL (`GIT` ecosystem) and PyPI name, and records the
+//! vulnerabilities affecting the current version in `package_vulnerabilities`
+//! (see [`scan`]). It runs from `ekapkgs-update cve-scan`, at the end of
+//! `run`, and after watch poll cycles.
 
 mod cache;
+pub mod cvss4;
 mod ecosystem;
 mod osv;
+pub mod scan;
+pub mod store;
 mod types;
 
 use std::collections::HashSet;

@@ -15,6 +15,7 @@ module Format exposing
     , href
     , humanize
     , monthDay
+    , osvUrl
     , packageBadge
     , packageHref
     , parseTs
@@ -30,6 +31,7 @@ module Format exposing
     , repoParam
     , safeUrl
     , sessionHref
+    , severityBadge
     , shortId
     , shortSha
     , shortVersion
@@ -791,6 +793,34 @@ type alias Badge =
 badge : String -> String -> Badge
 badge label t =
     { label = label, tone = t }
+
+
+{-| Badge for a vulnerability severity (`package_vulnerabilities.severity`).
+-}
+severityBadge : String -> Badge
+severityBadge severity =
+    case severity of
+        "critical" ->
+            badge "critical" "critical"
+
+        "high" ->
+            badge "high" "serious"
+
+        "medium" ->
+            badge "medium" "warn"
+
+        "low" ->
+            badge "low" "neutral"
+
+        _ ->
+            badge "unknown" "neutral"
+
+
+{-| The OSV.dev page for a vulnerability id (CVE, GHSA, PYSEC, …).
+-}
+osvUrl : String -> String
+osvUrl id =
+    "https://osv.dev/vulnerability/" ++ Url.percentEncode id
 
 
 {-| Badge for an upstream source's poll health: its `health` value, its

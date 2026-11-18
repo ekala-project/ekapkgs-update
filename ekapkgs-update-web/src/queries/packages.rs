@@ -37,6 +37,12 @@ pub struct PackageRow {
     pub upstream_key: Option<String>,
     pub upstream_instance: Option<String>,
     pub semver_strategy: Option<String>,
+    /// Last completed CVE scan (OSV.dev).
+    pub cve_scanned_at: Option<String>,
+    /// `current_version` at that scan.
+    pub cve_scanned_version: Option<String>,
+    /// Last CVE scan failure; `None` after a success.
+    pub cve_scan_error: Option<String>,
     /// Outdated only because of a watch bootstrap baseline (left for `run`).
     pub is_backlog: bool,
 }
@@ -193,6 +199,141 @@ pub async fn count(pool: &SqlitePool, filter: &PackageFilter) -> sqlx::Result<i6
     )
     .fetch_one(pool)
     .await
+}
+
+/// Joins `updates u` to the vulnerabilities of its current version (stale
+/// rows from before a version change are ignored).
+const CURRENT_VULNS_JOIN: &str = " JOIN package_vulnerabilities v ON v.repo_name = u.repo_name \
+     AND v.attr_path = u.attr_path AND v.version = u.current_version";
+
+/// A package with high or critical vulnerabilities at its current version.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct VulnerablePackageRow {
+    pub repo_name: String,
+    pub attr_path: String,
+    pub pname: Option<String>,
+    pub status: String,
+    pub current_version: Option<String>,
+    pub latest_upstream_version: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
+    pub critical: i64,
+    pub high: i64,
+    /// High/critical vulnerabilities not affecting `latest_upstream_version`.
+    pub fixed_by_update: i64,
+    pub max_score: Option<f64>,
+    /// Up to three of the most severe vulnerability ids (JSON array).
+    #[serde(skip)]
+    pub top_ids_json: String,
+    #[sqlx(skip)]
+    pub top_ids: Vec<String>,
+    pub cve_scanned_at: Option<String>,
+}
+
+/// Packages matching `filter` with high or critical vulnerabilities, most
+/// severe first (critical count, high count, CVSS score).
+pub async fn high_severity(
+    pool: &SqlitePool,
+    filter: &PackageFilter,
+    limit: i64,
+) -> sqlx::Result<Vec<VulnerablePackageRow>> {
+    let sql = format!(
+        "SELECT u.repo_name, u.attr_path, u.pname, u.status, u.current_version, \
+         u.latest_upstream_version, u.pr_url, u.pr_number, \
+         SUM(v.severity = 'critical') AS critical, SUM(v.severity = 'high') AS high, \
+         SUM(COALESCE(v.fixed_in_latest, 0)) AS fixed_by_update, \
+         MAX(v.cvss_score) AS max_score, \
+         (SELECT json_group_array(vuln_id) FROM (SELECT t.vuln_id FROM \
+            package_vulnerabilities t WHERE t.repo_name = u.repo_name \
+            AND t.attr_path = u.attr_path AND t.version = u.current_version \
+            AND t.severity IN ('critical', 'high') \
+            ORDER BY {} DESC, t.cvss_score IS NULL, t.cvss_score DESC, t.vuln_id LIMIT 3)) \
+           AS top_ids_json, \
+         u.cve_scanned_at \
+         FROM updates u{CURRENT_VULNS_JOIN}{FILTER_SQL} \
+         AND v.severity IN ('critical', 'high') \
+         GROUP BY u.repo_name, u.attr_path \
+         ORDER BY critical DESC, high DESC, max_score IS NULL, max_score DESC, u.attr_path \
+         LIMIT ?6",
+        severity_rank_sql!("t.severity")
+    );
+    let mut rows: Vec<VulnerablePackageRow> = bind_filter!(
+        sqlx::query_as::<_, VulnerablePackageRow>(&sql),
+        filter,
+        filter.status_db(),
+        filter.backlog_only()
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    for row in &mut rows {
+        row.top_ids = serde_json::from_str(&row.top_ids_json).unwrap_or_default();
+    }
+    Ok(rows)
+}
+
+/// Number of packages matching `filter` with high or critical
+/// vulnerabilities.
+pub async fn high_severity_count(pool: &SqlitePool, filter: &PackageFilter) -> sqlx::Result<i64> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM updates u{FILTER_SQL} AND EXISTS (SELECT 1 FROM \
+         package_vulnerabilities v WHERE v.repo_name = u.repo_name \
+         AND v.attr_path = u.attr_path AND v.version = u.current_version \
+         AND v.severity IN ('critical', 'high'))"
+    );
+    bind_filter!(
+        sqlx::query_scalar::<_, i64>(&sql),
+        filter,
+        filter.status_db(),
+        filter.backlog_only()
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// A vulnerability affecting a package's current version.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct VulnerabilityRow {
+    pub vuln_id: String,
+    /// Merged OSV record ids (JSON array).
+    #[serde(skip)]
+    pub osv_ids_json: String,
+    #[sqlx(skip)]
+    pub osv_ids: Vec<String>,
+    pub version: String,
+    pub severity: String,
+    pub cvss_score: Option<f64>,
+    pub summary: Option<String>,
+    /// `Some(true)`: not reported for `latest_version`.
+    pub fixed_in_latest: Option<bool>,
+    pub latest_version: Option<String>,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+/// Vulnerabilities of an attribute's current version in one repo, most
+/// severe first.
+pub async fn vulnerabilities_for(
+    pool: &SqlitePool,
+    attr: &str,
+    repo: &str,
+) -> sqlx::Result<Vec<VulnerabilityRow>> {
+    let sql = format!(
+        "SELECT v.vuln_id, v.osv_ids AS osv_ids_json, v.version, v.severity, v.cvss_score, \
+         v.summary, v.fixed_in_latest, v.latest_version, v.first_seen, v.last_seen \
+         FROM updates u{CURRENT_VULNS_JOIN} WHERE u.attr_path = ?1 AND u.repo_name = ?2 \
+         ORDER BY {} DESC, v.cvss_score IS NULL, v.cvss_score DESC, v.vuln_id",
+        severity_rank_sql!("v.severity")
+    );
+    let mut rows: Vec<VulnerabilityRow> = sqlx::query_as(&sql)
+        .bind(attr)
+        .bind(repo)
+        .fetch_all(pool)
+        .await?;
+    for row in &mut rows {
+        row.osv_ids = serde_json::from_str(&row.osv_ids_json).unwrap_or_default();
+    }
+    Ok(rows)
 }
 
 /// Package counts per status (plus backlog and open PRs).
