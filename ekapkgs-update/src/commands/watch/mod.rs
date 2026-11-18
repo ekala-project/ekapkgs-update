@@ -132,6 +132,8 @@ pub struct WatchConfig {
     pub claude_fix_max_turns: u32,
     /// Timeout in seconds for each Claude fix attempt
     pub claude_fix_timeout: u64,
+    /// Skip the CVE scan after poll cycles and the PR body's CVE section.
+    pub skip_cve: bool,
     /// Multi-repo configurations (from config file).
     #[serde(skip)]
     pub repos: Vec<RepoConfig>,
@@ -174,6 +176,7 @@ impl WatchConfig {
             claude_fix,
             claude_fix_max_turns,
             claude_fix_timeout,
+            skip_cve: false,
             repos: Vec::new(),
         }
     }
@@ -283,7 +286,10 @@ impl WatchConfig {
             })
         };
 
-        let pr_enhancements = PrEnhancementsConfig::default();
+        let pr_enhancements = PrEnhancementsConfig {
+            skip_cve_check: self.skip_cve,
+            ..PrEnhancementsConfig::default()
+        };
 
         let updater_config = crate::commands::run::UpdaterServiceConfig {
             session_id: String::new(), // Updated per poll cycle

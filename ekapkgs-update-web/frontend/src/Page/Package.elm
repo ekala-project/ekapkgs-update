@@ -26,7 +26,40 @@ type alias Data =
     , logs : List Api.Log
     , queue : List Api.AutofixQueue
     , attempts : List Api.AutofixAttempt
+    , vulnerabilities : List Vulnerability
     }
+
+
+{-| A vulnerability affecting the package's current version
+(`VulnerabilityRow`).
+-}
+type alias Vulnerability =
+    { vulnId : String
+    , osvIds : List String
+    , version : String
+    , severity : String
+    , cvssScore : Maybe Float
+    , summary : Maybe String
+    , fixedInLatest : Maybe Bool
+    , latestVersion : Maybe String
+    , firstSeen : String
+    , lastSeen : String
+    }
+
+
+vulnerability : D.Decoder Vulnerability
+vulnerability =
+    D.succeed Vulnerability
+        |> Api.required "vuln_id" D.string
+        |> Api.required "osv_ids" (D.list D.string)
+        |> Api.required "version" D.string
+        |> Api.required "severity" D.string
+        |> Api.nullable "cvss_score" D.float
+        |> Api.nullable "summary" D.string
+        |> Api.nullable "fixed_in_latest" D.bool
+        |> Api.nullable "latest_version" D.string
+        |> Api.required "first_seen" D.string
+        |> Api.required "last_seen" D.string
 
 
 decoder : D.Decoder Data
@@ -42,6 +75,7 @@ decoder =
         |> Api.required "logs" (D.list Api.log)
         |> Api.andMap (D.at [ "autofix", "queue" ] (D.list Api.autofixQueue))
         |> Api.andMap (D.at [ "autofix", "attempts" ] (D.list Api.autofixAttempt))
+        |> Api.required "vulnerabilities" (D.list vulnerability)
 
 
 view : Ctx -> Data -> Ctx.Page
@@ -98,6 +132,7 @@ view ctx d =
                     [ updatePanel ctx d
                     , upstreamPanel ctx d
                     ]
+              , vulnerabilitiesPanel ctx d
               , historyPanel ctx d
               , logsPanel ctx d label
               ]
@@ -669,6 +704,131 @@ historyItem ctx g =
             :: View.pchips ctx.now phases
             :: List.map (View.phaseError ctx.now False) (List.filter (\p -> p.status == "failed") phases)
         )
+
+
+
+-- VULNERABILITIES
+
+
+vulnerabilitiesPanel : Ctx -> Data -> Html msg
+vulnerabilitiesPanel ctx d =
+    let
+        scan =
+            Maybe.map (\u -> ( u.cveScannedAt, u.cveScannedVersion, u.cveScanError )) d.update
+                |> Maybe.withDefault ( Nothing, Nothing, Nothing )
+
+        ( scannedAt, scannedVersion, scanError ) =
+            scan
+
+        scanned =
+            scannedAt /= Nothing
+
+        errorLine =
+            case scanError of
+                Just err ->
+                    [ p [ class "small tone-text-critical" ] [ text ("Last scan failed: " ++ Format.truncate 300 err) ] ]
+
+                Nothing ->
+                    []
+    in
+    panel "Known vulnerabilities"
+        [ span [ class "muted small" ]
+            (if scanned then
+                [ text "OSV.dev scan of "
+                , View.ver scannedVersion
+                , text " "
+                , View.ts ctx.now scannedAt
+                ]
+
+             else
+                [ text "OSV.dev" ]
+            )
+        ]
+        (errorLine
+            ++ (if List.isEmpty d.vulnerabilities then
+                    [ p [ class "muted" ]
+                        [ text
+                            (if scanned then
+                                "No known vulnerabilities at the current version."
+
+                             else
+                                "Not scanned yet (GitHub, GitLab, SourceHut and PyPI upstreams are scanned by run, watch and cve-scan)."
+                            )
+                        ]
+                    ]
+
+                else
+                    [ div [ class "table-wrap" ]
+                        [ table [ class "table compact" ]
+                            [ thead []
+                                [ tr []
+                                    [ th [ scope "col" ] [ text "Severity" ]
+                                    , th [ scope "col" ] [ text "Vulnerability" ]
+                                    , th [ scope "col", class "num" ] [ text "CVSS" ]
+                                    , th [ scope "col" ] [ text "Fixed in latest" ]
+                                    , th [ scope "col" ] [ text "First seen" ]
+                                    ]
+                                ]
+                            , tbody [] (List.map (vulnerabilityRow ctx) d.vulnerabilities)
+                            ]
+                        ]
+                    ]
+               )
+        )
+
+
+vulnerabilityRow : Ctx -> Vulnerability -> Html msg
+vulnerabilityRow ctx v =
+    let
+        osvLink id =
+            a [ href (Format.osvUrl id), target "_blank", rel "noopener noreferrer" ] [ text id ]
+
+        aliases =
+            List.filter (\id -> id /= v.vulnId) v.osvIds
+    in
+    tr []
+        [ td [] [ View.badge (Format.severityBadge v.severity) ]
+        , td []
+            (List.concat
+                [ [ osvLink v.vulnId ]
+                , if List.isEmpty aliases then
+                    []
+
+                  else
+                    [ span [ class "muted small" ] (text " (" :: List.intersperse (text ", ") (List.map osvLink aliases) ++ [ text ")" ]) ]
+                , case v.summary of
+                    Just s ->
+                        if s /= "" then
+                            [ div [ class "small muted", title s ] [ text (Format.truncate 200 s) ] ]
+
+                        else
+                            []
+
+                    Nothing ->
+                        []
+                ]
+            )
+        , td [ class "num" ]
+            [ case v.cvssScore of
+                Just score ->
+                    text (Format.fixed1 score)
+
+                Nothing ->
+                    span [ class "muted" ] [ text Format.dash ]
+            ]
+        , td []
+            [ case v.fixedInLatest of
+                Just True ->
+                    span [ class "tone-text-good" ] [ text "yes", span [ class "muted small" ] [ text " (", View.ver v.latestVersion, text ")" ] ]
+
+                Just False ->
+                    span [ class "tone-text-critical" ] [ text "no", span [ class "muted small" ] [ text " (", View.ver v.latestVersion, text ")" ] ]
+
+                Nothing ->
+                    span [ class "muted" ] [ text "no newer release" ]
+            ]
+        , td [] [ View.ts ctx.now (Just v.firstSeen) ]
+        ]
 
 
 

@@ -2,6 +2,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use super::cvss4;
 use super::types::{Severity, Vulnerability};
 
 /// OSV.dev API query request
@@ -147,14 +148,21 @@ fn convert_osv_vulnerability(
     _ecosystem: &str,
     _package_name: &str,
 ) -> Vulnerability {
-    // Extract severity - prefer CVSS, fall back to other types
-    let severity = osv_vuln
+    // Extract severity - prefer CVSS (v3, then v4), fall back to other types
+    let entries: Vec<(&str, &str)> = osv_vuln
         .severity
         .iter()
-        .find(|s| s.severity_type == "CVSS_V3")
-        .or_else(|| osv_vuln.severity.first())
-        .and_then(|s| s.score.as_ref())
-        .map(|score| parse_cvss_severity(score))
+        .filter_map(|s| Some((s.severity_type.as_str(), s.score.as_deref()?)))
+        .collect();
+    let severity = best_cvss_score(&entries)
+        .map(|(score, _)| severity_from_score(score))
+        .or_else(|| {
+            osv_vuln
+                .severity
+                .first()
+                .and_then(|s| s.score.as_deref())
+                .map(parse_cvss_severity)
+        })
         .unwrap_or(Severity::Medium);
 
     // Get summary, preferring summary field over details
@@ -206,10 +214,41 @@ fn parse_cvss_severity(score_str: &str) -> Severity {
         score_str.parse().unwrap_or(5.0)
     };
 
-    severity_from_score(score)
+    severity_from_score(f64::from(score))
 }
 
-fn severity_from_score(score: f32) -> Severity {
+/// Score of one OSV `severity` entry: a `CVSS_V3` vector (rounded to one
+/// decimal, dropping the f32 noise of [`parse_cvss_vector_score`]), a
+/// `CVSS_V4` vector ([`cvss4::score`]), or either as a plain number. Other
+/// types (`Ubuntu`, …) have no score.
+pub(super) fn cvss_score(kind: &str, raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    let score = match kind {
+        "CVSS_V3" if raw.contains('/') => {
+            (f64::from(parse_cvss_vector_score(raw)?) * 10.0).round() / 10.0
+        },
+        "CVSS_V4" if raw.contains('/') => cvss4::score(raw)?,
+        "CVSS_V3" | "CVSS_V4" => raw.parse().ok()?,
+        _ => return None,
+    };
+    (0.0..=10.0).contains(&score).then_some(score)
+}
+
+/// The highest score of a record's `(type, score)` severity entries, taken
+/// from its CVSS v3 entries when it has any (the version most advisories and
+/// the PR-body CVE diff have always used), otherwise from its CVSS v4 ones.
+/// Returns the score and the raw entry it came from.
+pub(super) fn best_cvss_score<'a>(entries: &[(&'a str, &'a str)]) -> Option<(f64, &'a str)> {
+    ["CVSS_V3", "CVSS_V4"].iter().find_map(|version| {
+        entries
+            .iter()
+            .filter(|(kind, _)| kind == version)
+            .filter_map(|&(kind, raw)| Some((cvss_score(kind, raw)?, raw)))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    })
+}
+
+fn severity_from_score(score: f64) -> Severity {
     match score {
         s if s >= 9.0 => Severity::Critical,
         s if s >= 7.0 => Severity::High,
@@ -223,7 +262,7 @@ fn severity_from_score(score: f32) -> Severity {
 /// Implements the CVSS v3.0/v3.1 base score algorithm per the FIRST specification.
 /// Expects a string containing slash-separated `METRIC:VALUE` pairs, optionally
 /// prefixed with `CVSS:3.x/`.
-fn parse_cvss_vector_score(vector: &str) -> Option<f32> {
+pub(super) fn parse_cvss_vector_score(vector: &str) -> Option<f32> {
     // Strip optional "CVSS:3.x/" prefix
     let metrics_part = vector
         .strip_prefix("CVSS:")
@@ -403,6 +442,46 @@ mod tests {
         assert_eq!(vuln.summary, "Test vulnerability");
         assert_eq!(vuln.details_url, "https://osv.dev/CVE-2024-1234");
         assert_eq!(vuln.fixed_in, vec!["1.2.3"]);
+    }
+
+    #[test]
+    fn test_cvss_score() {
+        let v4 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N";
+        let v3 = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";
+        for (kind, raw, expected) in [
+            ("CVSS_V3", v3, Some(9.8)),
+            ("CVSS_V3", "7.5", Some(7.5)),
+            ("CVSS_V4", v4, Some(9.3)),
+            ("CVSS_V4", " 6.1 ", Some(6.1)),
+            ("CVSS_V4", "CVSS:4.0/AV:N", None),
+            ("CVSS_V3", "11", None),
+            ("Ubuntu", "high", None),
+        ] {
+            assert_eq!(cvss_score(kind, raw), expected, "{kind} {raw}");
+        }
+    }
+
+    #[test]
+    fn test_convert_osv_vulnerability_cvss_v4() {
+        let vuln = convert_osv_vulnerability(
+            OsvVulnerability {
+                id: "GHSA-v4".to_owned(),
+                summary: None,
+                details: None,
+                severity: vec![OsvSeverity {
+                    severity_type: "CVSS_V4".to_owned(),
+                    // 5.3
+                    score: Some(
+                        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N"
+                            .to_owned(),
+                    ),
+                }],
+                affected: vec![],
+            },
+            "PyPI",
+            "p",
+        );
+        assert_eq!(vuln.severity, Severity::Medium);
     }
 
     // Integration test - requires network access, so marked as ignored

@@ -168,6 +168,33 @@ INSERT INTO autofix_attempts (queue_id, repo_name, attempt_number, started_at, c
   (1, '', 1, AGO(64), AGO(63), 1200, 300, 1, 0, 'build_failed', 'still fails after patch'),
   (1, '', 2, AGO(55), AGO(54), 1300, 0, 0, NULL, 'llm_error', 'timeout'),
   (2, 'extra', 1, AGO(60), AGO(59), 900, 100, 0, NULL, 'parse_error', 'extra repo attempt');
+
+INSERT INTO osv_vulnerabilities (id, modified, aliases, summary, severity, cvss_score,
+    cvss_vector, published, withdrawn, fetched_at) VALUES
+  ('CVE-2024-0001', '2026-01-01T00:00:00Z', '["GHSA-xxxx-0001"]', 'Heap overflow', 'critical',
+    9.8, 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', '2024-01-01T00:00:00Z', NULL,
+    AGO(30));
+
+INSERT INTO package_vulnerabilities (repo_name, attr_path, vuln_id, osv_ids, version, severity,
+    cvss_score, summary, fixed_in_latest, latest_version, first_seen, last_seen) VALUES
+  ('', 'ripgrep', 'CVE-2024-0001', '["CVE-2024-0001","GHSA-xxxx-0001"]', '14.0.0', 'critical',
+    9.8, 'Heap overflow', 1, '14.1.0', AGO(300), AGO(30)),
+  ('', 'ripgrep', 'GHSA-aaaa-bbbb-cccc', '["GHSA-aaaa-bbbb-cccc"]', '14.0.0', 'high', 7.5,
+    'Path traversal', 0, '14.1.0', AGO(300), AGO(30)),
+  ('', 'ripgrep', 'CVE-2024-0003', '["CVE-2024-0003"]', '14.0.0', 'medium', 5.0,
+    'Information leak', 1, '14.1.0', AGO(300), AGO(30)),
+  -- Stale: scanned before a version change; never shown.
+  ('', 'fd', 'CVE-2023-0009', '["CVE-2023-0009"]', '8.0.0', 'critical', 9.1, 'Old', NULL,
+    NULL, AGO(900), AGO(900)),
+  ('extra', 'curl', 'CVE-2024-0100', '["CVE-2024-0100","CURL-CVE-2024-0100"]', '8.10.0',
+    'high', NULL, 'Cookie <b>leak</b>', NULL, NULL, AGO(300), AGO(30)),
+  ('', 'python3Packages.requests', 'CVE-2024-0200', '["CVE-2024-0200"]', '2.31.0', 'low', 3.1,
+    'Minor', 1, '2.32.0', AGO(300), AGO(30));
+
+UPDATE updates SET cve_scanned_at = AGO(30), cve_scanned_version = current_version
+WHERE attr_path IN ('ripgrep', 'curl', 'python3Packages.requests');
+UPDATE updates SET cve_scan_error = 'POST https://api.osv.dev/v1/querybatch: HTTP 503'
+WHERE attr_path = 'jq';
 "#;
 
 /// Replace every `AGO(n)` with a quoted timestamp `n` minutes before now.
@@ -443,6 +470,86 @@ async fn api_packages_filters_and_sorts() {
     let mut expected = sorted.clone();
     expected.sort();
     assert_eq!(sorted, expected);
+}
+
+#[tokio::test]
+async fn api_packages_high_severity_cves() {
+    let app = seeded_app().await;
+
+    let all = api(&app, "/api/packages").await;
+    let high = &all["high_severity"];
+    assert_eq!(high["total"], 2);
+    // Most severe first; stale rows (fd scanned at an older version) and
+    // packages with only low/medium vulnerabilities are left out.
+    assert_eq!(attrs(high, "packages"), ["ripgrep", "curl"]);
+    let rg = &high["packages"][0];
+    assert_eq!(rg["critical"], 1);
+    assert_eq!(rg["high"], 1);
+    assert_eq!(rg["fixed_by_update"], 1);
+    assert_eq!(rg["max_score"], 9.8);
+    assert_eq!(rg["latest_upstream_version"], "14.1.0");
+    assert_eq!(rg["pr_number"], 42);
+    assert_eq!(
+        rg["top_ids"],
+        serde_json::json!(["CVE-2024-0001", "GHSA-aaaa-bbbb-cccc"])
+    );
+    assert!(rg.get("top_ids_json").is_none());
+    let curl = &high["packages"][1];
+    assert_eq!(curl["repo_name"], "extra");
+    assert!(curl["max_score"].is_null());
+
+    // The table follows the page's filters.
+    let extra = api(&app, "/api/packages?repo=extra").await;
+    assert_eq!(attrs(&extra["high_severity"], "packages"), ["curl"]);
+    assert_eq!(extra["high_severity"]["total"], 1);
+    let proposed = api(&app, "/api/packages?status=proposed").await;
+    assert_eq!(attrs(&proposed["high_severity"], "packages"), ["ripgrep"]);
+    let none = api(&app, "/api/packages?q=requests").await;
+    assert_eq!(none["high_severity"]["total"], 0);
+    assert_eq!(len(&none["high_severity"]["packages"]), 0);
+}
+
+#[tokio::test]
+async fn api_package_vulnerabilities() {
+    let app = seeded_app().await;
+
+    let rg = api(&app, "/api/packages/ripgrep").await;
+    let vulns = rg["vulnerabilities"].as_array().unwrap();
+    let ids: Vec<&str> = vulns
+        .iter()
+        .map(|v| v["vuln_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["CVE-2024-0001", "GHSA-aaaa-bbbb-cccc", "CVE-2024-0003"]
+    );
+    assert_eq!(
+        vulns[0]["osv_ids"],
+        serde_json::json!(["CVE-2024-0001", "GHSA-xxxx-0001"])
+    );
+    assert_eq!(vulns[0]["fixed_in_latest"], true);
+    assert_eq!(vulns[1]["fixed_in_latest"], false);
+    assert!(vulns[0].get("osv_ids_json").is_none());
+    assert_eq!(rg["update"]["cve_scanned_version"], "14.0.0");
+    assert!(rg["update"]["cve_scanned_at"].is_string());
+
+    // Stale rows are not reported.
+    let fd = api(&app, "/api/packages/fd").await;
+    assert_eq!(len(&fd["vulnerabilities"]), 0);
+    assert!(fd["update"]["cve_scanned_at"].is_null());
+
+    let jq = api(&app, "/api/packages/jq").await;
+    assert!(
+        jq["update"]["cve_scan_error"]
+            .as_str()
+            .unwrap()
+            .contains("503")
+    );
+
+    // Scoped by repository.
+    let curl = api(&app, "/api/packages/curl?repo=extra").await;
+    assert_eq!(len(&curl["vulnerabilities"]), 1);
+    assert!(curl["vulnerabilities"][0]["fixed_in_latest"].is_null());
 }
 
 #[tokio::test]
@@ -791,6 +898,10 @@ async fn empty_database_serves_every_endpoint() {
     assert_eq!(len(&dash["running"]), 0);
     assert!(dash["watch"]["last_poll"].is_null());
     assert_eq!(api(&app, "/api/packages").await["total"], 0);
+    assert_eq!(
+        api(&app, "/api/packages").await["high_severity"]["total"],
+        0
+    );
     assert_eq!(api(&app, "/api/sessions").await["total"], 0);
     assert_eq!(api(&app, "/api/failures").await["total"], 0);
     assert_eq!(api(&app, "/api/watch").await["cycle_total"], 0);

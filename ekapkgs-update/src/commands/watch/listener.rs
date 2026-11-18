@@ -16,6 +16,9 @@
 //!    The affected managed checkouts are fast-forwarded first, so update
 //!    worktrees (created from `HEAD`) start from the current upstream branch.
 //! 5. Repos are re-synced and re-indexed every `index_refresh_interval`.
+//! 6. After each poll cycle, packages whose CVE scan is due (daily, or after
+//!    a version change) are scanned against OSV.dev (`cve::scan`), unless
+//!    `--skip-cve`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -93,6 +96,9 @@ pub async fn run_watch_loop(
                     &mut dry_run_reported,
                 )
                 .await;
+                if !updater_config.pr_enhancements.skip_cve_check {
+                    scan_vulnerabilities(&db).await;
+                }
             },
             _ = index_ticker.tick() => {
                 info!("Refreshing repositories and upstream indexes...");
@@ -107,6 +113,15 @@ pub async fn run_watch_loop(
     }
 
     Ok(())
+}
+
+/// Scan the packages whose CVE scan is due (daily, or after a version
+/// change). Cheap when nothing is due; failures are logged.
+async fn scan_vulnerabilities(db: &Database) {
+    let options = crate::cve::scan::ScanOptions::default();
+    if let Err(e) = crate::cve::scan::scan_due(db.pool(), &options).await {
+        warn!("CVE scan failed: {:#}", e);
+    }
 }
 
 /// Load the source list, keeping `previous` if the database read fails.

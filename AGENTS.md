@@ -105,6 +105,7 @@ ekapkgs-update/                     # Main CLI crate
       log.rs, inspect.rs            # Per-package failure inspection
       query.rs, report.rs, status.rs  # Database query/reporting commands
       prune_maintainers.rs          # Remove deprecated maintainers and teams from .nix files
+      cve_scan.rs                   # `cve-scan`: scan tracked packages for known vulnerabilities (OSV.dev)
     llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
@@ -115,7 +116,10 @@ ekapkgs-update/                     # Main CLI crate
     hash_discovery.rs               # Extract correct hash from nix-build stderr
     nix/                            # Nix eval helpers, `iets eval-jobs` (run_eval.rs: --impure, --select/--apply, exit status; nix_eval_jobs.rs: its nix-eval-jobs-format JSON), eval cache
     git/                            # Git worktree/branch/PR operations
-    cve/                            # OSV.dev CVE analysis (24h cache)
+    cve/                            # OSV.dev CVE analysis: PR-body diff (24h cache) + package scans
+      cvss4.rs                      #   CVSS v4.0 scoring (port of the FIRST reference calculator: MacroVector lookup + interpolation)
+      scan.rs                       #   Package → OSV query (GIT repo URL / PyPI), querybatch, record fetch, alias merge, severity
+      store.rs                      #   osv_vulnerabilities cache, package_vulnerabilities, per-package scan state, due targets
     repology/                       # Repology cross-distro version check (72h cache)
     cachix/                         # Binary cache pushing
     directory_diff/                 # Compare build outputs for PR body
@@ -427,6 +431,21 @@ Security checks are enabled by default. Use `--no-security` to disable them on b
 
 Controlled by `PrEnhancementsConfig.run_audit`. When enabled, `perform_worktree_audit()` builds the package in the worktree, runs all checks, and returns markdown for the PR body. Audit findings are informational — they do not block the update. Security checks can be disabled via `PrEnhancementsConfig.skip_security` (CLI: `--no-security`).
 
+### CVE Scans (`cve/scan.rs`, `cve/store.rs`, `commands/cve_scan.rs`)
+
+Every tracked package with a GitHub, GitLab, SourceHut or PyPI upstream (`SCANNABLE_UPSTREAMS`) and a `current_version` is checked against OSV.dev. The package and version come from the `updates` row, so no extra evaluation is needed.
+
+- **Query** (`osv_packages`): GIT ecosystem with the repo URL (`https://github.com/owner/repo`, `https://<instance>/<key>`, `https://git.sr.ht/~u/r`), where OSV matches the version against the repo's tags; PyPI by name. Python packages (`python*Packages.*`, or a PyPI upstream) are queried on PyPI **only**: a GIT query for a monorepo (`langchain-*`) reports the whole repo's advisories.
+- **Batch**: `POST /v1/querybatch` (1000 queries per request, paginated by `page_token`) for both `current_version` and a newer `latest_upstream_version`. That gives `fixed_in_latest`, i.e. whether the available update fixes it.
+- **Records**: `GET /v1/vulns/{id}`, cached in `osv_vulnerabilities` and refetched only when the batch reports a different `modified`. Withdrawn records are ignored.
+- **Merge** (`merge_vulns`): records aliasing each other (CVE, GHSA, PYSEC, CURL-CVE-…) are merged with union-find into one row keyed by the CVE id when there is one.
+- **Severity** (`osv::best_cvss_score`, shared with the PR-body CVE diff): the highest CVSS v3 score (vector via `osv::parse_cvss_vector_score`, rounded to one decimal), else the highest CVSS v4 score (`cvss4::score`), else the highest `database_specific`/`ecosystem_specific` severity label, else `unknown`. `cvss_vector` records which version the score came from (the 20261117 column comments still say "v3"; it is applied, so it was left alone). `cvss4.rs` follows the reference `cvss40.js` step for step, including its float arithmetic and rounding. It matched all 579,918 vectors of the Red Hat `cvss` library's `tests/vectors_*4` files, and a sample of them is in its unit tests. Keep it exact: the dashboard sorts by score. A CVSS score of 0.0 (no C/I/A impact) takes the label's rating. `20261118_osv_cvss_v4_rescore.sql` dropped cached records without a CVSS score or rated `unknown` so they were rescored.
+- **State**: `package_vulnerabilities` rows are replaced per package on each scan (keeping `first_seen`). `updates.cve_scanned_at`/`cve_scanned_version`/`cve_scan_error` hold the scan state. Rows whose `version` is no longer `current_version` are stale and never shown.
+- **When**: a package is due when it was never scanned, its version changed, or the last scan is older than 24h (`ScanOptions::max_age`; `--force` rescans everything). Scans run from `ekapkgs-update cve-scan [--repo] [attrs…]`, at the end of `run` (repo `''`) and after every watch poll cycle (cheap when nothing is due). `--skip-cve` on `run`/`watch` disables both this and the PR-body CVE section.
+- Directory-listing upstreams (GNU FTP, SourceForge) have no OSV package identity and are not scanned.
+
+The dashboard's packages page shows a "Packages with high-severity CVEs" table (`/api/packages` → `high_severity`, following the page filters, top 50), and the package page a "Known vulnerabilities" panel (`/api/packages/:attr` → `vulnerabilities`).
+
 ### Export (`commands/export.rs`)
 
 The `export` command extracts failure context from preserved worktrees into LLM-friendly formats for analysis or feeding to the autofix pipeline.
@@ -516,7 +535,7 @@ API integrations (via reqwest):
 - **SourceHut API** — Tag fetching
 - **PyPI JSON API** — Python package releases
 - **HTTP directory listings** — Version scraping from GNU FTP / SourceForge directory pages
-- **OSV.dev** — CVE vulnerability checking (24h cache)
+- **OSV.dev** — CVE vulnerability checking (PR-body diff with a 24h cache; `querybatch` + `vulns/{id}` package scans)
 - **Repology** — Cross-distribution version validation (72h cache, 1 req/sec rate limit)
 
 ## Testing

@@ -180,6 +180,9 @@ type alias Package =
     , upstreamInstance : Maybe String
     , semverStrategy : Maybe String
     , isBacklog : Bool
+    , cveScannedAt : Maybe String
+    , cveScannedVersion : Maybe String
+    , cveScanError : Maybe String
     }
 
 
@@ -213,6 +216,9 @@ package =
         |> mstr "upstream_instance"
         |> mstr "semver_strategy"
         |> bool "is_backlog"
+        |> mstr "cve_scanned_at"
+        |> mstr "cve_scanned_version"
+        |> mstr "cve_scan_error"
 
 
 type alias StatusCounts =
