@@ -30,7 +30,49 @@ type alias Data =
     , statusCounts : Api.StatusCounts
     , repos : List String
     , upstreamTypes : List String
+    , vulnerable : List Vulnerable
+    , vulnerableTotal : Int
     }
+
+
+{-| A package with high or critical vulnerabilities at its current version
+(`VulnerablePackageRow`).
+-}
+type alias Vulnerable =
+    { repoName : String
+    , attrPath : String
+    , pname : Maybe String
+    , status : String
+    , currentVersion : Maybe String
+    , latestUpstreamVersion : Maybe String
+    , prUrl : Maybe String
+    , prNumber : Maybe Int
+    , critical : Int
+    , high : Int
+    , fixedByUpdate : Int
+    , maxScore : Maybe Float
+    , topIds : List String
+    , cveScannedAt : Maybe String
+    }
+
+
+vulnerableDecoder : D.Decoder Vulnerable
+vulnerableDecoder =
+    D.succeed Vulnerable
+        |> Api.required "repo_name" D.string
+        |> Api.required "attr_path" D.string
+        |> Api.nullable "pname" D.string
+        |> Api.required "status" D.string
+        |> Api.nullable "current_version" D.string
+        |> Api.nullable "latest_upstream_version" D.string
+        |> Api.nullable "pr_url" D.string
+        |> Api.nullable "pr_number" D.int
+        |> Api.required "critical" D.int
+        |> Api.required "high" D.int
+        |> Api.required "fixed_by_update" D.int
+        |> Api.nullable "max_score" D.float
+        |> Api.required "top_ids" (D.list D.string)
+        |> Api.nullable "cve_scanned_at" D.string
 
 
 decoder : D.Decoder Data
@@ -52,6 +94,8 @@ decoder =
         |> Api.required "status_counts" Api.statusCounts
         |> Api.required "repos" (D.list D.string)
         |> Api.required "upstream_types" (D.list D.string)
+        |> Api.andMap (D.at [ "high_severity", "packages" ] (D.list vulnerableDecoder))
+        |> Api.andMap (D.at [ "high_severity", "total" ] D.int)
 
 
 {-| Status chips after "All", in display order.
@@ -109,6 +153,11 @@ view ctx data =
             (View.chip "All" (Just data.statusCounts.total) (View.queryHref ctx [ ( "status", "" ) ]) (currentStatus == "") "neutral"
                 :: List.map (statusChip ctx data currentStatus) statusChips
             )
+        , if data.vulnerableTotal > 0 then
+            vulnerablePanel ctx showRepo data
+
+          else
+            text ""
         , if data.allTotal == 0 then
             View.emptyState "No packages tracked yet"
                 [ p []
@@ -265,7 +314,7 @@ row ctx showRepo p =
                                     []
                            )
                     )
-              , td [] [ prLink p ]
+              , td [] [ prLink p.prUrl p.prNumber p.status ]
               , td []
                     [ View.ts ctx.now
                         (case p.lastChecked of
@@ -319,18 +368,18 @@ attrCell p =
         ]
 
 
-prLink : Api.Package -> Html msg
-prLink p =
-    case Format.safeUrl p.prUrl of
+prLink : Maybe String -> Maybe Int -> String -> Html msg
+prLink prUrl prNumber status =
+    case Format.safeUrl prUrl of
         Just url ->
             let
                 state =
-                    Format.prState p.status
+                    Format.prState status
             in
             span []
                 (a [ href url, target "_blank", rel "noopener noreferrer", title (state ++ " PR") ]
                     [ text
-                        (case p.prNumber of
+                        (case prNumber of
                             Just n ->
                                 "#" ++ String.fromInt n
 
@@ -348,3 +397,141 @@ prLink p =
 
         Nothing ->
             span [ class "muted" ] [ text Format.dash ]
+
+
+
+-- VULNERABILITIES
+
+
+vulnerablePanel : Ctx -> Bool -> Data -> Html msg
+vulnerablePanel ctx showRepo data =
+    let
+        shown =
+            List.length data.vulnerable
+    in
+    section [ class "panel", attribute "aria-labelledby" "h-vulnerable" ]
+        [ header [ class "panel-head" ]
+            [ h2 [ id "h-vulnerable" ] [ text "Packages with high-severity CVEs" ]
+            , span [ class "muted small" ]
+                [ text
+                    (if shown < data.vulnerableTotal then
+                        "Top " ++ Format.thousands shown ++ " of " ++ Format.thousands data.vulnerableTotal
+
+                     else
+                        Format.thousands data.vulnerableTotal
+                            ++ (if data.vulnerableTotal == 1 then
+                                    " package"
+
+                                else
+                                    " packages"
+                               )
+                    )
+                ]
+            ]
+        , p [ class "muted small" ]
+            [ text "Known high or critical vulnerabilities (OSV.dev) at the packaged version. \"Fixed by update\" counts those not reported for the latest upstream release." ]
+        , div [ class "table-wrap table-scroll" ]
+            [ table [ class "table compact" ]
+                [ thead []
+                    [ tr []
+                        (List.concat
+                            [ if showRepo then
+                                [ th [ scope "col" ] [ text "Repo" ] ]
+
+                              else
+                                []
+                            , [ th [ scope "col" ] [ text "Attribute" ]
+                              , th [ scope "col" ] [ text "Current → latest" ]
+                              , th [ scope "col", class "num" ] [ text "Critical" ]
+                              , th [ scope "col", class "num" ] [ text "High" ]
+                              , th [ scope "col", class "num" ] [ text "Max CVSS" ]
+                              , th [ scope "col" ] [ text "Most severe" ]
+                              , th [ scope "col" ] [ text "Fixed by update" ]
+                              , th [ scope "col" ] [ text "PR" ]
+                              , th [ scope "col" ] [ text "Scanned" ]
+                              ]
+                            ]
+                        )
+                    ]
+                , tbody [] (List.map (vulnerableRow ctx showRepo) data.vulnerable)
+                ]
+            ]
+        ]
+
+
+vulnerableRow : Ctx -> Bool -> Vulnerable -> Html msg
+vulnerableRow ctx showRepo v =
+    let
+        total =
+            v.critical + v.high
+
+        hasUpdate =
+            v.latestUpstreamVersion /= Nothing && v.latestUpstreamVersion /= v.currentVersion
+    in
+    tr []
+        (List.concat
+            [ if showRepo then
+                [ td [ class "small" ] [ text (Format.repoLabel v.repoName) ] ]
+
+              else
+                []
+            , [ td [] [ a [ class "attr", href (Format.packageHref v.repoName v.attrPath) ] [ text v.attrPath ] ]
+              , td [ class "versions" ]
+                    (View.ver v.currentVersion
+                        :: (if hasUpdate then
+                                [ text " → ", View.ver v.latestUpstreamVersion ]
+
+                            else
+                                []
+                           )
+                    )
+              , td [ class "num" ] [ countCell "critical" v.critical ]
+              , td [ class "num" ] [ countCell "serious" v.high ]
+              , td [ class "num" ]
+                    [ case v.maxScore of
+                        Just score ->
+                            text (Format.fixed1 score)
+
+                        Nothing ->
+                            span [ class "muted" ] [ text Format.dash ]
+                    ]
+              , td [ class "small" ]
+                    (List.intersperse (text ", ")
+                        (List.map
+                            (\id -> a [ href (Format.osvUrl id), target "_blank", rel "noopener noreferrer" ] [ text id ])
+                            v.topIds
+                        )
+                        ++ (if total > List.length v.topIds then
+                                [ span [ class "muted" ] [ text (" +" ++ String.fromInt (total - List.length v.topIds)) ] ]
+
+                            else
+                                []
+                           )
+                    )
+              , td []
+                    [ if not hasUpdate then
+                        span [ class "muted" ] [ text "no update" ]
+
+                      else if v.fixedByUpdate == total then
+                        span [ class "tone-text-good" ] [ text ("all " ++ String.fromInt total) ]
+
+                      else if v.fixedByUpdate == 0 then
+                        span [ class "tone-text-critical" ] [ text "none" ]
+
+                      else
+                        text (String.fromInt v.fixedByUpdate ++ " of " ++ String.fromInt total)
+                    ]
+              , td [] [ prLink v.prUrl v.prNumber v.status ]
+              , td [] [ View.ts ctx.now v.cveScannedAt ]
+              ]
+            ]
+        )
+
+
+countCell : String -> Int -> Html msg
+countCell t n =
+    if n > 0 then
+        span [ class ("tone-text-" ++ t) ] [ text (Format.thousands n) ]
+
+    else
+        span [ class "muted" ] [ text "0" ]

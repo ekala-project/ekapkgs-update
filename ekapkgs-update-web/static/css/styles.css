@@ -316,6 +316,9 @@ code.ver { background: transparent; padding: 0; }
 .stack > .panel { margin-bottom: 0; }
 
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* A bounded table that scrolls vertically, its header pinned (the CVE table above the package list). */
+.table-scroll { max-height: 30rem; overflow-y: auto; }
+.table-scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
 
 /* ---------- Stat tiles ---------- */
 

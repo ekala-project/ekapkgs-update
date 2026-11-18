@@ -38,6 +38,8 @@ const RECENT_PRS: i64 = 8;
 const RUNNING_PHASES: i64 = 200;
 /// Phase rows fetched for a package's history.
 const HISTORY_PHASES: i64 = 400;
+/// Packages listed in the packages page's high-severity CVE table.
+const HIGH_SEVERITY_PACKAGES: i64 = 50;
 /// Failure logs on a package page.
 const PACKAGE_LOGS: i64 = 15;
 /// Failure logs on a session page.
@@ -155,6 +157,8 @@ pub async fn packages(
     let page = clamp_page(page(&params), total, limit);
     let rows = pkg_q::list(pool, &filter, sort, limit, (page - 1) * limit).await?;
     let counts = pkg_q::status_counts(pool, &filter).await?;
+    let vulnerable = pkg_q::high_severity(pool, &filter, HIGH_SEVERITY_PACKAGES).await?;
+    let vulnerable_total = pkg_q::high_severity_count(pool, &filter).await?;
     let all_total = pkg_q::status_counts(pool, &PackageFilter::default())
         .await?
         .total;
@@ -172,6 +176,10 @@ pub async fn packages(
         "status_counts": counts,
         "repos": pkg_q::repos(pool).await?,
         "upstream_types": pkg_q::upstream_types(pool).await?,
+        "high_severity": {
+            "packages": vulnerable,
+            "total": vulnerable_total,
+        },
     })))
 }
 
@@ -211,6 +219,7 @@ pub async fn package(
         "sources": pkg_q::sources_for(pool, &attr, &repo).await?,
         "phases": pkg_q::phases_for(pool, &attr, &repo, HISTORY_PHASES).await?,
         "logs": pkg_q::logs_for(pool, &attr, &repo, PACKAGE_LOGS).await?,
+        "vulnerabilities": pkg_q::vulnerabilities_for(pool, &attr, &repo).await?,
         "autofix": {
             "queue": pkg_q::autofix_queue_for(pool, &attr, &repo).await?,
             "attempts": pkg_q::autofix_attempts_for(pool, &attr, &repo).await?,

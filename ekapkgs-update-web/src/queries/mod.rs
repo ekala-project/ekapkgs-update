@@ -25,9 +25,23 @@ macro_rules! package_columns {
              u.pr_number, u.rebuild_count, COALESCE(u.cve_resolved_count, 0) AS \
              cve_resolved_count, COALESCE(u.cve_introduced_count, 0) AS cve_introduced_count, \
              u.pname, u.description, u.homepage, u.upstream_type, u.upstream_key, \
-             u.upstream_instance, u.semver_strategy, CASE WHEN ",
+             u.upstream_instance, u.semver_strategy, u.cve_scanned_at, \
+             u.cve_scanned_version, u.cve_scan_error, CASE WHEN ",
             backlog_sql!(),
             " THEN 1 ELSE 0 END AS is_backlog"
+        )
+    };
+}
+
+/// `package_vulnerabilities.severity` as a number (critical = 4 … unknown
+/// = 0), for sorting.
+macro_rules! severity_rank_sql {
+    ($col:literal) => {
+        concat!(
+            "(CASE ",
+            $col,
+            " WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 \
+             WHEN 'low' THEN 1 ELSE 0 END)"
         )
     };
 }
