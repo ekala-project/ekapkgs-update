@@ -16,6 +16,8 @@
 //!   mode repository state, poll/index cycle log and per-source poll health
 //!   (see [`watch`]).
 //! - **`upstream_index`**: Reverse index from upstream source to attr_path.
+//! - `updates.group_parent` / `updates.group_root`: update groups (see
+//!   [`crate::groups`] and [`groups`]).
 //!
 //! ## Backoff Semantics
 //!
@@ -39,6 +41,7 @@
 //! The connection pool remains alive as long as the `Database` struct is in scope.
 //! `Database` is `Clone`, so multiple handles can share the same underlying pool.
 
+mod groups;
 mod sessions;
 mod types;
 mod updates;

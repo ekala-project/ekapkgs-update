@@ -15,13 +15,16 @@
 //! the evaluation looks incomplete (stream errors, nothing evaluated, or far
 //! fewer packages than before), in which case the previous entries are kept.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use futures::{StreamExt, pin_mut};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
+use crate::commands::run::resolve_declarations;
 use crate::database::{Database, NewUpstreamIndexEntry, PackageInfo};
+use crate::groups::resolve_roots;
 use crate::nix::nix_eval_jobs::{NixEvalDrv, NixEvalItem};
 use crate::nix::run_eval::{EvalJobsOptions, run_eval_jobs_with_options};
 use crate::package::PackageMetadata;
@@ -69,6 +72,7 @@ in
   includePrereleases = bool (opt "include-prereleases");
   versionRegex = str (opt "version-regex");
   githubRepo = str (opt "github-repo");
+  parent = str (opt "parent");
   updateScript = try (
     if builtins.isString script || builtins.isPath script then toString script
     else if builtins.isAttrs script && script ? outPath then toString script.outPath
@@ -93,6 +97,8 @@ struct IndexedAttrs {
     version_regex: Option<String>,
     github_repo: Option<String>,
     update_script: Option<String>,
+    // `parent` (update groups) is read by `declared_parent`, for every
+    // derivation, indexed or not.
 }
 
 /// What to index.
@@ -205,11 +211,19 @@ pub async fn build_upstream_index(
 
     let mut stats = IndexStats::default();
     let mut indexed: Vec<(NewUpstreamIndexEntry, PackageInfo)> = Vec::new();
+    // Update-group declarations (child → raw parent) and every attr path, to
+    // resolve parents against.
+    let mut declared: Vec<(String, String)> = Vec::new();
+    let mut known: HashSet<String> = HashSet::new();
 
     while let Some(result) = stream.next().await {
         match result {
             Ok(NixEvalItem::Drv(drv)) => {
                 stats.evaluated += 1;
+                known.insert(drv.attr.clone());
+                if let Some(parent) = declared_parent(&drv) {
+                    declared.push((drv.attr.clone(), parent));
+                }
                 match index_entry_for(&drv, canonical_repo_dir.as_deref()) {
                     Ok(entry) => indexed.push(entry),
                     Err(reason) => {
@@ -280,6 +294,23 @@ pub async fn build_upstream_index(
         }
     }
 
+    // Update groups. An incomplete evaluation keeps the previous groups
+    // rather than splitting them.
+    if prune {
+        let parents = resolve_declarations(
+            declared.iter().map(|(c, p)| (c.as_str(), p.as_str())),
+            &known,
+            label,
+        );
+        let roots = resolve_roots(&parents);
+        let groups = roots.values().collect::<HashSet<_>>().len();
+        if let Err(e) = db.replace_groups(target.repo_name, &parents, &roots).await {
+            warn!("[{}] Failed to store update groups: {:#}", label, e);
+        } else if groups > 0 {
+            info!("[{}] {} update group(s)", label, groups);
+        }
+    }
+
     info!(
         "[{}] Upstream index built: {} evaluated, {} indexed, {} skipped ({} outside repo, {} \
          without upstream, {} pinned, {} opted out, {} other), {} errors, {} pruned",
@@ -297,6 +328,17 @@ pub async fn build_upstream_index(
     );
 
     stats
+}
+
+/// The derivation's `passthru.ekapkgs-update.parent`, if any.
+fn declared_parent(drv: &NixEvalDrv) -> Option<String> {
+    drv.extra_value
+        .as_ref()?
+        .get("parent")?
+        .as_str()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
 }
 
 /// Whether rows not refreshed by this run may be deleted. A run that looks

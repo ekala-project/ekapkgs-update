@@ -13,6 +13,7 @@ pub mod directory_diff;
 pub mod git;
 pub mod github;
 pub mod gitlab;
+pub mod groups;
 pub mod hash_discovery;
 pub mod init;
 pub mod llm;

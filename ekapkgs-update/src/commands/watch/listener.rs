@@ -20,7 +20,7 @@
 //!    a version change) are scanned against OSV.dev (`cve::scan`), unless
 //!    `--skip-cve`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ use super::feeds::{
 };
 use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
-use crate::commands::run::{UpdateRequest, UpdaterServiceConfig};
+use crate::commands::run::{UpdateJob, UpdateRequest, UpdaterServiceConfig, group_jobs};
 use crate::database::{
     Database, IndexOutcome, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
     SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
@@ -827,11 +827,27 @@ async fn poll_cycle(
         }
     }
 
+    // Members of update groups are dispatched per group (with the group's
+    // other outdated members).
+    let mut jobs: Vec<UpdateJob> = Vec::new();
+    let mut by_repo: BTreeMap<String, Vec<UpdateRequest>> = BTreeMap::new();
+    for req in requests {
+        by_repo.entry(req.repo().to_owned()).or_default().push(req);
+    }
+    for (repo, reqs) in by_repo {
+        let roots = db.group_roots(&repo).await.unwrap_or_else(|e| {
+            warn!("[{}] Failed to load update groups: {:#}", repo, e);
+            BTreeMap::new()
+        });
+        jobs.extend(group_jobs(db, &repo, reqs, &roots).await);
+    }
+    stats.dispatched = jobs.iter().map(UpdateJob::attempts).sum();
+
     // Lazy session: only cycles that dispatch work get one.
     let mut config = session_config.clone();
     if let Some(obj) = config.as_object_mut() {
         obj.insert("cycle_id".to_owned(), serde_json::json!(cycle_id));
-        obj.insert("dispatched".to_owned(), serde_json::json!(requests.len()));
+        obj.insert("dispatched".to_owned(), serde_json::json!(stats.dispatched));
     }
     let session_id = db
         .create_session(SessionMode::Watch, Some(config.to_string()))
@@ -841,8 +857,8 @@ async fn poll_cycle(
     let mut cycle_config = updater_config.clone();
     cycle_config.session_id = session_id.clone();
     let (tx, rx) = mpsc::unbounded_channel();
-    for req in requests {
-        tx.send(req)
+    for job in jobs {
+        tx.send(job)
             .map_err(|_| anyhow::anyhow!("updater channel closed"))?;
     }
     drop(tx);

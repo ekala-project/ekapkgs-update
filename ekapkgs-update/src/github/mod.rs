@@ -321,6 +321,69 @@ pub async fn create_pull_request_with_options(
     Ok(pr)
 }
 
+/// Find the open pull request whose head is `head` (`owner:branch`).
+pub async fn find_open_pull_request(
+    owner: &str,
+    repo: &str,
+    head: &str,
+    token: &str,
+) -> anyhow::Result<Option<GithubPullRequest>> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls");
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::GET, &url, Some(token))
+        .query(&[("head", head), ("state", "open")])
+        .send()
+        .await
+        .with_context(|| format!("GET {url}?head={head}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR lookup failed with status {status}: {body}");
+    }
+
+    let prs: Vec<GithubPullRequest> = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))?;
+    Ok(prs.into_iter().next())
+}
+
+/// Replace the title and body of an existing pull request.
+pub async fn update_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    title: &str,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<GithubPullRequest> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}");
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::PATCH, &url, Some(token))
+        .json(&serde_json::json!({ "title": title, "body": body }))
+        .send()
+        .await
+        .with_context(|| format!("PATCH {url}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("read error body from {url}"))?;
+        anyhow::bail!("GitHub PR update failed with status {status}: {body}");
+    }
+
+    response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))
+}
+
 /// Fetch details for a single pull request.
 pub async fn get_pull_request(
     owner: &str,

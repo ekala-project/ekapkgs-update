@@ -50,7 +50,7 @@ use crate::vcs_sources::UpstreamSource;
 /// `arro3-io`, `arro3-compute`) are queued separately; the first update bumps
 /// the shared file and the others find it at the target. Callers can
 /// `downcast_ref` the error to tell this apart from a failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("already at version {current} (requested {target})")]
 pub struct AlreadyAtVersion {
     /// Version found in the tree

@@ -921,3 +921,120 @@ async fn replace_upstream_index_prunes_orphaned_sources() {
     .unwrap();
     assert_eq!(sources(&db).await, vec!["BurntSushi/ripgrep".to_owned()]);
 }
+
+// ── Update groups ─────────────────────────────────────────────────
+
+fn group_request(attr: &str, current: &str, new: &str) -> UpdateRequest {
+    UpdateRequest {
+        attr_path: attr.to_owned(),
+        drv_path: Some(format!("/nix/store/{attr}.drv")),
+        current_version: current.to_owned(),
+        new_version: new.to_owned(),
+        repo_name: Some("core".to_owned()),
+        eval_entry_point: Some("/repo/default.nix".to_owned()),
+        pr_config: None,
+        fork: Some("origin".to_owned()),
+    }
+}
+
+#[tokio::test]
+async fn update_groups_bundle_outdated_members() {
+    use std::collections::BTreeMap;
+
+    use ekapkgs_update::commands::run::{UpdateJob, group_jobs, resolve_declarations};
+    use ekapkgs_update::database::PackageInfo;
+    use ekapkgs_update::groups::resolve_roots;
+
+    let db = setup_db().await;
+    // aws-c-common (outdated), aws-c-io (triggers), aws-c-cal (up to date),
+    // aws-crt-cpp (the root, outdated), hello (ungrouped).
+    let packages = [
+        ("aws-c-common", "0.9.0", Some("0.10.0")),
+        ("aws-c-io", "0.14.0", Some("0.15.0")),
+        ("aws-c-cal", "0.7.0", Some("0.7.0")),
+        ("aws-crt-cpp", "0.29.0", Some("0.30.0")),
+        ("hello", "2.12", Some("2.13")),
+    ];
+    for (attr, current, latest) in packages {
+        db.upsert_package_info("core", attr, current, &PackageInfo::default())
+            .await
+            .unwrap();
+        if let Some(latest) = latest {
+            db.record_update_available("core", attr, current, latest)
+                .await
+                .unwrap();
+        }
+    }
+
+    let known: HashSet<String> = packages.iter().map(|(a, _, _)| (*a).to_owned()).collect();
+    let parents = resolve_declarations(
+        [
+            ("aws-c-common", "aws-crt-cpp"),
+            ("aws-c-io", "aws-crt-cpp"),
+            ("aws-c-cal", "aws-crt-cpp"),
+        ],
+        &known,
+        "core",
+    );
+    let roots = resolve_roots(&parents);
+    db.replace_groups("core", &parents, &roots).await.unwrap();
+
+    let stored = db.group_roots("core").await.unwrap();
+    assert_eq!(stored, roots);
+    assert_eq!(db.group_parents("core").await.unwrap(), parents);
+    assert!(db.group_roots("").await.unwrap().is_empty());
+
+    let jobs = group_jobs(
+        &db,
+        "core",
+        vec![
+            group_request("aws-c-io", "0.14.0", "0.15.0"),
+            group_request("hello", "2.12", "2.13"),
+        ],
+        &stored,
+    )
+    .await;
+    assert_eq!(jobs.len(), 2);
+
+    let UpdateJob::Group(group) = &jobs[0] else {
+        panic!("expected a group job first: {jobs:?}");
+    };
+    assert_eq!(group.root, "aws-crt-cpp");
+    let members: Vec<(&str, &str, &str)> = group
+        .members
+        .iter()
+        .map(|m| {
+            (
+                m.attr_path.as_str(),
+                m.current_version.as_str(),
+                m.new_version.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        members,
+        [
+            ("aws-c-common", "0.9.0", "0.10.0"),
+            ("aws-c-io", "0.14.0", "0.15.0"),
+            ("aws-crt-cpp", "0.29.0", "0.30.0"),
+        ]
+    );
+    // Non-requested members take the trigger's routing, without a drv path.
+    assert_eq!(group.members[0].repo_name.as_deref(), Some("core"));
+    assert!(group.members[0].drv_path.is_none());
+    assert!(group.members[1].drv_path.is_some());
+    let mut verify = group.verify.clone();
+    verify.sort();
+    assert_eq!(
+        verify,
+        ["aws-c-cal", "aws-c-common", "aws-c-io", "aws-crt-cpp"]
+    );
+
+    assert!(matches!(&jobs[1], UpdateJob::Single(r) if r.attr_path == "hello"));
+
+    // Dropping the declarations ungroups everything.
+    db.replace_groups("core", &BTreeMap::new(), &BTreeMap::new())
+        .await
+        .unwrap();
+    assert!(db.group_roots("core").await.unwrap().is_empty());
+}

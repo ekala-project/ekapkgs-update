@@ -53,12 +53,15 @@ ekapkgs-update/                     # Main CLI crate
       updates.rs                    #   Repo-scoped `updates` state machine + backoff, update_logs
       sessions.rs                   #   update_sessions (run/watch) + update_phases
       watch.rs                      #   watched_repos, watch_cycles, upstream_sources
+      groups.rs                     #   updates.group_parent/group_root: replace_groups, group_roots, group_members
     commands/
       run/                          # Batch mode: checker + updater services
         config.rs                   #   RunConfig, UpdaterServiceConfig
         checker.rs                  #   Release discovery (Semaphore-limited)
         updater.rs                  #   Update performer (worktree or branch)
         branch_git.rs               #   Branch-mode staging/revert of all paths an update dirtied
+        grouping.rs                 #   Requests → UpdateJobs (group_jobs), run-mode group bookkeeping (RunGroups)
+        group_update.rs             #   Worktree-mode group executor: per-member commits, verification, group PR
         claude_fix.rs               #   Claude Code CLI subagent for build fix (--claude-fix)
         preservation.rs             #   Failed worktree preservation
         types.rs                    #   UpdateRequest, UpdateResult
@@ -124,6 +127,7 @@ ekapkgs-update/                     # Main CLI crate
     cachix/                         # Binary cache pushing
     directory_diff/                 # Compare build outputs for PR body
     variant_strategy.rs             # Semver strategy inference (effective_strategy, mkManyVariants)
+    groups.rs                       # Update groups (pure): parent resolution, roots, dependency order
   tests/
     migrate_tests.rs                # Integration tests with fixture files
     watch_tests.rs                  # Watch index/feed/dispatch integration tests (in-memory SQLite)
@@ -162,9 +166,12 @@ The `run` command is the primary batch-mode entry point. Two concurrent services
 iets eval-jobs (streaming JSON)
         │
         ▼
-  Checker Service  ──── mpsc::unbounded_channel ────▶  Updater Service
-  (Semaphore-limited)                                  (JoinSet, concurrency-limited)
+  Checker Service  ── UpdateRequest ──▶  Grouper  ── UpdateJob ──▶  Updater Service
+  (Semaphore-limited)                   (holds back                 (JoinSet, concurrency-limited)
+                                         group members)
 ```
+
+The grouper (in `RunConfig::execute`) passes requests through as `UpdateJob::Single`, except those that may belong to an update group (`RunGroups::should_hold`), which wait until the checker finished and are then dispatched as `UpdateJob::Group` (see Update Groups below).
 
 ### Checker Service (`commands/run/checker.rs`)
 
@@ -174,7 +181,7 @@ iets eval-jobs (streaming JSON)
 4. Determines `UpstreamSource` from `src.url` or pname
 5. Resolves the strategy via `variant_strategy::effective_strategy` (explicit → attr-path suffix, pinned = skip → mkManyVariants = Minor → Latest) and registers the package (`upsert_package_info`)
 6. Fetches upstream releases, filters by `SemverStrategy`; records the outcome (`record_no_update` / `record_update_available`)
-7. Deduplicates by (pname, version) to avoid updating aliased packages twice
+7. Deduplicates by (pname, version) to avoid updating aliased packages twice; records `passthru.ekapkgs-update.parent` (`RunGroups::note_declaration`)
 8. Sends `UpdateRequest` on channel
 
 Progress (`packages_evaluated`, `packages_backoff`) is written to the session every 250 packages.
@@ -183,7 +190,7 @@ Progress (`packages_evaluated`, `packages_backoff`) is written to the session ev
 
 ### Updater Service (`commands/run/config.rs`)
 
-1. Receives `UpdateRequest` from channel
+1. Receives `UpdateJob`s from the channel (a group job runs `group_update::perform_group_update` in worktree mode, and counts one attempt per member)
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
 3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update`. It always runs one update at a time (`updater_concurrency`, with a warning if `--concurrent-updates` asked for more), serializes git operations via `Arc<Mutex<()>>`, and has no PR support
@@ -276,6 +283,18 @@ This is intentional, not a bug:
 5. Build again to verify
 
 Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has a dedicated `update_*_if_needed` function in `hash_workflows.rs`.
+
+### Update Groups (`groups.rs`, `commands/run/grouping.rs`, `commands/run/group_update.rs`)
+
+Packages that must be updated together (corepkgs' `aws-c-*` and `aws-crt-cpp`) declare `passthru.ekapkgs-update.parent = "<attr path>";`. Members of a group are proposed as one PR, with one commit per member.
+
+- **Resolution** (`groups::resolve_parent`): a parent is looked up relative to the child's scope first (`a.b.c` with parent `p` → `a.b.p`, `a.p`, `p`; quoted segments are kept by `split_attr_path`). A parent that matches no evaluated attr path still groups its children as a label (with a warning). `resolve_roots` follows chains to the root; a cycle's root is its shortest, then lexically smallest, member. Every member and the root map to the root.
+- **Storage** (migration `20261119_update_groups.sql`): `updates.group_parent` (resolved parent) and `updates.group_root`, replaced per repo by `replace_groups`. Watch writes them at every index build from all evaluated derivations (`INDEX_APPLY_EXPR`'s `parent`, `declared_parent`), unless the evaluation looks incomplete. `run` merges the stored declarations with the ones it evaluated (backed-off packages are not evaluated) in `RunGroups::finish`.
+- **Dispatch** (`grouping::group_jobs`): requests whose package has a `group_root` become one `GroupRequest` per root. It contains every member whose `latest_upstream_version` (from the database) is newer than its `current_version`, not just the triggering ones, so a regenerated PR keeps the members it proposed before. `verify` lists every tracked member and the root. Watch groups after the poll; `run` holds requests for packages that declare a parent, were grouped before or are named as a parent, and groups them at the end. A root evaluated before its children on a first run is dispatched alone.
+- **Executor** (`perform_group_update`, worktree mode only): one worktree (`group-<root>`). Members are updated in dependency order (`nix-instantiate` + `nix-store --query --requisites`, `groups::dependency_order`, alphabetical fallback) with tests off, each committed as `<attr>: <old> -> <new>` (a Claude fix of a member's own build is part of its commit). Then every `verify` attr is built (a root that doesn't evaluate is skipped), then their `passthru.tests`. One Claude fix is allowed for the verification, committed as `<root>: fix build with updated dependencies`. Phases of the verification and PR are recorded under the root's attr path.
+- **All-or-nothing**: if any member or the verification fails, nothing is proposed. The member that failed records its own error. The others record `group <root> failed: <attr> (<phase>)` (an `InfrastructureError` with component `group`) and back off.
+- **PR**: stable branch `update/group/<root>` (`git::group_branch_name`), rebuilt from the current base and force-pushed (`force_push_branch`). An open PR from that branch is found (`github::find_open_pull_request`) and its title/body replaced (`update_pull_request`); otherwise a new PR is opened (draft if tests failed; an existing PR's draft state is not changed). The directory diff is not run for groups (it compares against `HEAD~1`).
+- **Branch mode** has no group support yet: the members are updated one after another as single updates.
 
 ### PyPI File Names (`pypi/sdist.rs`, `hash_workflows::align_pypi_src`)
 
@@ -482,6 +501,7 @@ Requires `--preserve-failures` to have been set during the `run` that produced t
 | `RunConfig` | `commands/run/config.rs` | Batch mode configuration |
 | `UpdateConfig` | `commands/update/config.rs` | Single-update configuration |
 | `UpdateRequest` | `commands/run/types.rs` | Message from checker → updater (attr_path, versions, per-repo routing) |
+| `GroupRequest` / `UpdateJob` | `commands/run/types.rs` | An update group dispatched as one job (root, members, attrs to verify); updater input (single or group) |
 | `UpdateResult` | `commands/run/types.rs` | Outcome: Updated, Skipped (not attempted), Failed (attempted, recorded), DryRun |
 | `UpdaterStats` | `commands/run/config.rs` | Per-`run_service` outcome counts |
 | `PhaseTracker` | `commands/update/instrumentation.rs` | Records `update_phases` rows for one attempt (no-op when disabled) |
@@ -542,7 +562,7 @@ API integrations (via reqwest):
 
 - **Unit tests**: `#[test]` with inline assertions. Located in same file or `tests_*.rs` siblings.
 - **Table-driven tests**: `rewrite/tests_attributes.rs`, `tests_maintainers.rs`, `tests_patches.rs`, `tests_rev.rs`.
-- **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`; `tests/watch_tests.rs` for the upstream index, version policy and dispatch guards (in-memory SQLite).
+- **Integration tests**: `tests/migrate_tests.rs` with fixture files in `tests/migrate/`; `tests/watch_tests.rs` for the upstream index, version policy, dispatch guards and update-group storage/dispatch (in-memory SQLite).
 - **Web crate tests**: `routes/tests.rs` drives every API endpoint, the app shell and static assets via `tower::ServiceExt::oneshot` against in-memory SQLite with the real migrations (a fixture covering every table, plus an empty database), including response compression. The Elm frontend has table-driven tests in `frontend/tests/` (Format, Route, Session/Item); run them with `nix develop --command ekapkgs-update-web/frontend/test-runner/run.sh` (elm + QuickJS, no node) or `nix build .#checks.x86_64-linux.web-frontend-tests`.
 - **Web crate frontend**: `build.rs` compiles `frontend/` with `elm`, which the dev shell provides on x86_64-linux and aarch64-linux (`nix/overlay.nix` adds upstream's aarch64 binary, which ekapkgs lacks). `EKAPKGS_WEB_ELM_JS` can point at a prebuilt `elm.js` instead; a missing file there is an error. Without either, the build warns and embeds a stub `elm.js` (a "frontend not built" notice), so `cargo build/test --workspace` work without `elm`. An Elm compile error always fails the build. `EKAPKGS_WEB_REQUIRE_ELM=1` makes a missing `elm` fatal too. After changing `frontend/elm.json`, run `nix/web-frontend/update.sh`.
 - **Run**: `cargo test --workspace`; Elm: `ekapkgs-update-web/frontend/test-runner/run.sh` (`nix flake check` runs it in the sandbox)

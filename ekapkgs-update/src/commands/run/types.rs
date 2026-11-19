@@ -28,6 +28,52 @@ impl UpdateRequest {
     }
 }
 
+/// An update group dispatched as one job: every member is updated in one
+/// worktree (one commit each, in dependency order) and proposed as one PR.
+#[derive(Debug, Clone)]
+pub struct GroupRequest {
+    /// The group's root attr path (may be a label that is not a package).
+    pub root: String,
+    /// Members to update. Routing (repo, entry point, PR config, fork) is
+    /// taken from the first member; all members share a repo.
+    pub members: Vec<UpdateRequest>,
+    /// Attr paths built to verify the group after all members were updated:
+    /// every member (updated or not) and the root.
+    pub verify: Vec<String>,
+}
+
+impl GroupRequest {
+    /// The member whose routing the group uses.
+    pub fn lead(&self) -> &UpdateRequest {
+        &self.members[0]
+    }
+}
+
+/// A unit of work for the updater service.
+#[derive(Debug, Clone)]
+pub enum UpdateJob {
+    Single(UpdateRequest),
+    Group(GroupRequest),
+}
+
+impl UpdateJob {
+    /// Human-readable label for logs (`attr` or `group <root>`).
+    pub fn label(&self) -> String {
+        match self {
+            UpdateJob::Single(req) => req.attr_path.clone(),
+            UpdateJob::Group(group) => format!("group {}", group.root),
+        }
+    }
+
+    /// Number of package updates this job attempts.
+    pub fn attempts(&self) -> usize {
+        match self {
+            UpdateJob::Single(_) => 1,
+            UpdateJob::Group(group) => group.members.len(),
+        }
+    }
+}
+
 /// Result of an update operation
 #[derive(Debug)]
 pub enum UpdateResult {
