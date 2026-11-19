@@ -382,8 +382,8 @@ fn test_version_acceptable_non_semver() {
         SemverStrategy::Major
     ));
 
-    // Minor/Patch strategies should reject non-semver
-    assert!(!is_version_acceptable(
+    // Minor/Patch compare the leading numbers (leading zeros allowed)
+    assert!(is_version_acceptable(
         "2024.01.01",
         "2024.12.01",
         SemverStrategy::Minor
@@ -425,31 +425,6 @@ fn test_version_acceptable_zero_versions() {
         "0.1.1",
         SemverStrategy::Patch
     ));
-}
-
-// Test normalize_version function
-#[test]
-fn test_normalize_version() {
-    // Two-component versions
-    assert_eq!(normalize_version("1.25"), "1.25.0");
-    assert_eq!(normalize_version("1.9"), "1.9.0");
-    assert_eq!(normalize_version("0.5"), "0.5.0");
-
-    // Single-component versions
-    assert_eq!(normalize_version("2"), "2.0.0");
-    assert_eq!(normalize_version("10"), "10.0.0");
-
-    // Already normalized (three components)
-    assert_eq!(normalize_version("1.2.3"), "1.2.3");
-    assert_eq!(normalize_version("0.0.1"), "0.0.1");
-
-    // With pre-release suffixes
-    assert_eq!(normalize_version("1.0-beta"), "1.0.0-beta");
-    assert_eq!(normalize_version("2.5-rc1"), "2.5.0-rc1");
-    assert_eq!(normalize_version("1.2.3-alpha"), "1.2.3-alpha");
-
-    // With unstable suffix (gets normalized before truncation)
-    assert_eq!(normalize_version("1.25-unstable"), "1.25.0-unstable");
 }
 
 // Test two-component version comparison (the libdeflate 1.25 vs 1.9 issue)
@@ -507,7 +482,7 @@ fn test_version_acceptable_mixed_components() {
 
 // Test that single-component versions are rejected
 #[test]
-fn test_version_acceptable_single_component_rejected() {
+fn test_version_acceptable_scheme_change_rejected() {
     // Single-component versions should be rejected (no major.minor)
     // Date-like version (the ninja 120715 case)
     assert!(!is_version_acceptable(
@@ -521,9 +496,8 @@ fn test_version_acceptable_single_component_rejected() {
         SemverStrategy::Minor
     ));
 
-    // Regular single-component version
+    // A dotted version never moves to a dot-less one
     assert!(!is_version_acceptable("1.0.0", "2", SemverStrategy::Latest));
-    assert!(!is_version_acceptable("1", "2", SemverStrategy::Latest));
 
     // With v prefix
     assert!(!is_version_acceptable(
@@ -820,6 +794,165 @@ fn test_find_explicit_release() {
             found.map(|r| r.tag_name).as_deref(),
             expected,
             "{names:?} / {target} / {regex:?}"
+        );
+    }
+}
+
+#[test]
+fn test_version_acceptable_table() {
+    use SemverStrategy::{Latest, Major, Minor, Patch};
+    // (current, new, strategy, accepted)
+    let cases = [
+        // Dot-less counters and dates update under Latest/Major
+        ("137", "138", Latest, true),
+        ("1", "2", Latest, true),
+        ("137", "138", Major, true),
+        ("138", "137", Latest, false),
+        ("20240115", "20240201", Latest, true),
+        ("2024-01-15", "2024-02-01", Latest, true),
+        ("2024-02-01", "2024-01-15", Latest, false),
+        // ... but not under Minor/Patch (no minor component)
+        ("137", "138", Minor, false),
+        ("20240115", "20240201", Patch, false),
+        // Never across schemes
+        ("137", "20240115", Latest, false),
+        ("20240115", "138", Latest, false),
+        ("1.13.1", "120715", Latest, false),
+        ("120715", "1.13.1", Latest, false),
+        ("2024-01-15", "1.2.3", Latest, false),
+        // Non-numeric tags
+        ("1.2.3", "latest", Latest, false),
+        ("137", "nightly", Latest, false),
+        // Minor/Patch with more than three components
+        ("1.2.3.4", "1.2.3.5", Patch, true),
+        ("1.2.3.4", "1.2.4.0", Patch, true),
+        ("1.2.3.4", "1.3.0.0", Patch, false),
+        ("1.2.3.4", "1.3.0.0", Minor, true),
+        ("1.2.3.4", "2.0.0.0", Minor, false),
+        ("2024.01.15", "2024.01.20", Patch, true),
+        ("2024.01.15", "2024.02.01", Minor, true),
+        ("2024.12.15", "2025.01.01", Minor, false),
+        // Prereleases rank below their release
+        ("3.0.0rc1", "3.0.0", Latest, true),
+        ("3.0.0-rc1", "3.0.0", Patch, true),
+        ("3.0.0", "3.0.0rc1", Latest, false),
+        ("1.0.0rc1", "1.0.0rc2", Latest, true),
+        ("1.10", "1.9", Latest, false),
+        ("1.9", "1.10", Minor, true),
+    ];
+    for (current, new, strategy, expected) in cases {
+        assert_eq!(
+            is_version_acceptable(current, new, strategy),
+            expected,
+            "{current} -> {new} ({strategy})"
+        );
+    }
+}
+
+#[test]
+fn test_find_best_release_order() {
+    let tags = |names: &[&str]| -> Vec<Release> {
+        names
+            .iter()
+            .map(|name| Release {
+                tag_name: (*name).to_owned(),
+                is_prerelease: false,
+            })
+            .collect()
+    };
+    /// (tags, current, strategy, version regex, expected tag)
+    type Case<'a> = (
+        &'a [&'a str],
+        &'a str,
+        SemverStrategy,
+        Option<&'a str>,
+        &'a str,
+    );
+    let cases: [Case<'_>; 7] = [
+        (
+            &["1.9", "1.10"],
+            "1.8",
+            SemverStrategy::Latest,
+            None,
+            "1.10",
+        ),
+        (
+            &["v1.10", "v1.9"],
+            "1.8",
+            SemverStrategy::Latest,
+            None,
+            "v1.10",
+        ),
+        (
+            &["1.9.5", "2.0"],
+            "1.0",
+            SemverStrategy::Latest,
+            None,
+            "2.0",
+        ),
+        (
+            &["2.0", "1.9.5"],
+            "1.0",
+            SemverStrategy::Minor,
+            None,
+            "1.9.5",
+        ),
+        (
+            &["6.9.7.1", "6.9.10", "6.9.8"],
+            "6.9.6",
+            SemverStrategy::Latest,
+            None,
+            "6.9.10",
+        ),
+        (
+            &["137", "140", "139"],
+            "136",
+            SemverStrategy::Latest,
+            None,
+            "140",
+        ),
+        // The sort key is the regex-captured version
+        (
+            &["v1.9-release", "v1.10-release"],
+            "1.8",
+            SemverStrategy::Latest,
+            Some(r"v(.*)-release"),
+            "v1.10-release",
+        ),
+    ];
+    for (names, current, strategy, regex, expected) in cases {
+        let best = find_best_release(tags(names), current, strategy, None, None, regex, false)
+            .unwrap_or_else(|e| panic!("{names:?}: {e}"));
+        assert_eq!(best.tag_name, expected, "{names:?}");
+    }
+}
+
+#[test]
+fn test_resolved_version_and_tag_prefixes() {
+    // (tag, version regex, resolved version)
+    let cases = [
+        ("v1.2.3-release", Some(r"v(.*)-release"), "1.2.3"),
+        ("v1.2.3-release", None, "1.2.3-release"),
+        ("lz4-1.9.4", None, "1.9.4"),
+        ("gtk4-4.12.0", None, "4.12.0"),
+        ("py3_2.0", None, "2.0"),
+        ("release-2.3.4", None, "2.3.4"),
+        ("myapp-v2.3.4", None, "2.3.4"),
+        ("v2-1.0", None, "2-1.0"),
+        ("x264-r3108", None, "264-r3108"),
+        ("curl-8_5_0", None, "8_5_0"),
+        ("1.2.3-rc1", None, "1.2.3-rc1"),
+        ("2024-01-15", None, "2024-01-15"),
+    ];
+    for (tag, regex, expected) in cases {
+        let release = Release {
+            tag_name: tag.to_owned(),
+            is_prerelease: false,
+        };
+        assert_eq!(
+            release.resolved_version(regex).unwrap(),
+            expected,
+            "{tag} / {regex:?}"
         );
     }
 }

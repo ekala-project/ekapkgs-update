@@ -38,18 +38,20 @@ pub fn find_and_update_attr(
     }
 
     // Build regex pattern to match: attr_name = "value";
-    // This handles various whitespace patterns
+    // This handles various whitespace patterns. The name must start a binding
+    // (line start, whitespace, `{` or `;` before it), so `version` matches
+    // neither `node_version`/`minversion` nor the dotted `src.version`.
     let pattern = if let Some(old) = old_value {
         // Match specific old value
         format!(
-            r#"(?m)(\s*{}\s*=\s*"){}("\s*;)"#,
+            r#"(?m)((?:^|[\s{{;]){}\s*=\s*"){}("\s*;)"#,
             regex::escape(attr_name),
             regex::escape(old)
         )
     } else {
         // Match any value
         format!(
-            r#"(?m)(\s*{}\s*=\s*")([^"]*)("\s*;)"#,
+            r#"(?m)((?:^|[\s{{;]){}\s*=\s*")([^"]*)("\s*;)"#,
             regex::escape(attr_name)
         )
     };

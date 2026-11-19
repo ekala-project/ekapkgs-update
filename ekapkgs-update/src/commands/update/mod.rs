@@ -149,7 +149,13 @@ pub async fn update_from_file_path(
         )
         .await?;
 
-    let new_version = best_release.version();
+    // With a `version-regex` the release was selected by the version it
+    // captures (`v(.*)-release`), so that is the version written, not the tag
+    // with its prefix stripped. A tag matched by name alone falls back.
+    let new_version = best_release
+        .resolved_version(version_regex)
+        .unwrap_or_else(|_| best_release.version().to_owned());
+    let new_version = new_version.as_str();
     info!(
         "Found compatible version ({:?}): {} -> {}",
         version_config.strategy, metadata.version, new_version
