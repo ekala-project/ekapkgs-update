@@ -169,10 +169,20 @@ impl DirtySnapshot {
     /// If `git add` fails. The index may then hold only part of the update
     /// (whatever the update staged itself), so the caller must not commit it.
     pub(super) async fn stage(&self, attr_path: &str, pkg_dir: &str) -> anyhow::Result<()> {
+        self.stage_paths(attr_path, Some(pkg_dir)).await
+    }
+
+    /// [`Self::stage`], with the package directory optional.
+    async fn stage_paths(&self, attr_path: &str, pkg_dir: Option<&str>) -> anyhow::Result<()> {
         let introduced = match self.introduced().await {
             Ok(entries) => entries,
             Err(e) => {
-                warn!("{}: {:#}; staging only {}", attr_path, e, pkg_dir);
+                warn!(
+                    "{}: {:#}; staging only {}",
+                    attr_path,
+                    e,
+                    pkg_dir.unwrap_or("the package directory")
+                );
                 Vec::new()
             },
         };
@@ -189,7 +199,7 @@ impl DirtySnapshot {
         let mut args = vec!["add", "-A", "--"];
         // A package directory the update removed entirely has nothing left
         // to add; its removal is staged or listed in `extra`.
-        if Path::new(pkg_dir).exists() {
+        if let Some(pkg_dir) = pkg_dir.filter(|d| Path::new(d).exists()) {
             args.push(pkg_dir);
         }
         args.extend(extra);
@@ -290,6 +300,211 @@ impl DirtySnapshot {
                 new_files.len()
             );
         }
+    }
+}
+
+/// Where a branch-mode update group started: the commit, branch and dirty
+/// paths before its first member, plus the commits the group created.
+///
+/// Members are committed one by one on the current branch. If the group
+/// fails, [`GroupCheckpoint::undo`] removes its commits by resetting the
+/// branch to the start commit and reverts every path the group dirtied.
+/// That is only safe because branch mode runs one update at a time and every
+/// git operation holds the git mutex: no other commit can land in between.
+/// It is still checked ([`plan_undo`]) before anything is reset.
+#[derive(Debug)]
+pub(super) struct GroupCheckpoint {
+    snapshot: DirtySnapshot,
+    /// `HEAD` before the group.
+    start: String,
+    /// Branch checked out before the group (`None`: detached `HEAD`).
+    branch: Option<String>,
+    /// Commits made by [`GroupCheckpoint::commit`], oldest first.
+    created: std::sync::Mutex<Vec<String>>,
+}
+
+/// What undoing a failed group may do, given the repository's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UndoPlan {
+    /// Nothing was committed: revert the paths the group dirtied.
+    Revert,
+    /// Reset the branch to the start commit (dropping the group's commits),
+    /// then revert the paths the group dirtied.
+    ResetAndRevert,
+    /// The branch moved in a way the group does not account for; nothing is
+    /// touched.
+    Refuse(String),
+}
+
+/// Decide how to undo a failed group.
+///
+/// `since_start` is `git rev-list <start>..HEAD` (newest first), `None` when
+/// `start` is no longer an ancestor of `HEAD`. The branch is only reset when
+/// it is still the one the group started on and the commits on top of
+/// `start` are exactly the ones the group created (`created`, oldest
+/// first), so a reset can only ever drop the group's own commits.
+pub(super) fn plan_undo(
+    start: &str,
+    created: &[String],
+    branch_then: Option<&str>,
+    branch_now: Option<&str>,
+    since_start: Option<&[String]>,
+) -> UndoPlan {
+    if branch_then != branch_now {
+        return UndoPlan::Refuse(format!(
+            "the checked out branch changed from {} to {}",
+            branch_then.unwrap_or("(detached HEAD)"),
+            branch_now.unwrap_or("(detached HEAD)")
+        ));
+    }
+    let Some(since_start) = since_start else {
+        return UndoPlan::Refuse(format!("HEAD no longer descends from {start}"));
+    };
+    if !since_start.iter().rev().eq(created.iter()) {
+        return UndoPlan::Refuse(format!(
+            "HEAD has {} commit(s) on top of {start}, but the group created {}: {}",
+            since_start.len(),
+            created.len(),
+            if created.is_empty() {
+                "none".to_owned()
+            } else {
+                created.join(", ")
+            }
+        ));
+    }
+    if created.is_empty() {
+        UndoPlan::Revert
+    } else {
+        UndoPlan::ResetAndRevert
+    }
+}
+
+/// Run git in `root` and return its trimmed stdout, failing on a non-zero exit.
+async fn git_stdout(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = git(root, args).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The checked out branch, `None` for a detached `HEAD`.
+async fn current_branch(root: &Path) -> anyhow::Result<Option<String>> {
+    let output = git(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+}
+
+impl GroupCheckpoint {
+    /// Record the state of the repository containing `dir`. Must be called
+    /// with the git mutex held.
+    pub(super) async fn take(dir: &Path) -> anyhow::Result<Self> {
+        let snapshot = DirtySnapshot::take(dir).await?;
+        let start = git_stdout(&snapshot.root, &["rev-parse", "HEAD"]).await?;
+        let branch = current_branch(&snapshot.root).await?;
+        Ok(Self {
+            snapshot,
+            start,
+            branch,
+            created: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Commits the group created so far, oldest first.
+    pub(super) fn created(&self) -> Vec<String> {
+        self.created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Commit every path dirtied since the checkpoint (and `pkg_dir`) that
+    /// the group has not committed yet. Must be called with the git mutex
+    /// held. Returns `false` (without committing) when nothing changed.
+    ///
+    /// # Errors
+    /// If staging or the commit fails; the group must then be undone.
+    pub(super) async fn commit(
+        &self,
+        label: &str,
+        pkg_dir: Option<&str>,
+        message: &str,
+    ) -> anyhow::Result<bool> {
+        let root = &self.snapshot.root;
+        self.snapshot.stage_paths(label, pkg_dir).await?;
+        let staged = git(root, &["diff", "--cached", "--quiet"]).await?;
+        if staged.status.success() {
+            return Ok(false);
+        }
+        git_stdout(root, &["commit", "-q", "-m", message]).await?;
+        let head = git_stdout(root, &["rev-parse", "HEAD"]).await?;
+        self.created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(head);
+        Ok(true)
+    }
+
+    /// Undo a failed group: drop its commits and revert every path it
+    /// dirtied, keeping paths that were dirty before it started. Must be
+    /// called with the git mutex held.
+    ///
+    /// The branch is reset with `git reset --soft`, so the index and working
+    /// tree keep their content (including user changes that a member's
+    /// commit swept in from its package directory); the paths the group
+    /// introduced are then restored like a failed branch-mode update's.
+    ///
+    /// # Errors
+    /// If the branch moved in a way the group does not account for
+    /// ([`plan_undo`]) or git fails; nothing is reset then.
+    pub(super) async fn undo(&self, label: &str) -> anyhow::Result<()> {
+        let root = &self.snapshot.root;
+        let created = self.created();
+        let branch_now = current_branch(root).await?;
+        let is_ancestor = git(root, &["merge-base", "--is-ancestor", &self.start, "HEAD"])
+            .await?
+            .status
+            .success();
+        let since_start: Option<Vec<String>> = if is_ancestor {
+            let range = format!("{}..HEAD", self.start);
+            let listed = git_stdout(root, &["rev-list", &range]).await?;
+            Some(listed.lines().map(str::to_owned).collect())
+        } else {
+            None
+        };
+        match plan_undo(
+            &self.start,
+            &created,
+            self.branch.as_deref(),
+            branch_now.as_deref(),
+            since_start.as_deref(),
+        ) {
+            UndoPlan::Refuse(reason) => {
+                anyhow::bail!("refusing to undo the group's changes: {reason}")
+            },
+            UndoPlan::ResetAndRevert => {
+                git_stdout(root, &["reset", "-q", "--soft", &self.start]).await?;
+                debug!(
+                    "{}: reset to {} (dropped {} commit(s))",
+                    label,
+                    self.start,
+                    created.len()
+                );
+                self.created
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+            },
+            UndoPlan::Revert => {},
+        }
+        self.snapshot.revert(label, &root.to_string_lossy()).await;
+        Ok(())
     }
 }
 
@@ -545,5 +760,164 @@ mod tests {
         assert_eq!(read("pkgs/foo/Cargo.lock"), "lock");
         assert_eq!(read("pkgs/foo/default.nix"), "v1");
         assert_eq!(status_of(&root, "pkgs/foo").await, "");
+    }
+
+    #[test]
+    fn test_plan_undo() {
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let main = Some("refs/heads/main");
+        let created = ids(&["c1", "c2"]);
+        // `since_start` is newest first, `created` oldest first.
+        let ours = ids(&["c2", "c1"]);
+        let foreign = ids(&["x", "c2", "c1"]);
+        type Case<'a> = (&'a [String], Option<&'a str>, Option<&'a [String]>, &'a str);
+        let cases: Vec<Case<'_>> = vec![
+            (&created, main, Some(&ours), "reset"),
+            (&[], main, Some(&[]), "revert"),
+            (&created, main, Some(&foreign), "refuse"),
+            (&created, main, Some(&ours[..1]), "refuse"),
+            (&[], main, Some(&ours), "refuse"),
+            (&created, main, None, "refuse"),
+            (&created, Some("refs/heads/other"), Some(&ours), "refuse"),
+            (&created, None, Some(&ours), "refuse"),
+        ];
+        for (created, branch_now, since_start, expected) in cases {
+            let plan = plan_undo("s", created, main, branch_now, since_start);
+            let got = match plan {
+                UndoPlan::ResetAndRevert => "reset",
+                UndoPlan::Revert => "revert",
+                UndoPlan::Refuse(_) => "refuse",
+            };
+            assert_eq!(got, expected, "{created:?} {branch_now:?} {since_start:?}");
+        }
+        // Detached HEAD that stayed detached.
+        assert_eq!(
+            plan_undo("s", &created, None, None, Some(&ours)),
+            UndoPlan::ResetAndRevert
+        );
+    }
+
+    async fn head(root: &Path) -> String {
+        git_stdout(root, &["rev-parse", "HEAD"]).await.unwrap()
+    }
+
+    /// Two members committed, then the group fails: both commits are
+    /// dropped and every path the group touched is restored, while the
+    /// user's own uncommitted work stays.
+    #[tokio::test]
+    async fn test_group_undo_drops_commits_and_reverts() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let start = head(&root).await;
+        let checkpoint = GroupCheckpoint::take(&root).await.unwrap();
+        let pkg = |p: &str| root.join(p).to_string_lossy().into_owned();
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+
+        std::fs::write(root.join("pkgs/foo/default.nix"), "v2").unwrap();
+        assert!(
+            checkpoint
+                .commit("foo", Some(&pkg("pkgs/foo")), "foo: 1 -> 2")
+                .await
+                .unwrap()
+        );
+        std::fs::create_dir_all(root.join("pkgs/bar")).unwrap();
+        std::fs::write(root.join("pkgs/bar/default.nix"), "new").unwrap();
+        std::fs::write(root.join("shared.nix"), "fixed").unwrap();
+        assert!(
+            checkpoint
+                .commit("bar", Some(&pkg("pkgs/bar")), "bar: 1 -> 2")
+                .await
+                .unwrap()
+        );
+        // Nothing left: no empty commit.
+        assert!(!checkpoint.commit("baz", None, "baz").await.unwrap());
+        assert_eq!(checkpoint.created().len(), 2);
+        // The user's work was never committed.
+        let committed = git_stdout(
+            &root,
+            &["log", "--name-only", "--format=", &format!("{start}..")],
+        )
+        .await
+        .unwrap();
+        assert!(!committed.contains("user"), "{committed}");
+        // A failing member's uncommitted edit.
+        std::fs::write(root.join("pkgs/foo/default.nix"), "v3").unwrap();
+
+        checkpoint.undo("group").await.unwrap();
+
+        assert_eq!(head(&root).await, start);
+        assert_eq!(read("pkgs/foo/default.nix"), "v1");
+        assert_eq!(read("shared.nix"), "orig");
+        assert!(!root.join("pkgs/bar").exists());
+        assert_eq!(read("user.lock"), "user edit");
+        assert_eq!(read("user-notes.txt"), "mine");
+        assert_eq!(
+            git_stdout(&root, &["status", "--porcelain=v1"])
+                .await
+                .unwrap(),
+            "M user.lock\n?? user-notes.txt"
+        );
+        assert!(checkpoint.created().is_empty());
+    }
+
+    /// A commit the group did not make on top of its own: nothing is reset.
+    #[tokio::test]
+    async fn test_group_undo_refuses_foreign_commits() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let checkpoint = GroupCheckpoint::take(&root).await.unwrap();
+
+        std::fs::write(root.join("pkgs/foo/default.nix"), "v2").unwrap();
+        checkpoint.commit("foo", None, "foo: 1 -> 2").await.unwrap();
+        std::fs::write(root.join("shared.nix"), "someone else").unwrap();
+        sh(&root, &["commit", "-q", "-m", "foreign", "shared.nix"]).await;
+        let foreign = head(&root).await;
+
+        let err = checkpoint.undo("group").await.unwrap_err();
+        assert!(format!("{err:#}").contains("refusing"), "{err:#}");
+        assert_eq!(head(&root).await, foreign);
+        assert_eq!(
+            std::fs::read_to_string(root.join("pkgs/foo/default.nix")).unwrap(),
+            "v2"
+        );
+    }
+
+    /// Another branch checked out: refused even though the group committed.
+    #[tokio::test]
+    async fn test_group_undo_refuses_other_branch() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let checkpoint = GroupCheckpoint::take(&root).await.unwrap();
+        std::fs::write(root.join("pkgs/foo/default.nix"), "v2").unwrap();
+        checkpoint.commit("foo", None, "foo").await.unwrap();
+        let ours = head(&root).await;
+        sh(&root, &["checkout", "-q", "-b", "other"]).await;
+
+        let err = checkpoint.undo("group").await.unwrap_err();
+        assert!(format!("{err:#}").contains("branch changed"), "{err:#}");
+        assert_eq!(head(&root).await, ours);
+    }
+
+    /// A member failed before anything was committed: only its edits go.
+    #[tokio::test]
+    async fn test_group_undo_without_commits_reverts() {
+        let dir = init_repo().await;
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let start = head(&root).await;
+        let checkpoint = GroupCheckpoint::take(&root).await.unwrap();
+        simulate_update(&root);
+
+        checkpoint.undo("group").await.unwrap();
+
+        assert_eq!(head(&root).await, start);
+        assert_eq!(
+            std::fs::read_to_string(root.join("pkgs/foo/default.nix")).unwrap(),
+            "v1"
+        );
+        assert!(!root.join("pkgs/newdep").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("user.lock")).unwrap(),
+            "user edit"
+        );
     }
 }

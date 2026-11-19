@@ -850,10 +850,8 @@ impl UpdaterServiceConfig {
                         if dry_run {
                             return dry_run_outputs(&job);
                         }
-                        // Branch mode has no group support yet: members are
-                        // updated one after another, each committed on its own.
-                        let requests = match job {
-                            UpdateJob::Group(group) if !is_branch_mode => {
+                        let req = match job {
+                            UpdateJob::Group(group) => {
                                 let opts = super::group_update::GroupUpdateOptions {
                                     db: &db_clone,
                                     session_id: &session_id_clone,
@@ -866,45 +864,50 @@ impl UpdaterServiceConfig {
                                     preserve_failures,
                                     claude_fix: claude_fix_clone.as_deref(),
                                 };
-                                return super::group_update::perform_group_update(&opts, &group)
-                                    .await;
+                                // Branch mode commits the group on the
+                                // current branch (no PR).
+                                return if is_branch_mode {
+                                    super::group_update::perform_branch_group_update(
+                                        &opts,
+                                        &group,
+                                        &git_mutex_clone,
+                                    )
+                                    .await
+                                } else {
+                                    super::group_update::perform_group_update(&opts, &group).await
+                                };
                             },
-                            UpdateJob::Group(group) => group.members,
-                            UpdateJob::Single(req) => vec![req],
+                            UpdateJob::Single(req) => req,
                         };
-                        let mut outputs = Vec::with_capacity(requests.len());
-                        for req in requests {
-                            let result = if is_branch_mode {
-                                super::updater::perform_direct_update(
-                                    &db_clone,
-                                    &session_id_clone,
-                                    &effective_entry_point,
-                                    &req,
-                                    run_passthru_tests,
-                                    Arc::clone(&git_mutex_clone),
-                                    claude_fix_clone.as_deref(),
-                                )
-                                .await
-                            } else {
-                                super::updater::perform_update(
-                                    &db_clone,
-                                    &session_id_clone,
-                                    &effective_entry_point,
-                                    &req,
-                                    effective_pr_config.as_ref(),
-                                    &effective_fork,
-                                    run_passthru_tests,
-                                    dry_run,
-                                    &pr_enhancements_clone,
-                                    interactive,
-                                    preserve_failures,
-                                    claude_fix_clone.as_deref(),
-                                )
-                                .await
-                            };
-                            outputs.push((result, req.attr_path));
-                        }
-                        outputs
+                        let result = if is_branch_mode {
+                            super::updater::perform_direct_update(
+                                &db_clone,
+                                &session_id_clone,
+                                &effective_entry_point,
+                                &req,
+                                run_passthru_tests,
+                                Arc::clone(&git_mutex_clone),
+                                claude_fix_clone.as_deref(),
+                            )
+                            .await
+                        } else {
+                            super::updater::perform_update(
+                                &db_clone,
+                                &session_id_clone,
+                                &effective_entry_point,
+                                &req,
+                                effective_pr_config.as_ref(),
+                                &effective_fork,
+                                run_passthru_tests,
+                                dry_run,
+                                &pr_enhancements_clone,
+                                interactive,
+                                preserve_failures,
+                                claude_fix_clone.as_deref(),
+                            )
+                            .await
+                        };
+                        vec![(result, req.attr_path)]
                     });
                     in_flight.insert(handle.id(), attempts);
                 },

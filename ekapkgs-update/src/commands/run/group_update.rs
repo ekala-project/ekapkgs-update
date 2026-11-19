@@ -1,11 +1,18 @@
-//! Update groups in worktree mode: every member of a [`GroupRequest`] is
-//! updated in one worktree, one commit per member in dependency order, then
-//! the whole group (every member and the root) is built and proposed as one
-//! PR on a stable branch (`update/group/<root>`).
+//! Update groups: every member of a [`GroupRequest`] is updated, one commit
+//! per member in dependency order, then the whole group (every member and the
+//! root) is built and tested.
 //!
-//! Groups are all-or-nothing: when a member's update or the final
-//! verification fails, nothing is proposed. The member that failed records
-//! its own error; the others record "group <root> failed" and back off.
+//! - Worktree mode ([`perform_group_update`]): in one worktree, proposed as
+//!   one PR on a stable branch (`update/group/<root>`).
+//! - Branch mode ([`perform_branch_group_update`]): committed on the current
+//!   branch, no PR.
+//!
+//! Both share the member loop, verification and failure attribution
+//! ([`GroupWorkspace`] says where members are edited and how they are
+//! committed). Groups are all-or-nothing: when a member's update or the
+//! verification fails, nothing is proposed (branch mode also drops the
+//! group's commits). The member that failed records its own error; the
+//! others record "group <root> failed" and back off.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,6 +21,9 @@ use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use tokio::sync::Mutex;
+
+use super::branch_git::GroupCheckpoint;
 use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
 use super::preservation::preserve_failure;
 use super::types::{GroupRequest, UpdateRequest, UpdateResult};
@@ -71,21 +81,8 @@ pub(super) async fn perform_group_update(
     opts: &GroupUpdateOptions<'_>,
     group: &GroupRequest,
 ) -> Vec<MemberOutput> {
-    let label = |req: &UpdateRequest| req.attr_path.clone();
     if opts.dry_run {
-        return group
-            .members
-            .iter()
-            .map(|req| {
-                (
-                    Ok(UpdateResult::DryRun {
-                        current_version: req.current_version.clone(),
-                        new_version: req.new_version.clone(),
-                    }),
-                    label(req),
-                )
-            })
-            .collect();
+        return dry_run_outputs(group);
     }
 
     let attempts: Vec<Attempt<'_>> = group
@@ -122,130 +119,40 @@ pub(super) async fn perform_group_update(
     let worktree_entry = worktree_path.join(&relative_entry_point);
     let worktree_entry_str = worktree_entry.to_string_lossy().to_string();
 
-    let attrs: Vec<String> = group.members.iter().map(|m| m.attr_path.clone()).collect();
-    let order = commit_order(&worktree_entry_str, &attrs).await;
-    info!(
-        "group {}: updating {} member(s) in order: {}",
-        group.root,
-        order.len(),
-        order.join(", ")
-    );
+    let workspace = GroupWorkspace {
+        path: &worktree_path,
+        entry: &worktree_entry_str,
+        committer: Committer::Worktree,
+    };
+    let GroupRun { updated, outcome } =
+        run_group(opts, group, &attempts, &mut results, &workspace).await;
 
-    let mut updated: Vec<Updated> = Vec::new();
-    let mut failure: Option<Box<GroupFailure>> = None;
-
-    for attr in &order {
-        let index = attrs.iter().position(|a| a == attr).expect("member");
-        let attempt = &attempts[index];
-        match update_member(opts, attempt, &worktree_path, &worktree_entry_str).await {
-            Ok(MemberUpdate::Updated(removed_patches)) => updated.push(Updated {
-                index,
-                removed_patches,
-            }),
-            Ok(MemberUpdate::AlreadyAtVersion(already)) => {
-                results[index] = Some(attempt.already_at_version(&already).await);
-            },
-            Err(f) => {
-                failure = Some(f);
-                break;
-            },
-        }
-    }
-
-    if failure.is_none() && updated.is_empty() {
-        info!("group {}: no member needed an update", group.root);
-        cleanup(&repo_dir, &worktree_path, &group.root).await;
-        return collect(group, results);
-    }
-
-    // Verify the group as a whole: every member and the root.
-    let mut test_result = TestResult::NotRequested;
-    let mut fixed_by_claude = false;
-    if failure.is_none() {
-        let root_tracker = PhaseTracker::new(
-            opts.db.clone(),
-            opts.session_id,
-            group.lead().repo(),
-            &group.root,
-        );
-        match verify_group(
-            opts,
-            group,
-            &root_tracker,
-            &worktree_path,
-            &worktree_entry_str,
-        )
-        .await
-        {
-            Ok(verified) => {
-                test_result = verified.tests;
-                fixed_by_claude = verified.fixed_by_claude;
-            },
-            Err(f) => failure = Some(f),
-        }
-    }
-
-    if let Some(failure) = failure {
-        warn!(
-            "group {}: {} failed ({}): {}",
-            group.root,
-            failure.attr_path,
-            failure.error.phase(),
-            failure.error.summary()
-        );
-        let preserved = preserve(
-            opts,
-            group,
-            &failure,
-            &repo_dir,
-            &worktree_path,
-            &worktree_entry,
-        )
-        .await;
-        for (index, attempt) in attempts.iter().enumerate() {
-            if results[index].is_some() {
-                continue;
-            }
-            let result = if attempt.req.attr_path == failure.attr_path {
-                attempt
-                    .record_failure(&failure.error, &failure.error_log)
-                    .await
-            } else {
-                let details = format!(
-                    "group {} failed: {} ({}): {}",
-                    group.root,
-                    failure.attr_path,
-                    failure.error.phase(),
-                    failure.error.summary()
-                );
-                let error = UpdateError::InfrastructureError {
-                    phase: failure.error.phase(),
-                    component: "group".to_owned(),
-                    details: details.clone(),
-                };
-                attempt
-                    .record_failure(&error, &format!("{details}\n\n{}", failure.error_log))
-                    .await
-            };
-            results[index] = Some(result);
-        }
-        if !preserved {
+    // Verified as a whole: every member and the root.
+    let (test_result, fixed_by_claude) = match outcome {
+        Ok(None) => {
             cleanup(&repo_dir, &worktree_path, &group.root).await;
-        }
-        return collect(group, results);
-    }
+            return collect(group, results);
+        },
+        Ok(Some(verified)) => (verified.tests, verified.fixed_by_claude),
+        Err(failure) => {
+            let preserved = preserve(
+                opts,
+                group,
+                &failure,
+                &repo_dir,
+                &worktree_path,
+                &worktree_entry,
+            )
+            .await;
+            record_group_failure(group, &attempts, &mut results, &failure).await;
+            if !preserved {
+                cleanup(&repo_dir, &worktree_path, &group.root).await;
+            }
+            return collect(group, results);
+        },
+    };
 
-    for u in &updated {
-        if !u.removed_patches.is_empty() {
-            info!(
-                "{}: Removed {} obsolete patch(es): {}",
-                attrs[u.index],
-                u.removed_patches.len(),
-                u.removed_patches.join(", ")
-            );
-        }
-    }
-
+    log_removed_patches(group, &updated);
     // Rebuild impact of the whole group.
     let rebuild_analysis = if opts.pr_enhancements.analyze_rebuilds {
         match crate::nix::rebuild_count::calculate_rebuild_count(
@@ -357,6 +264,278 @@ pub(super) async fn perform_group_update(
 
     cleanup(&repo_dir, &worktree_path, &group.root).await;
     collect(group, results)
+}
+
+/// Where a group's members are updated and committed.
+pub(super) struct GroupWorkspace<'a> {
+    /// Repository root the members' files are resolved against: the group
+    /// worktree, or the checkout itself in branch mode.
+    pub path: &'a Path,
+    /// Entry point inside `path`.
+    pub entry: &'a str,
+    pub committer: Committer<'a>,
+}
+
+/// How a group's commits are made.
+pub(super) enum Committer<'a> {
+    /// Worktree mode: commit everything in the group worktree.
+    Worktree,
+    /// Branch mode: commit only what the group dirtied (see
+    /// [`GroupCheckpoint`]), under the git mutex.
+    Branch {
+        checkpoint: &'a GroupCheckpoint,
+        git_mutex: &'a Mutex<()>,
+    },
+}
+
+impl GroupWorkspace<'_> {
+    /// Commit the changes of `label` (a member, or the root for a fix) as
+    /// `title`. `pkg_dir` is its package directory, when known. Returns
+    /// `false` when nothing changed.
+    async fn commit(
+        &self,
+        label: &str,
+        pkg_dir: Option<&Path>,
+        title: &str,
+    ) -> anyhow::Result<bool> {
+        match &self.committer {
+            Committer::Worktree => crate::git::commit_all(self.path, title).await,
+            Committer::Branch {
+                checkpoint,
+                git_mutex,
+            } => {
+                let _lock = git_mutex.lock().await;
+                let pkg_dir = pkg_dir.map(|d| d.to_string_lossy().into_owned());
+                checkpoint.commit(label, pkg_dir.as_deref(), title).await
+            },
+        }
+    }
+}
+
+/// Members updated (in dependency order) and, unless none needed an update
+/// or one failed, the verification of the whole group.
+struct GroupRun {
+    updated: Vec<Updated>,
+    /// `Ok(None)`: no member needed an update (nothing was verified).
+    outcome: Result<Option<Verified>, Box<GroupFailure>>,
+}
+
+/// Update every member in `workspace`, one commit each, dependencies first,
+/// then verify the group. Members already at their target version get their
+/// result in `results`; the rest are left to the caller.
+async fn run_group(
+    opts: &GroupUpdateOptions<'_>,
+    group: &GroupRequest,
+    attempts: &[Attempt<'_>],
+    results: &mut [Option<UpdateResult>],
+    workspace: &GroupWorkspace<'_>,
+) -> GroupRun {
+    let attrs: Vec<String> = group.members.iter().map(|m| m.attr_path.clone()).collect();
+    let order = commit_order(workspace.entry, &attrs).await;
+    info!(
+        "group {}: updating {} member(s) in order: {}",
+        group.root,
+        order.len(),
+        order.join(", ")
+    );
+
+    let mut updated: Vec<Updated> = Vec::new();
+    for attr in &order {
+        let index = attrs.iter().position(|a| a == attr).expect("member");
+        let attempt = &attempts[index];
+        match update_member(opts, attempt, workspace).await {
+            Ok(MemberUpdate::Updated(removed_patches)) => updated.push(Updated {
+                index,
+                removed_patches,
+            }),
+            Ok(MemberUpdate::AlreadyAtVersion(already)) => {
+                results[index] = Some(attempt.already_at_version(&already).await);
+            },
+            Err(failure) => {
+                return GroupRun {
+                    updated,
+                    outcome: Err(failure),
+                };
+            },
+        }
+    }
+    if updated.is_empty() {
+        info!("group {}: no member needed an update", group.root);
+        return GroupRun {
+            updated,
+            outcome: Ok(None),
+        };
+    }
+
+    let root_tracker = PhaseTracker::new(
+        opts.db.clone(),
+        opts.session_id,
+        group.lead().repo(),
+        &group.root,
+    );
+    let outcome = verify_group(opts, group, &root_tracker, workspace)
+        .await
+        .map(Some);
+    GroupRun { updated, outcome }
+}
+
+/// What a member records when its group failed: the member that failed its
+/// own error, every other member `group <root> failed: <attr> (<phase>)`.
+fn member_failure(root: &str, failure: &GroupFailure, member: &str) -> (UpdateError, String) {
+    if member == failure.attr_path {
+        return (failure.error.clone(), failure.error_log.clone());
+    }
+    let details = format!(
+        "group {root} failed: {} ({}): {}",
+        failure.attr_path,
+        failure.error.phase(),
+        failure.error.summary()
+    );
+    let error = UpdateError::InfrastructureError {
+        phase: failure.error.phase(),
+        component: "group".to_owned(),
+        details: details.clone(),
+    };
+    (error, format!("{details}\n\n{}", failure.error_log))
+}
+
+/// Record a failed group for every member without a result yet (failure
+/// log, `failed`, failure backoff).
+async fn record_group_failure(
+    group: &GroupRequest,
+    attempts: &[Attempt<'_>],
+    results: &mut [Option<UpdateResult>],
+    failure: &GroupFailure,
+) {
+    warn!(
+        "group {}: {} failed ({}): {}",
+        group.root,
+        failure.attr_path,
+        failure.error.phase(),
+        failure.error.summary()
+    );
+    for (attempt, result) in attempts.iter().zip(results.iter_mut()) {
+        if result.is_some() {
+            continue;
+        }
+        let (error, log) = member_failure(&group.root, failure, &attempt.req.attr_path);
+        *result = Some(attempt.record_failure(&error, &log).await);
+    }
+}
+
+fn log_removed_patches(group: &GroupRequest, updated: &[Updated]) {
+    for u in updated {
+        if !u.removed_patches.is_empty() {
+            info!(
+                "{}: Removed {} obsolete patch(es): {}",
+                group.members[u.index].attr_path,
+                u.removed_patches.len(),
+                u.removed_patches.join(", ")
+            );
+        }
+    }
+}
+
+/// Update every member of `group` on the current branch (branch mode): one
+/// commit per member in dependency order, then the group is verified. No PR
+/// is created; the members are recorded like branch-mode single updates.
+///
+/// All-or-nothing: if a member or the verification (build or
+/// `passthru.tests`) fails, the group's commits are dropped and every path
+/// it dirtied is reverted ([`GroupCheckpoint::undo`]). Must only run while no
+/// other branch-mode update does (`updater_concurrency`).
+///
+/// Returns one result per member, in the order of `group.members`.
+pub(super) async fn perform_branch_group_update(
+    opts: &GroupUpdateOptions<'_>,
+    group: &GroupRequest,
+    git_mutex: &Mutex<()>,
+) -> Vec<MemberOutput> {
+    if opts.dry_run {
+        return dry_run_outputs(group);
+    }
+    let attempts: Vec<Attempt<'_>> = group
+        .members
+        .iter()
+        .map(|req| Attempt::new(opts.db, opts.session_id, req))
+        .collect();
+    let mut results: Vec<Option<UpdateResult>> = group.members.iter().map(|_| None).collect();
+
+    let repo_dir = match get_repo_dir_from_entry_point(opts.eval_entry_point).await {
+        Ok(dir) => dir,
+        Err(e) => {
+            let failure =
+                SetupFailure::Transient(format!("Repository directory determination failed: {e}"));
+            return setup_failed(&attempts, &failure).await;
+        },
+    };
+    // Like a branch-mode single's snapshot: a repository-level failure.
+    let checkpoint = {
+        let _lock = git_mutex.lock().await;
+        GroupCheckpoint::take(&repo_dir).await
+    };
+    let checkpoint = match checkpoint {
+        Ok(checkpoint) => checkpoint,
+        Err(e) => {
+            let failure = SetupFailure::Transient(format!("Working tree snapshot failed: {e:#}"));
+            return setup_failed(&attempts, &failure).await;
+        },
+    };
+
+    let workspace = GroupWorkspace {
+        path: &repo_dir,
+        entry: opts.eval_entry_point,
+        committer: Committer::Branch {
+            checkpoint: &checkpoint,
+            git_mutex,
+        },
+    };
+    let GroupRun { updated, outcome } =
+        run_group(opts, group, &attempts, &mut results, &workspace).await;
+
+    let failure = match outcome {
+        Ok(None) => return collect(group, results),
+        Ok(Some(verified)) => verified.test_failure(),
+        Err(failure) => Some(failure),
+    };
+    if let Some(failure) = failure {
+        let undone = {
+            let _lock = git_mutex.lock().await;
+            checkpoint.undo(&group.root).await
+        };
+        if let Err(e) = undone {
+            tracing::error!(
+                "group {}: could not undo the group's commits ({}) and changes: {e:#}. The \
+                 branch and working tree are left as they are and need manual cleanup.",
+                group.root,
+                checkpoint.created().join(", ")
+            );
+        }
+        record_group_failure(group, &attempts, &mut results, &failure).await;
+        return collect(group, results);
+    }
+
+    log_removed_patches(group, &updated);
+    for u in &updated {
+        let attempt = &attempts[u.index];
+        attempt.record_success(None).await;
+        results[u.index] = Some(updated_result(attempt.req));
+    }
+    info!(
+        "group {}: committed {} member(s) on the current branch",
+        group.root,
+        updated.len()
+    );
+    collect(group, results)
+}
+
+/// Every member reported as a dry run (nothing is edited or committed).
+fn dry_run_outputs(group: &GroupRequest) -> Vec<MemberOutput> {
+    group
+        .members
+        .iter()
+        .map(|req| (Ok(UpdateResult::dry_run(req)), req.attr_path.clone()))
+        .collect()
 }
 
 /// A group that could not be set up: every member reports the failure
@@ -471,9 +650,9 @@ enum MemberUpdate {
 async fn update_member(
     opts: &GroupUpdateOptions<'_>,
     attempt: &Attempt<'_>,
-    worktree_path: &Path,
-    worktree_entry: &str,
+    workspace: &GroupWorkspace<'_>,
 ) -> Result<MemberUpdate, Box<GroupFailure>> {
+    let (worktree_path, worktree_entry) = (workspace.path, workspace.entry);
     let req = attempt.req;
     let attr_path = &req.attr_path;
     let fail = |error: UpdateError, error_log: String| {
@@ -576,7 +755,10 @@ async fn update_member(
         "{title}{}",
         crate::commands::update::components_commit_lines(&components)
     );
-    match crate::git::commit_all(worktree_path, &message).await {
+    match workspace
+        .commit(attr_path, file_path.parent(), &message)
+        .await
+    {
         Ok(true) => {},
         Ok(false) => debug!("{}: update changed no files", attr_path),
         Err(e) => {
@@ -596,6 +778,29 @@ async fn update_member(
 struct Verified {
     tests: TestResult,
     fixed_by_claude: bool,
+    /// First verified attr whose passthru.tests failed.
+    failed_test: Option<String>,
+}
+
+impl Verified {
+    /// Failed passthru.tests as a group failure (branch mode, which has no
+    /// draft PR to report them in, fails the group like a single update).
+    fn test_failure(self) -> Option<Box<GroupFailure>> {
+        let TestResult::Failed(output) = self.tests else {
+            return None;
+        };
+        let attr_path = self.failed_test.unwrap_or_default();
+        Some(Box::new(GroupFailure {
+            error_log: format!("passthru.tests failed with the updated group:\n{output}"),
+            error: UpdateError::TestError {
+                phase: UpdatePhase::Testing,
+                test_name: None,
+                output,
+                exit_code: 1,
+            },
+            attr_path,
+        }))
+    }
 }
 
 /// Build every attr in `group.verify` (and its passthru.tests when enabled).
@@ -608,9 +813,9 @@ async fn verify_group(
     opts: &GroupUpdateOptions<'_>,
     group: &GroupRequest,
     tracker: &PhaseTracker,
-    worktree_path: &Path,
-    worktree_entry: &str,
+    workspace: &GroupWorkspace<'_>,
 ) -> Result<Verified, Box<GroupFailure>> {
+    let worktree_entry = workspace.entry;
     let members: HashSet<&str> = group.members.iter().map(|m| m.attr_path.as_str()).collect();
     let mut targets: Vec<&str> = Vec::new();
     for attr in &group.verify {
@@ -652,17 +857,7 @@ async fn verify_group(
             if let Some(cfg) = opts.claude_fix {
                 if !fix_attempted && super::claude_fix::should_attempt_claude_fix(&stderr) {
                     fix_attempted = true;
-                    if claude_fix_group(
-                        cfg,
-                        group,
-                        tracker,
-                        worktree_path,
-                        worktree_entry,
-                        attr,
-                        &stderr,
-                    )
-                    .await
-                    {
+                    if claude_fix_group(cfg, group, tracker, workspace, attr, &stderr).await {
                         fixed_by_claude = true;
                         continue 'verify;
                     }
@@ -680,6 +875,7 @@ async fn verify_group(
 
     // passthru.tests of every verified attr.
     let mut tests = TestResult::NotRequested;
+    let mut failed_test = None;
     if opts.run_passthru_tests {
         let handle = tracker.start(UpdatePhase::Testing).await;
         let mut failed = Vec::new();
@@ -687,7 +883,10 @@ async fn verify_group(
         for attr in &targets {
             match crate::commands::update::run_package_tests(worktree_entry, attr, true).await {
                 Ok(TestResult::Passed) => passed = true,
-                Ok(TestResult::Failed(stderr)) => failed.push(format!("{attr}:\n{stderr}")),
+                Ok(TestResult::Failed(stderr)) => {
+                    failed_test.get_or_insert_with(|| (*attr).to_owned());
+                    failed.push(format!("{attr}:\n{stderr}"));
+                },
                 Ok(_) => {},
                 Err(e) => warn!("{}: failed to run passthru.tests: {e:#}", attr),
             }
@@ -715,6 +914,7 @@ async fn verify_group(
     Ok(Verified {
         tests,
         fixed_by_claude,
+        failed_test,
     })
 }
 
@@ -724,11 +924,11 @@ async fn claude_fix_group(
     cfg: &ClaudeFixConfig,
     group: &GroupRequest,
     tracker: &PhaseTracker,
-    worktree_path: &Path,
-    worktree_entry: &str,
+    workspace: &GroupWorkspace<'_>,
     attr: &str,
     stderr: &str,
 ) -> bool {
+    let (worktree_path, worktree_entry) = (workspace.path, workspace.entry);
     let (relative_file, content) = match get_file_location(worktree_entry, attr).await {
         Ok(loc) => match relative_to_repo(Path::new(&loc), worktree_path) {
             Some(rel) => {
@@ -769,7 +969,13 @@ async fn claude_fix_group(
         return false;
     }
     let title = format!("{}: fix build with updated dependencies", group.root);
-    match crate::git::commit_all(worktree_path, &title).await {
+    let pkg_dir = (!relative_file.as_os_str().is_empty())
+        .then(|| worktree_path.join(&relative_file))
+        .and_then(|file| file.parent().map(Path::to_path_buf));
+    match workspace
+        .commit(&group.root, pkg_dir.as_deref(), &title)
+        .await
+    {
         Ok(_) => true,
         Err(e) => {
             warn!("group {}: failed to commit Claude fix: {e:#}", group.root);
@@ -1119,5 +1325,88 @@ mod tests {
             assert_eq!(record.status, UpdateStatus::Failed, "{attr}");
             assert!(record.in_backoff(chrono::Utc::now()), "{attr}");
         }
+    }
+
+    #[test]
+    fn failure_is_attributed_to_the_member_that_failed() {
+        let failure = GroupFailure {
+            attr_path: "aws-c-io".to_owned(),
+            error: UpdateError::BuildError {
+                phase: UpdatePhase::Build,
+                exit_code: 1,
+                stderr: "boom".to_owned(),
+                suspected_cause: None,
+            },
+            error_log: "build log".to_owned(),
+        };
+        // (member, component of its error (None: the failure itself), log)
+        let cases = [
+            ("aws-c-io", None, "build log"),
+            (
+                "aws-crt-cpp",
+                Some("group"),
+                "group aws-crt-cpp failed: aws-c-io (build): ",
+            ),
+        ];
+        for (member, component, log) in cases {
+            let (error, error_log) = member_failure("aws-crt-cpp", &failure, member);
+            assert_eq!(error.phase(), UpdatePhase::Build, "{member}");
+            match (component, &error) {
+                (None, UpdateError::BuildError { stderr, .. }) => assert_eq!(stderr, "boom"),
+                (
+                    Some(expected),
+                    UpdateError::InfrastructureError {
+                        component, details, ..
+                    },
+                ) => {
+                    assert_eq!(component, expected);
+                    assert!(details.starts_with(log), "{details}");
+                },
+                other => panic!("{member}: unexpected {other:?}"),
+            }
+            assert!(error_log.starts_with(log), "{member}: {error_log}");
+            assert!(error_log.ends_with("build log"), "{member}: {error_log}");
+        }
+    }
+
+    #[test]
+    fn failed_tests_fail_a_branch_group() {
+        let verified = |tests, failed_test: Option<&str>| Verified {
+            tests,
+            fixed_by_claude: false,
+            failed_test: failed_test.map(str::to_owned),
+        };
+        assert!(verified(TestResult::Passed, None).test_failure().is_none());
+        assert!(verified(TestResult::NoTests, None).test_failure().is_none());
+        assert!(
+            verified(TestResult::NotRequested, None)
+                .test_failure()
+                .is_none()
+        );
+        let failure = verified(TestResult::Failed("x:\nfailed".to_owned()), Some("x"))
+            .test_failure()
+            .expect("failed tests fail the group");
+        assert_eq!(failure.attr_path, "x");
+        assert_eq!(failure.error.phase(), UpdatePhase::Testing);
+        assert!(failure.error_log.contains("x:\nfailed"));
+    }
+
+    #[test]
+    fn dry_run_reports_members() {
+        let group = GroupRequest {
+            root: "r".to_owned(),
+            members: vec![req("a", "1", "2"), req("b", "1", "2")],
+            verify: vec![],
+        };
+        let outputs = dry_run_outputs(&group);
+        assert_eq!(
+            outputs.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(
+            outputs
+                .iter()
+                .all(|(r, _)| matches!(r, Ok(UpdateResult::DryRun { .. })))
+        );
     }
 }
