@@ -38,6 +38,7 @@ use super::feeds::{
     PolledSource, failure_health, poll_source, update_version_for_entry, upstream_source_from_index,
 };
 use super::refresh::{self, index_config, index_repo_locked};
+use super::webhook::{self, WebhookState};
 use super::{ResolvedRepo, sync};
 use crate::commands::run::{
     UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs,
@@ -68,6 +69,7 @@ pub async fn run_watch_loop(
     poll_interval: Duration,
     index_refresh_interval: Duration,
     head_check_interval: Option<Duration>,
+    webhook: Option<super::WebhookListen>,
     session_config: serde_json::Value,
 ) -> anyhow::Result<()> {
     let poll_interval = poll_interval.max(MIN_INTERVAL);
@@ -76,16 +78,28 @@ pub async fn run_watch_loop(
     let next_index = refresh_repos(&repos, &db, Some(index_refresh_interval)).await;
     let mut sources = load_sources(&db, None).await;
 
-    let head_watcher = head_check_interval.map(|interval| {
-        let interval = interval.max(MIN_INTERVAL);
+    let head_check_interval = head_check_interval.map(|i| i.max(MIN_INTERVAL));
+    if let Some(interval) = head_check_interval {
         info!(
             "Re-indexing repos whose upstream branch moved (checked every {})",
             humantime(interval)
         );
+    }
+    // Webhook deliveries ask the head watcher to check a repo right away.
+    let (webhook_server, triggers) = match webhook {
+        Some(webhook) => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let state = WebhookState::new(webhook.secret, db.clone(), Arc::clone(&repos), tx);
+            (Some(webhook::serve(webhook.listen, state).await?), Some(rx))
+        },
+        None => (None, None),
+    };
+    let head_watcher = (head_check_interval.is_some() || triggers.is_some()).then(|| {
         tokio::spawn(refresh::watch_heads(
             Arc::clone(&repos),
             db.clone(),
-            interval,
+            head_check_interval,
+            triggers,
         ))
     });
 
@@ -130,8 +144,8 @@ pub async fn run_watch_loop(
         }
     }
 
-    if let Some(watcher) = head_watcher {
-        watcher.abort();
+    for task in [head_watcher, webhook_server].into_iter().flatten() {
+        task.abort();
     }
     Ok(())
 }

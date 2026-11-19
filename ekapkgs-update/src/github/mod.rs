@@ -1,5 +1,9 @@
 //! GitHub API integration and utilities
 
+pub mod app;
+pub mod auth;
+pub mod webhook;
+
 use std::sync::OnceLock;
 
 use anyhow::Context;

@@ -26,6 +26,7 @@ pub mod index;
 mod listener;
 mod refresh;
 mod sync;
+mod webhook;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -140,6 +141,24 @@ pub struct WatchConfig {
     /// Multi-repo configurations (from config file).
     #[serde(skip)]
     pub repos: Vec<RepoConfig>,
+    /// GitHub webhook endpoint, when enabled.
+    #[serde(skip)]
+    pub webhook: Option<WebhookListen>,
+}
+
+/// Where to serve the GitHub webhook endpoint, and its secret.
+#[derive(Clone)]
+pub struct WebhookListen {
+    pub listen: std::net::SocketAddr,
+    pub secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for WebhookListen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookListen")
+            .field("listen", &self.listen)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WatchConfig {
@@ -183,6 +202,7 @@ impl WatchConfig {
             claude_fix_timeout,
             skip_cve: false,
             repos: Vec::new(),
+            webhook: None,
         }
     }
 
@@ -325,6 +345,7 @@ impl WatchConfig {
             poll_interval,
             index_refresh,
             head_check,
+            self.webhook,
             session_config,
         )
         .await
@@ -511,7 +532,9 @@ async fn provision_repo(config: &RepoConfig) -> anyhow::Result<ResolvedRepo> {
         let remote_check = run_git_in(&repo_path, &["remote", "get-url", fork_remote]).await;
         if remote_check.is_err() {
             // Need to create fork and add remote
-            if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            if let Ok(token) =
+                crate::github::auth::token_for(&github_repo.owner, &github_repo.repo).await
+            {
                 match crate::github::ensure_fork_exists(
                     &github_repo.owner,
                     &github_repo.repo,

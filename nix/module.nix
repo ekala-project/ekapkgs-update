@@ -21,6 +21,25 @@ let
   #                          `LoadCredential=` and exported by a helper.
   useCredential = cfg.cachix.authTokenFile != null;
 
+  # GitHub App credentials, delivered with `LoadCredential=` and pointed at
+  # through the environment variables ekapkgs-update reads.
+  githubAppCredentials =
+    lib.optional (cfg.githubApp.privateKeyFile != null) "github-app-key:${cfg.githubApp.privateKeyFile}"
+    ++ lib.optional (
+      cfg.githubApp.webhookSecretFile != null
+    ) "github-webhook-secret:${cfg.githubApp.webhookSecretFile}";
+  githubAppEnv = ''
+    ${lib.optionalString (cfg.githubApp.clientId != null) ''
+      export EKAPKGS_GITHUB_APP_CLIENT_ID=${lib.escapeShellArg cfg.githubApp.clientId}
+    ''}
+    ${lib.optionalString (cfg.githubApp.privateKeyFile != null) ''
+      export EKAPKGS_GITHUB_APP_KEY_FILE="$CREDENTIALS_DIRECTORY/github-app-key"
+    ''}
+    ${lib.optionalString (cfg.githubApp.webhookSecretFile != null) ''
+      export EKAPKGS_GITHUB_WEBHOOK_SECRET_FILE="$CREDENTIALS_DIRECTORY/github-webhook-secret"
+    ''}
+  '';
+
   # Recursively strip null values and empty attrsets so that TOML
   # serialization doesn't fail with "unsupported unit type".
   removeNulls =
@@ -118,11 +137,14 @@ let
     . "$runtime_env"
     set +a
 
+    ${githubAppEnv}
+
     exec ${cfg.package}/bin/ekapkgs-update watch \
       --config-file ${watchConfigFile} \
       --poll-interval ${toString cfg.watch.pollIntervalMinutes} \
       --index-refresh-hours ${toString cfg.watch.indexRefreshHours} \
       --head-check-interval ${toString cfg.watch.headCheckMinutes} \
+      ${lib.optionalString cfg.watch.webhook.enable "--webhook-listen ${cfg.watch.webhook.host}:${toString cfg.watch.webhook.port}"} \
       ${
         lib.optionalString (
           cfg.watch.commitStrategy != null
@@ -151,6 +173,8 @@ let
     # shellcheck disable=SC1090
     . "$runtime_env"
     set +a
+
+    ${githubAppEnv}
 
     exec ${cfg.package}/bin/ekapkgs-update run \
       --config-file ${configFile} \
@@ -378,6 +402,44 @@ in
       };
     };
 
+    githubApp = {
+      clientId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "Iv23liAbCdEfGhIjKlMn";
+        description = ''
+          Client ID (or app ID) of a GitHub App to authenticate as instead
+          of `GITHUB_TOKEN`. PRs and commits are then made by the app's bot
+          account (`<slug>[bot]`), and pushes use installation tokens, so
+          {option}`git.githubTokenCredentialHelper` is not needed. The app
+          needs Contents and Pull requests read & write and must be
+          installed on the watched repositories.
+        '';
+      };
+
+      privateKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/ekapkgs-update-github-app.pem";
+        description = ''
+          Path to the GitHub App's PEM private key. Loaded via systemd's
+          `LoadCredential=`, so it can be readable by root only. Required
+          with {option}`githubApp.clientId`.
+        '';
+      };
+
+      webhookSecretFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/secrets/ekapkgs-update-webhook-secret";
+        description = ''
+          Path to a file containing the webhook secret set in the GitHub
+          App's settings. Required with {option}`watch.webhook.enable`.
+          Loaded via systemd's `LoadCredential=`.
+        '';
+      };
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -552,6 +614,31 @@ in
         '';
       };
 
+      webhook = {
+        enable = lib.mkEnableOption ''
+          the GitHub webhook endpoint (`POST /github/webhook`). A push to a
+          watched repository's base branch or a merged PR re-indexes it at
+          once; a PR closed without merging withdraws its proposal (retried
+          after the failure backoff). Expose it through a TLS-terminating
+          reverse proxy, e.g. nginx `location /github/webhook { proxy_pass
+          http://127.0.0.1:3041; }`, and set that URL and
+          {option}`githubApp.webhookSecretFile`'s secret in the GitHub App
+          (events: Push, Pull request)
+        '';
+
+        host = lib.mkOption {
+          type = lib.types.str;
+          default = "127.0.0.1";
+          description = "Address the webhook endpoint listens on (IPv6 in brackets).";
+        };
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 3041;
+          description = "Port the webhook endpoint listens on.";
+        };
+      };
+
       headCheckMinutes = lib.mkOption {
         type = lib.types.ints.unsigned;
         default = 5;
@@ -704,6 +791,20 @@ in
         '';
       }
       {
+        assertion = (cfg.githubApp.clientId != null) == (cfg.githubApp.privateKeyFile != null);
+        message = ''
+          services.ekapkgs-update.githubApp: clientId and privateKeyFile
+          must be set together.
+        '';
+      }
+      {
+        assertion = cfg.watch.webhook.enable -> cfg.githubApp.webhookSecretFile != null;
+        message = ''
+          services.ekapkgs-update.watch.webhook.enable needs
+          services.ekapkgs-update.githubApp.webhookSecretFile.
+        '';
+      }
+      {
         assertion =
           let
             names = map (r: r.name) cfg.watch.repos;
@@ -789,7 +890,9 @@ in
 
         EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
 
-        LoadCredential = lib.optional useCredential "cachix-token:${toString cfg.cachix.authTokenFile}";
+        LoadCredential =
+          lib.optional useCredential "cachix-token:${toString cfg.cachix.authTokenFile}"
+          ++ githubAppCredentials;
 
         # Hardening — Nix builds need broad filesystem access, so we
         # apply the conservative subset that is compatible with invoking
@@ -892,7 +995,9 @@ in
 
         EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
 
-        LoadCredential = lib.optional useCredential "cachix-token:${toString cfg.cachix.authTokenFile}";
+        LoadCredential =
+          lib.optional useCredential "cachix-token:${toString cfg.cachix.authTokenFile}"
+          ++ githubAppCredentials;
 
         # Same hardening as the main daemon — needs Nix daemon access
         NoNewPrivileges = true;

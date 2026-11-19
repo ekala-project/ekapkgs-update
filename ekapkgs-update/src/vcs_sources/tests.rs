@@ -721,7 +721,18 @@ async fn test_fetch_script_releases() {
         script_path: path_str,
     };
 
-    let releases = source.fetch_all_releases().await.unwrap();
+    // Another test forking while this script was still open for writing can
+    // make exec fail with ETXTBSY ("Text file busy") for a moment.
+    let mut attempts = 0;
+    let releases = loop {
+        match source.fetch_all_releases().await {
+            Err(e) if attempts < 20 && format!("{e:#}").contains("Text file busy") => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            },
+            result => break result.unwrap(),
+        }
+    };
     assert_eq!(releases.len(), 4);
     assert_eq!(releases[0].tag_name, "3.28.1");
     assert_eq!(releases[1].tag_name, "3.29.0");

@@ -360,6 +360,55 @@ impl Database {
         }))
     }
 
+    /// Record a webhook delivery. Returns `false` when it was already
+    /// recorded (a redelivery), in which case it must not be processed again.
+    pub async fn record_webhook_delivery(
+        &self,
+        delivery_id: &str,
+        event: &str,
+        action: Option<&str>,
+        repository: Option<&str>,
+    ) -> Result<bool> {
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO webhook_deliveries \
+             (delivery_id, event, action, repository, received_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(delivery_id)
+        .bind(event)
+        .bind(action)
+        .bind(repository)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("record webhook delivery")?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+
+    /// Record what was done with a webhook delivery.
+    pub async fn set_webhook_outcome(&self, delivery_id: &str, outcome: &str) -> Result<()> {
+        sqlx::query("UPDATE webhook_deliveries SET outcome = ? WHERE delivery_id = ?")
+            .bind(outcome)
+            .bind(delivery_id)
+            .execute(&self.pool)
+            .await
+            .context("record webhook outcome")?;
+        Ok(())
+    }
+
+    /// Delete webhook deliveries older than `keep_days`.
+    pub async fn prune_webhook_deliveries(&self, keep_days: i64) -> Result<u64> {
+        let cutoff = (Utc::now() - Duration::days(keep_days)).to_rfc3339();
+        Ok(
+            sqlx::query("DELETE FROM webhook_deliveries WHERE received_at < ?")
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+                .context("prune webhook deliveries")?
+                .rows_affected(),
+        )
+    }
+
     /// Record the first completed poll for a repository (baselines recorded).
     /// Later calls keep the original timestamp.
     pub async fn mark_repo_bootstrapped(&self, name: &str) -> Result<()> {

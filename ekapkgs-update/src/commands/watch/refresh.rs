@@ -5,7 +5,9 @@
 //! asks each managed repo's upstream for its base branch (`git ls-remote`, no
 //! fetch). When that moved, the checkout is synced; when the checkout's
 //! `HEAD` then differs from the indexed commit, the repo is re-indexed.
-//! Unmanaged checkouts are re-indexed when their `HEAD` moves.
+//! Unmanaged checkouts are re-indexed when their `HEAD` moves. A webhook
+//! delivery (push, merged PR) triggers the same check for its repo at once;
+//! the interval check then only catches missed deliveries.
 //!
 //! This is what notices merged PRs: re-indexing registers the merged version
 //! as the package's current version, which marks its proposal merged
@@ -17,10 +19,11 @@
 //! hold the checkout lock ([`crate::git::checkout_lock`]), so this runs
 //! alongside poll cycles without moving `HEAD` under a running update.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::index::IndexTarget;
@@ -96,19 +99,66 @@ pub(super) async fn index_repo_locked(
     }
 }
 
-/// Check every repo for new commits every `interval`, re-indexing the ones
-/// that moved. Runs until the task is aborted.
-pub(super) async fn watch_heads(repos: Arc<Vec<ResolvedRepo>>, db: Database, interval: Duration) {
+/// Check every repo for new commits every `interval`, and the repos named
+/// on `triggers` (webhook deliveries) right away, re-indexing the ones that
+/// moved. Runs until the task is aborted.
+pub(super) async fn watch_heads(
+    repos: Arc<Vec<ResolvedRepo>>,
+    db: Database,
+    interval: Option<Duration>,
+    mut triggers: Option<mpsc::UnboundedReceiver<String>>,
+) {
     // Upstream heads already synced to, per repo. Starts empty, so the first
     // check syncs every managed checkout once.
     let mut synced: HashMap<String, String> = HashMap::new();
-    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ticker = interval.map(|interval| {
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker
+    });
     loop {
-        ticker.tick().await;
-        for repo in repos.iter() {
-            check_repo(repo, &db, &mut synced).await;
+        tokio::select! {
+            () = tick(ticker.as_mut()) => {
+                for repo in repos.iter() {
+                    check_repo(repo, &db, &mut synced).await;
+                }
+            },
+            name = recv(triggers.as_mut()) => {
+                let Some(name) = name else {
+                    triggers = None;
+                    continue;
+                };
+                // Coalesce a burst (push + pull_request for one merge).
+                let mut names = BTreeSet::from([name]);
+                if let Some(rx) = triggers.as_mut() {
+                    while let Ok(name) = rx.try_recv() {
+                        names.insert(name);
+                    }
+                }
+                for repo in repos.iter().filter(|r| names.contains(&r.name)) {
+                    debug!("[{}] Checking for new commits (webhook)", repo.label());
+                    // Sync even if the upstream head looks unchanged.
+                    synced.remove(&repo.name);
+                    check_repo(repo, &db, &mut synced).await;
+                }
+            },
         }
+    }
+}
+
+async fn tick(ticker: Option<&mut tokio::time::Interval>) {
+    match ticker {
+        Some(ticker) => {
+            ticker.tick().await;
+        },
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv(rx: Option<&mut mpsc::UnboundedReceiver<String>>) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
