@@ -24,6 +24,7 @@
 pub mod feeds;
 pub mod index;
 mod listener;
+mod refresh;
 mod sync;
 
 use std::path::{Path, PathBuf};
@@ -112,6 +113,8 @@ pub struct WatchConfig {
     pub poll_interval_minutes: u64,
     /// How often to rebuild the full upstream index, in hours
     pub index_refresh_hours: u64,
+    /// How often to check for upstream branch movement, in minutes (0 = off)
+    pub head_check_minutes: u64,
     /// Upstream git remote for PR creation
     pub upstream: Option<String>,
     /// Fork git remote for PR creation
@@ -146,6 +149,7 @@ impl WatchConfig {
         database_path: String,
         poll_interval: u64,
         index_refresh_hours: u64,
+        head_check_minutes: u64,
         upstream: Option<String>,
         fork: String,
         run_passthru_tests: bool,
@@ -164,6 +168,7 @@ impl WatchConfig {
             database_path,
             poll_interval_minutes: poll_interval,
             index_refresh_hours,
+            head_check_minutes,
             upstream,
             fork,
             run_passthru_tests,
@@ -191,6 +196,8 @@ impl WatchConfig {
 
         let poll_interval = Duration::from_secs(self.poll_interval_minutes * 60);
         let index_refresh = Duration::from_secs(self.index_refresh_hours * 3600);
+        let head_check = (self.head_check_minutes > 0)
+            .then(|| Duration::from_secs(self.head_check_minutes * 60));
 
         let expanded_db = shellexpand::tilde(&self.database_path).to_string();
         let db = crate::database::Database::new(&expanded_db).await?;
@@ -264,6 +271,7 @@ impl WatchConfig {
             "commit_strategy": self.commit_strategy,
             "poll_interval_minutes": self.poll_interval_minutes,
             "index_refresh_hours": self.index_refresh_hours,
+            "head_check_minutes": self.head_check_minutes,
         });
 
         // Concurrency
@@ -310,6 +318,7 @@ impl WatchConfig {
             updater_config,
             poll_interval,
             index_refresh,
+            head_check,
             session_config,
         )
         .await

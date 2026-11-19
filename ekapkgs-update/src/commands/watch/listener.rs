@@ -18,7 +18,11 @@
 //!    managed checkout is fast-forwarded before its repo's first update of
 //!    the cycle, so update worktrees (created from `HEAD`) start from the
 //!    current upstream branch. The cycle ends when every update has finished.
-//! 5. Repos are re-synced and re-indexed every `index_refresh_interval`.
+//! 5. Every `head_check_interval`, a background task re-indexes each repo
+//!    whose upstream branch moved past the commit its index was built from
+//!    (e.g. a merged PR), see [`refresh`]. Poll cycles reload the sources
+//!    from the database, so they pick up re-indexed packages.
+//! 6. Repos are re-synced and re-indexed every `index_refresh_interval`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -33,11 +37,11 @@ use tracing::{debug, info, warn};
 use super::feeds::{
     PolledSource, failure_health, poll_source, update_version_for_entry, upstream_source_from_index,
 };
-use super::index::IndexTarget;
-use super::{ResolvedRepo, index, sync};
+use super::refresh::{self, index_config, index_repo_locked};
+use super::{ResolvedRepo, sync};
 use crate::commands::run::{UpdateRequest, UpdaterServiceConfig, UpdaterStats};
 use crate::database::{
-    Database, IndexOutcome, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
+    Database, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
     SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
 };
 use crate::vcs_sources::{Release, compare_version_components};
@@ -61,6 +65,7 @@ pub async fn run_watch_loop(
     updater_config: UpdaterServiceConfig,
     poll_interval: Duration,
     index_refresh_interval: Duration,
+    head_check_interval: Option<Duration>,
     session_config: serde_json::Value,
 ) -> anyhow::Result<()> {
     let poll_interval = poll_interval.max(MIN_INTERVAL);
@@ -68,6 +73,19 @@ pub async fn run_watch_loop(
 
     let next_index = refresh_repos(&repos, &db, Some(index_refresh_interval)).await;
     let mut sources = load_sources(&db, None).await;
+
+    let head_watcher = head_check_interval.map(|interval| {
+        let interval = interval.max(MIN_INTERVAL);
+        info!(
+            "Re-indexing repos whose upstream branch moved (checked every {})",
+            humantime(interval)
+        );
+        tokio::spawn(refresh::watch_heads(
+            Arc::clone(&repos),
+            db.clone(),
+            interval,
+        ))
+    });
 
     // The first poll tick fires immediately (polling only the sources that
     // are due); on a fresh database that poll records baselines.
@@ -86,6 +104,8 @@ pub async fn run_watch_loop(
     loop {
         tokio::select! {
             _ = poll_ticker.tick() => {
+                // The head watcher may have re-indexed since the last cycle.
+                sources = load_sources(&db, Some(sources)).await;
                 run_poll_cycle(
                     &sources,
                     poll_interval,
@@ -100,7 +120,6 @@ pub async fn run_watch_loop(
             _ = index_ticker.tick() => {
                 info!("Refreshing repositories and upstream indexes...");
                 refresh_repos(&repos, &db, None).await;
-                sources = load_sources(&db, Some(sources)).await;
             },
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down watch service...");
@@ -109,17 +128,23 @@ pub async fn run_watch_loop(
         }
     }
 
+    if let Some(watcher) = head_watcher {
+        watcher.abort();
+    }
     Ok(())
 }
 
 /// Load the source list, keeping `previous` if the database read fails.
+/// The count is logged when it changes.
 async fn load_sources(
     db: &Database,
     previous: Option<Vec<UpstreamIndexEntry>>,
 ) -> Vec<UpstreamIndexEntry> {
     match db.get_all_upstream_sources().await {
         Ok(sources) => {
-            if sources.is_empty() {
+            if previous.as_ref().is_some_and(|p| p.len() == sources.len()) {
+                debug!("Watching {} unique upstream sources", sources.len());
+            } else if sources.is_empty() {
                 warn!(
                     "Watching 0 upstream sources: no package could be indexed. Check the index \
                      log lines above (entry point, select expression, iets eval-jobs errors)."
@@ -150,7 +175,10 @@ async fn refresh_repos(
 ) -> Duration {
     let mut next = reuse_within.unwrap_or(Duration::MAX);
     for repo in repos {
-        sync::sync_repo(repo, db).await;
+        let lock = crate::git::checkout_lock(&repo.repo_dir);
+        let _checkout = lock.lock().await;
+        sync::sync_repo_locked(repo, db).await;
+        let head = sync::local_head(&repo.repo_dir).await;
         let config = index_config(repo);
         if let Some(interval) = reuse_within {
             let state = db
@@ -159,9 +187,13 @@ async fn refresh_repos(
                 .map_err(|e| warn!("[{}] Failed to read index state: {:#}", repo.label(), e))
                 .ok()
                 .flatten();
-            if let Some(remaining) =
-                index_reuse_remaining(state.as_ref(), &config, Utc::now(), interval)
-            {
+            if let Some(remaining) = index_reuse_remaining(
+                state.as_ref(),
+                &config,
+                head.as_deref(),
+                Utc::now(),
+                interval,
+            ) {
                 info!(
                     "[{}] Reusing the upstream index from {} ago (re-index in {})",
                     repo.label(),
@@ -172,33 +204,19 @@ async fn refresh_repos(
                 continue;
             }
         }
-        index_repo(repo, db, config).await;
+        index_repo_locked(repo, db, config, head).await;
     }
     next
 }
 
-/// What an index build depends on besides the checkout: the running binary
-/// (a new build may index differently), the entry points and the select
-/// expression.
-fn index_config(repo: &ResolvedRepo) -> String {
-    let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    format!(
-        "exe={exe}\nenumerate={}\nselect={}\neval={}",
-        repo.enumerate_entry_point,
-        repo.select.as_deref().unwrap_or(""),
-        repo.eval_entry_point
-    )
-}
-
 /// How much longer a repo's last index can be reused, or `None` when the
 /// repo must be indexed now: the last build failed, was interrupted, indexed
-/// nothing, was built from another binary or configuration, or is older than
-/// `interval`.
+/// nothing, was built from another binary, configuration or commit than
+/// `head`, or is older than `interval`.
 fn index_reuse_remaining(
     state: Option<&RepoIndexState>,
     config: &str,
+    head: Option<&str>,
     now: DateTime<Utc>,
     interval: Duration,
 ) -> Option<Duration> {
@@ -206,6 +224,7 @@ fn index_reuse_remaining(
     if state.status.as_deref() != Some("ok")
         || state.indexed_count <= 0
         || state.config.as_deref() != Some(config)
+        || refresh::head_moved(head, state.indexed_commit.as_deref())
     {
         return None;
     }
@@ -241,53 +260,6 @@ fn humantime(d: Duration) -> String {
         format!("{}h{:02}m", mins / 60, mins % 60)
     } else {
         format!("{mins}m")
-    }
-}
-
-/// Build one repo's index, recording it as an `index` watch cycle and in
-/// `watched_repos`.
-async fn index_repo(repo: &ResolvedRepo, db: &Database, config: String) {
-    let cycle = db
-        .start_watch_cycle(WatchCycleKind::Index, Some(&repo.name))
-        .await
-        .map_err(|e| warn!("[{}] Failed to record index cycle: {:#}", repo.label(), e))
-        .ok();
-    if let Err(e) = db.record_repo_index_start(&repo.name).await {
-        warn!("[{}] Failed to record index start: {:#}", repo.label(), e);
-    }
-
-    let started = Instant::now();
-    let target = IndexTarget {
-        repo_name: &repo.name,
-        enumerate_file: &repo.enumerate_entry_point,
-        select: repo.select.as_deref(),
-        repo_dir: Some(&repo.repo_dir),
-    };
-    let stats = index::build_upstream_index(target, db, None).await;
-    let outcome = IndexOutcome {
-        error: stats.stream_error.clone(),
-        duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
-        evaluated: stats.evaluated,
-        indexed: stats.indexed,
-        skipped: stats.skipped,
-        errors: stats.errors,
-        config: Some(config),
-    };
-
-    if let Err(e) = db.record_repo_index_result(&repo.name, &outcome).await {
-        warn!("[{}] Failed to record index result: {:#}", repo.label(), e);
-    }
-    if let Some(id) = cycle {
-        let cycle_stats = WatchCycleStats {
-            packages_observed: stats.indexed,
-            ..WatchCycleStats::default()
-        };
-        if let Err(e) = db
-            .finish_watch_cycle(id, &cycle_stats, outcome.error.as_deref())
-            .await
-        {
-            warn!("[{}] Failed to finish index cycle: {:#}", repo.label(), e);
-        }
     }
 }
 
@@ -998,11 +970,35 @@ mod tests {
             last_indexed_at: Some(ago(now, minutes)),
             indexed_count: 1305,
             config: Some(config.to_owned()),
+            indexed_commit: Some("abc".to_owned()),
         };
         let remaining = |state: Option<RepoIndexState>| {
-            index_reuse_remaining(state.as_ref(), "cfg", now, day).map(|d| d.as_secs() / 60)
+            index_reuse_remaining(state.as_ref(), "cfg", Some("abc"), now, day)
+                .map(|d| d.as_secs() / 60)
         };
         assert_eq!(remaining(Some(ok(60, "cfg"))), Some(23 * 60));
+        assert_eq!(
+            remaining(Some(RepoIndexState {
+                indexed_commit: Some("old".to_owned()),
+                ..ok(60, "cfg")
+            })),
+            None,
+            "checkout moved since (e.g. a PR was merged)"
+        );
+        assert_eq!(
+            remaining(Some(RepoIndexState {
+                indexed_commit: None,
+                ..ok(60, "cfg")
+            })),
+            None,
+            "built before the commit was recorded"
+        );
+        // An unreadable HEAD does not force a rebuild.
+        assert_eq!(
+            index_reuse_remaining(Some(&ok(60, "cfg")), "cfg", None, now, day)
+                .map(|d| d.as_secs() / 60),
+            Some(23 * 60)
+        );
         assert_eq!(remaining(None), None);
         assert_eq!(remaining(Some(ok(24 * 60, "cfg"))), None, "expired");
         assert_eq!(remaining(Some(ok(60, "other"))), None, "config changed");
