@@ -29,25 +29,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
 use super::feeds::{
-    PolledSource, failure_health, poll_source, update_version_for_entry, upstream_source_from_index,
+    ApiGate, ApiSkipped, PolledSource, failure_health, poll_source, release_flagged_prerelease,
+    releases_usable, update_version_for_entry, upstream_source_from_index,
 };
 use super::refresh::{self, index_config, index_repo_locked};
 use super::webhook::{self, WebhookState};
 use super::{ResolvedRepo, sync};
 use crate::commands::run::{
-    UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs,
+    UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs, shutdown_signal,
 };
 use crate::database::{
     Database, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
     SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
+    effective_current_version,
 };
-use crate::vcs_sources::{Release, compare_version_components};
+use crate::vcs_sources::{Release, compare_version_components, find_explicit_release};
 
 /// Concurrent feed / API fetches per poll cycle.
 const POLL_CONCURRENCY: usize = 8;
@@ -57,11 +59,34 @@ const CYCLE_RETENTION_DAYS: i64 = 7;
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
 /// How often a source that answered 404/410 is checked again.
 const NOT_FOUND_RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
+/// Longest wait between polls of a source that keeps failing.
+const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
+/// Repos due for re-indexing within this much of each other are re-indexed
+/// together.
+const INDEX_SLACK: Duration = Duration::from_secs(5 * 60);
+/// How long a signal waits for aborted updates to stop.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 /// `(repo, attr_path, version)` already reported by a dry-run dispatch.
 type DryRunReported = HashSet<(String, String, String)>;
 
-/// Run the watch event loop until Ctrl-C.
+/// Set once SIGINT or SIGTERM arrived.
+type Stop = watch::Receiver<bool>;
+
+/// Resolves once a shutdown signal arrived (never, if the signal task is gone
+/// without one).
+async fn stopped(stop: &mut Stop) {
+    if stop.wait_for(|stopped| *stopped).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Run the watch event loop until SIGINT or SIGTERM.
+///
+/// A signal during a poll cycle stops dispatching, aborts the cycle's updater
+/// service (and the updates in flight) and closes its session as
+/// `cancelled`; `recover_interrupted_watch_state` remains the fallback for a
+/// killed process.
 pub async fn run_watch_loop(
     repos: Arc<Vec<ResolvedRepo>>,
     db: Database,
@@ -75,7 +100,20 @@ pub async fn run_watch_loop(
     let poll_interval = poll_interval.max(MIN_INTERVAL);
     let index_refresh_interval = index_refresh_interval.max(MIN_INTERVAL);
 
-    let next_index = refresh_repos(&repos, &db, Some(index_refresh_interval)).await;
+    let (stop_tx, mut stop) = watch::channel(false);
+    tokio::spawn(async move {
+        let signal = shutdown_signal().await;
+        info!("Received {}, shutting down watch service...", signal);
+        let _ = stop_tx.send(true);
+    });
+
+    let all: Vec<&ResolvedRepo> = repos.iter().collect();
+    let mut next_index: HashMap<String, tokio::time::Instant> = tokio::select! {
+        remaining = refresh_repos(&all, &db, Some(index_refresh_interval), index_refresh_interval) => {
+            index_deadlines(remaining).collect()
+        },
+        () = stopped(&mut stop) => return Ok(()),
+    };
     let mut sources = load_sources(&db, None).await;
 
     let head_check_interval = head_check_interval.map(|i| i.max(MIN_INTERVAL));
@@ -107,17 +145,20 @@ pub async fn run_watch_loop(
     // are due); on a fresh database that poll records baselines.
     let mut poll_ticker = tokio::time::interval(poll_interval);
     poll_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut index_ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + next_index.max(MIN_INTERVAL),
-        index_refresh_interval,
-    );
-    index_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Dry runs leave no trace in the database, so without this every poll
     // would report (and open a session for) the same releases again.
     let mut dry_run_reported = DryRunReported::new();
+    let scan_cves = !updater_config.pr_enhancements.skip_cve_check;
 
     loop {
+        // Each repo is re-indexed when its own index expires (a restart may
+        // have reused some indexes and rebuilt others).
+        let wake = next_index
+            .values()
+            .min()
+            .copied()
+            .unwrap_or_else(|| tokio::time::Instant::now() + index_refresh_interval);
         tokio::select! {
             _ = poll_ticker.tick() => {
                 // The head watcher may have re-indexed since the last cycle.
@@ -130,24 +171,65 @@ pub async fn run_watch_loop(
                     &updater_config,
                     &session_config,
                     &mut dry_run_reported,
+                    &stop,
                 )
                 .await;
+                // Known vulnerabilities of packages whose version changed, or
+                // whose last scan is older than a day (cheap when none is due).
+                if scan_cves && !*stop.borrow() {
+                    tokio::select! {
+                        () = scan_vulnerabilities(&db) => {},
+                        () = stopped(&mut stop) => {},
+                    }
+                }
             },
-            _ = index_ticker.tick() => {
-                info!("Refreshing repositories and upstream indexes...");
-                refresh_repos(&repos, &db, None).await;
+            () = tokio::time::sleep_until(wake) => {
+                let due: Vec<&ResolvedRepo> = repos
+                    .iter()
+                    .filter(|r| next_index.get(&r.name).is_none_or(|&at| at <= wake + INDEX_SLACK))
+                    .collect();
+                info!(
+                    "Refreshing {} of {} repositories and their upstream indexes...",
+                    due.len(),
+                    repos.len()
+                );
+                tokio::select! {
+                    remaining = refresh_repos(&due, &db, None, index_refresh_interval) => {
+                        next_index.extend(index_deadlines(remaining));
+                    },
+                    () = stopped(&mut stop) => {},
+                }
             },
-            _ = tokio::signal::ctrl_c() => {
-                info!("Shutting down watch service...");
-                break;
-            },
+            () = stopped(&mut stop) => {},
+        }
+        if *stop.borrow() {
+            break;
         }
     }
 
     for task in [head_watcher, webhook_server].into_iter().flatten() {
         task.abort();
     }
+    info!("Watch service stopped");
     Ok(())
+}
+
+/// Refresh known vulnerabilities after a poll cycle (`--skip-cve` disables it).
+async fn scan_vulnerabilities(db: &Database) {
+    let options = crate::cve::scan::ScanOptions::default();
+    if let Err(e) = crate::cve::scan::scan_due(db.pool(), &options).await {
+        warn!("CVE scan failed: {:#}", e);
+    }
+}
+
+/// When each repo's index is due next.
+fn index_deadlines(
+    remaining: Vec<(String, Duration)>,
+) -> impl Iterator<Item = (String, tokio::time::Instant)> {
+    let now = tokio::time::Instant::now();
+    remaining
+        .into_iter()
+        .map(move |(name, d)| (name, now + d.max(MIN_INTERVAL)))
 }
 
 /// Load the source list, keeping `previous` if the database read fails.
@@ -177,26 +259,27 @@ async fn load_sources(
     }
 }
 
-/// Sync and re-index every repo (sequentially: each index build already
-/// runs iets eval-jobs with many workers).
+/// Sync and re-index `repos` (sequentially: each index build already runs
+/// iets eval-jobs with many workers).
 ///
 /// With `reuse_within`, a repo whose last index is still reusable
 /// ([`index_reuse_remaining`]) is synced but not re-indexed. Returns how long
-/// until the oldest reused index expires (`reuse_within` when every repo
-/// was indexed, or the full refresh interval is unknown).
+/// until each repo is due again: the reused index's remaining time, or
+/// `interval` for a repo indexed now.
 async fn refresh_repos(
-    repos: &[ResolvedRepo],
+    repos: &[&ResolvedRepo],
     db: &Database,
     reuse_within: Option<Duration>,
-) -> Duration {
-    let mut next = reuse_within.unwrap_or(Duration::MAX);
-    for repo in repos {
+    interval: Duration,
+) -> Vec<(String, Duration)> {
+    let mut next = Vec::with_capacity(repos.len());
+    for &repo in repos {
         let lock = crate::git::checkout_lock(&repo.repo_dir);
         let _checkout = lock.lock().await;
         sync::sync_repo_locked(repo, db).await;
         let head = sync::local_head(&repo.repo_dir).await;
         let config = index_config(repo);
-        if let Some(interval) = reuse_within {
+        if let Some(reuse) = reuse_within {
             let state = db
                 .repo_index_state(&repo.name)
                 .await
@@ -208,19 +291,20 @@ async fn refresh_repos(
                 &config,
                 head.as_deref(),
                 Utc::now(),
-                interval,
+                reuse,
             ) {
                 info!(
                     "[{}] Reusing the upstream index from {} ago (re-index in {})",
                     repo.label(),
-                    humantime(interval.saturating_sub(remaining)),
+                    humantime(reuse.saturating_sub(remaining)),
                     humantime(remaining)
                 );
-                next = next.min(remaining);
+                next.push((repo.name.clone(), remaining));
                 continue;
             }
         }
         index_repo_locked(repo, db, config, head).await;
+        next.push((repo.name.clone(), interval));
     }
     next
 }
@@ -250,8 +334,11 @@ fn index_reuse_remaining(
 
 /// Whether a source should be polled in this cycle. A source is due half a
 /// poll interval before its next scheduled poll, so a source polled late in
-/// the previous cycle is not skipped until the one after; sources that were
-/// not found are rechecked every [`NOT_FOUND_RECHECK`].
+/// the previous cycle is not skipped until the one after.
+///
+/// Sources that were not found are rechecked every [`NOT_FOUND_RECHECK`].
+/// Sources whose polls keep failing back off: the wait doubles with each
+/// consecutive failure after the first, up to [`MAX_FAILURE_BACKOFF`].
 fn source_due(
     state: Option<&SourcePollState>,
     now: DateTime<Utc>,
@@ -260,14 +347,26 @@ fn source_due(
     let Some(last) = state.and_then(|s| s.last_polled_at) else {
         return true;
     };
-    let interval = if state.is_some_and(|s| s.health == SourceHealth::NotFound) {
-        NOT_FOUND_RECHECK.max(poll_interval)
-    } else {
-        poll_interval
+    let interval = match state {
+        Some(s) if s.health == SourceHealth::NotFound => NOT_FOUND_RECHECK.max(poll_interval),
+        Some(s) if s.health == SourceHealth::Error => {
+            failure_backoff(poll_interval, s.consecutive_failures)
+        },
+        _ => poll_interval,
     };
     // A last poll in the future (clock change) counts as just polled.
     let elapsed = (now - last).to_std().unwrap_or_default();
     elapsed + poll_interval / 2 >= interval
+}
+
+/// `poll_interval * 2^(failures - 1)`, capped at [`MAX_FAILURE_BACKOFF`]
+/// (never below `poll_interval`).
+fn failure_backoff(poll_interval: Duration, consecutive_failures: i64) -> Duration {
+    let doublings = u32::try_from(consecutive_failures.saturating_sub(1).clamp(0, 16)).unwrap_or(0);
+    poll_interval
+        .saturating_mul(1 << doublings)
+        .min(MAX_FAILURE_BACKOFF)
+        .max(poll_interval)
 }
 
 fn humantime(d: Duration) -> String {
@@ -343,12 +442,15 @@ struct Observation {
     decision: Decision,
 }
 
-/// Collapse aliases: among packages in the same repo with the same current
-/// and target version (one source), only the shortest attr path is
+/// Collapse aliases: among packages in the same repo with the same `pname`,
+/// current and target version (one source), only the shortest attr path is
 /// dispatched, and none if any of them was already proposed or is backing
-/// off for that version.
+/// off for that version. Separate packages built from one source (a
+/// monorepo's `foo` and `foo-cli`, both at its version) have different
+/// pnames and are updated separately, like `run`'s (pname, version) dedup.
 fn resolve_siblings(observations: &mut [Observation]) {
-    let mut groups: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
+    type Key = (String, Option<String>, String, String);
+    let mut groups: HashMap<Key, Vec<usize>> = HashMap::new();
     for (i, o) in observations.iter().enumerate() {
         if matches!(
             o.decision,
@@ -357,6 +459,7 @@ fn resolve_siblings(observations: &mut [Observation]) {
             groups
                 .entry((
                     o.entry.repo_name.clone(),
+                    o.entry.pname.clone(),
                     o.current.clone(),
                     o.latest.clone(),
                 ))
@@ -412,40 +515,22 @@ fn best_for_package(releases: &[Release], entry: &UpstreamIndexEntry, current: &
 #[derive(Debug, Default)]
 struct SourceOutcome {
     failed: bool,
+    /// Not polled: it needed the API, which is rate limited this cycle.
+    skipped: bool,
     new_release: bool,
     observations: Vec<Observation>,
 }
 
 /// Why packages whose source polled fine but listed nothing are not observed.
 const NO_RELEASES: &str = "upstream lists no releases or tags";
+/// Why packages of a source that cannot be reconstructed are not observed.
+const NOT_POLLABLE: &str = "cannot poll this upstream source";
 
 /// Record every configured package tracking a source as `upstream_error`
 /// when the source could not be observed (poll failed, no releases, or not
 /// pollable). Without this a newly indexed package stays `pending` forever.
-async fn record_unobserved(
-    db: &Database,
-    source_row: &UpstreamIndexEntry,
-    configured: &HashSet<String>,
-    error: &str,
-) {
-    let (kind, key) = (
-        source_row.upstream_type.as_str(),
-        source_row.upstream_key.as_str(),
-    );
-    let entries = match db
-        .get_attr_paths_for_source(kind, key, source_row.instance.as_deref())
-        .await
-    {
-        Ok(entries) => entries,
-        Err(e) => {
-            warn!("{}/{}: failed to load packages: {:#}", kind, key, e);
-            return;
-        },
-    };
+async fn record_unobserved(db: &Database, entries: &[UpstreamIndexEntry], error: &str) {
     for entry in entries {
-        if !configured.contains(&entry.repo_name) {
-            continue;
-        }
         let Some(current) = entry.current_version.as_deref().filter(|v| !v.is_empty()) else {
             continue;
         };
@@ -461,11 +546,43 @@ async fn record_unobserved(
     }
 }
 
+/// Record a failed poll of a source (its health and failure count, which
+/// drive [`source_due`]'s backoff) and the packages tracking it.
+async fn record_poll_failure(
+    db: &Database,
+    source_row: &UpstreamIndexEntry,
+    entries: &[UpstreamIndexEntry],
+    message: &str,
+    health: SourceHealth,
+) {
+    let (kind, key, instance) = (
+        source_row.upstream_type.as_str(),
+        source_row.upstream_key.as_str(),
+        source_row.instance.as_deref(),
+    );
+    if let Err(e) = db
+        .record_source_poll(
+            kind,
+            key,
+            instance,
+            &SourcePoll::Failure {
+                error: message,
+                health,
+            },
+        )
+        .await
+    {
+        warn!("{}/{}: failed to record poll failure: {:#}", kind, key, e);
+    }
+    record_unobserved(db, entries, message).await;
+}
+
 /// Poll one source and record observations for every package tracking it.
 async fn poll_one_source(
     db: &Database,
     source_row: &UpstreamIndexEntry,
     configured: &HashSet<String>,
+    gate: &ApiGate,
     now: DateTime<Utc>,
 ) -> SourceOutcome {
     let (kind, key, instance) = (
@@ -475,53 +592,81 @@ async fn poll_one_source(
     );
     let mut outcome = SourceOutcome::default();
 
+    let entries: Vec<UpstreamIndexEntry> =
+        match db.get_attr_paths_for_source(kind, key, instance).await {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|e| configured.contains(&e.repo_name))
+                .collect(),
+            Err(e) => {
+                warn!("{}/{}: failed to load packages: {:#}", kind, key, e);
+                return outcome;
+            },
+        };
+
     let Some(source) = upstream_source_from_index(kind, key, instance) else {
         debug!("{}/{}: cannot reconstruct upstream source", kind, key);
-        record_unobserved(
-            db,
-            source_row,
-            configured,
-            "cannot poll this upstream source",
-        )
-        .await;
+        // Recorded as a failed poll so the source backs off like any other
+        // (instead of being due, and opening a cycle, on every tick).
+        outcome.failed = true;
+        record_poll_failure(db, source_row, &entries, NOT_POLLABLE, SourceHealth::Error).await;
         return outcome;
     };
 
-    let PolledSource { releases, moved_to } = match poll_source(&source).await {
+    let polled = poll_source(&source, |r| releases_usable(&entries, r), gate).await;
+    let PolledSource {
+        mut releases,
+        moved_to,
+        from_feed,
+    } = match polled {
         Ok(polled) => polled,
+        Err(e) if e.downcast_ref::<ApiSkipped>().is_some() => {
+            debug!("{}/{}: {}", kind, key, e);
+            outcome.skipped = true;
+            return outcome;
+        },
         Err(e) => {
             let message = format!("{e:#}");
-            let health = failure_health(&e);
             debug!("{}/{}: poll failed: {}", kind, key, message);
             outcome.failed = true;
-            if let Err(e) = db
-                .record_source_poll(
-                    kind,
-                    key,
-                    instance,
-                    &SourcePoll::Failure {
-                        error: &message,
-                        health,
-                    },
-                )
-                .await
-            {
-                warn!("{}/{}: failed to record poll failure: {:#}", kind, key, e);
-            }
-            record_unobserved(db, source_row, configured, &message).await;
+            record_poll_failure(db, source_row, &entries, &message, failure_health(&e)).await;
             return outcome;
         },
     };
 
+    if !releases.is_empty() {
+        // Releases a feed listed that the platform flags as prereleases
+        // (checked per dispatch candidate only), by tag.
+        let mut checked: HashMap<String, bool> = HashMap::new();
+        for entry in &entries {
+            if let Some(observation) = observe(
+                db,
+                &source,
+                entry,
+                &mut releases,
+                from_feed,
+                &mut checked,
+                gate,
+                now,
+            )
+            .await
+            {
+                outcome.observations.push(observation);
+            }
+        }
+        resolve_siblings(&mut outcome.observations);
+    }
+
+    // After the prerelease checks, so a flagged release is not recorded as
+    // the source's latest.
     let newest = newest_stable(&releases);
-    let newest_version = newest.map(Release::version);
     match db
         .record_source_poll(
             kind,
             key,
             instance,
             &SourcePoll::Success {
-                latest_version: newest_version,
+                latest_version: newest.map(Release::version),
                 latest_tag: newest.map(|r| r.tag_name.as_str()),
                 release_count: releases.len(),
                 moved_to: moved_to.as_deref(),
@@ -533,46 +678,112 @@ async fn poll_one_source(
         Err(e) => warn!("{}/{}: failed to record poll: {:#}", kind, key, e),
     }
     if releases.is_empty() {
-        record_unobserved(db, source_row, configured, NO_RELEASES).await;
-        return outcome;
+        record_unobserved(db, &entries, NO_RELEASES).await;
     }
+    outcome
+}
 
-    let entries = match db.get_attr_paths_for_source(kind, key, instance).await {
-        Ok(entries) => entries,
+/// Observe one package: pick its target, decide, record the observation.
+///
+/// The current version is the newer of the indexed one and the one
+/// `updates` records ([`effective_current_version`]): a merged update is not
+/// dispatched again before the next re-index.
+///
+/// Feeds carry no prerelease flags. When the decision is to dispatch a
+/// release from a feed and the package excludes prereleases, the platform is
+/// asked once whether that release is a prerelease (GitHub) or yanked (PyPI);
+/// if so it is marked as one in `releases` and the target is picked again.
+/// Only dispatch candidates are checked, so polling stays one feed request
+/// per source; when the check fails, the release is dispatched.
+async fn observe(
+    db: &Database,
+    source: &crate::vcs_sources::UpstreamSource,
+    entry: &UpstreamIndexEntry,
+    releases: &mut [Release],
+    from_feed: bool,
+    checked: &mut HashMap<String, bool>,
+    gate: &ApiGate,
+    now: DateTime<Utc>,
+) -> Option<Observation> {
+    let indexed = entry.current_version.as_deref().filter(|v| !v.is_empty())?;
+    let prev = match db
+        .get_update_record(&entry.repo_name, &entry.attr_path)
+        .await
+    {
+        Ok(prev) => prev,
         Err(e) => {
-            warn!("{}/{}: failed to load packages: {:#}", kind, key, e);
-            return outcome;
+            warn!("{}: failed to read update record: {:#}", entry.attr_path, e);
+            return None;
         },
     };
+    let current = effective_current_version(
+        indexed,
+        prev.as_ref().and_then(|r| r.current_version.as_deref()),
+    )
+    .to_owned();
+    let mut entry = entry.clone();
+    entry.current_version = Some(current.clone());
 
-    for entry in entries {
-        if !configured.contains(&entry.repo_name) {
-            continue;
+    let (latest, decision) = loop {
+        let latest = best_for_package(releases, &entry, &current);
+        let decision = dispatch_decision(&current, &latest, prev.as_ref(), now);
+        if decision != Decision::Dispatch || !from_feed || entry.include_prereleases {
+            break (latest, decision);
         }
-        let Some(current) = entry.current_version.clone().filter(|v| !v.is_empty()) else {
-            continue;
+        let Some(tag) =
+            find_explicit_release(releases.to_vec(), &latest, entry.version_regex.as_deref())
+                .map(|r| r.tag_name)
+        else {
+            break (latest, decision);
         };
-        let latest = best_for_package(&releases, &entry, &current);
-        let prev = match db
-            .record_observation(&entry.repo_name, &entry.attr_path, &current, &latest)
-            .await
-        {
-            Ok(prev) => prev,
-            Err(e) => {
-                warn!("{}: failed to record observation: {:#}", entry.attr_path, e);
-                continue;
+        let flagged = match checked.get(&tag) {
+            Some(&flagged) => flagged,
+            None if gate.is_rate_limited() => false,
+            None => {
+                let release = Release {
+                    tag_name: tag.clone(),
+                    is_prerelease: false,
+                };
+                let flagged = match release_flagged_prerelease(source, &release).await {
+                    Ok(flagged) => flagged,
+                    Err(e) => {
+                        gate.note_error(&e);
+                        debug!(
+                            "{}: prerelease check of {} failed: {:#}",
+                            entry.attr_path, tag, e
+                        );
+                        false
+                    },
+                };
+                checked.insert(tag.clone(), flagged);
+                flagged
             },
         };
-        let decision = dispatch_decision(&current, &latest, prev.as_ref(), now);
-        outcome.observations.push(Observation {
-            entry,
-            current,
-            latest,
-            decision,
-        });
+        if !flagged {
+            break (latest, decision);
+        }
+        info!(
+            "{}: {} is flagged as a prerelease upstream; not dispatching it",
+            entry.attr_path, tag
+        );
+        for r in releases.iter_mut().filter(|r| r.tag_name == tag) {
+            r.is_prerelease = true;
+        }
+    };
+
+    if let Err(e) = db
+        .record_observation(&entry.repo_name, &entry.attr_path, &current, &latest)
+        .await
+    {
+        warn!("{}: failed to record observation: {:#}", entry.attr_path, e);
+        return None;
     }
-    resolve_siblings(&mut outcome.observations);
-    outcome
+    Some(Observation {
+        entry,
+        current,
+        latest,
+        decision,
+    })
 }
 
 /// The sources due for polling now ([`source_due`]); every source when the
@@ -614,6 +825,7 @@ async fn run_poll_cycle(
     updater_config: &UpdaterServiceConfig,
     session_config: &serde_json::Value,
     dry_run_reported: &mut DryRunReported,
+    stop: &Stop,
 ) {
     let due = due_sources(db, sources, poll_interval).await;
     if due.is_empty() {
@@ -640,6 +852,7 @@ async fn run_poll_cycle(
         dry_run_reported,
         cycle_id,
         &mut stats,
+        stop.clone(),
     )
     .await;
     let error = result.err().map(|e| format!("{e:#}"));
@@ -691,6 +904,7 @@ async fn poll_cycle(
     dry_run_reported: &mut DryRunReported,
     cycle_id: Option<i64>,
     stats: &mut WatchCycleStats,
+    mut stop: Stop,
 ) -> anyhow::Result<()> {
     info!(
         "Polling {} of {} upstream sources for new releases ({} polled recently)...",
@@ -701,6 +915,7 @@ async fn poll_cycle(
     let now = Utc::now();
     let configured: Arc<HashSet<String>> = Arc::new(repos.iter().map(|r| r.name.clone()).collect());
     let semaphore = Arc::new(Semaphore::new(POLL_CONCURRENCY));
+    let gate = Arc::new(ApiGate::default());
 
     let mut tasks = JoinSet::new();
     for source_row in due {
@@ -708,11 +923,12 @@ async fn poll_cycle(
         let db = db.clone();
         let configured = Arc::clone(&configured);
         let semaphore = Arc::clone(&semaphore);
+        let gate = Arc::clone(&gate);
         tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 return SourceOutcome::default();
             };
-            poll_one_source(&db, &source_row, &configured, now).await
+            poll_one_source(&db, &source_row, &configured, &gate, now).await
         });
     }
 
@@ -731,16 +947,33 @@ async fn poll_cycle(
     let mut packages_observed = 0;
     let mut backoff = 0;
     let mut observed_repos: HashSet<String> = HashSet::new();
-    while let Some(joined) = tasks.join_next().await {
-        stats.sources_polled += 1;
+    let mut skipped = 0;
+    loop {
+        let joined = tokio::select! {
+            joined = tasks.join_next() => match joined {
+                Some(joined) => joined,
+                None => break,
+            },
+            () = stopped(&mut stop) => {
+                tasks.abort_all();
+                dispatcher.cancel().await;
+                anyhow::bail!("interrupted by a shutdown signal");
+            },
+        };
         let outcome = match joined {
             Ok(outcome) => outcome,
             Err(e) => {
                 warn!("Source poll task panicked: {}", e);
+                stats.sources_polled += 1;
                 stats.sources_failed += 1;
                 continue;
             },
         };
+        if outcome.skipped {
+            skipped += 1;
+            continue;
+        }
+        stats.sources_polled += 1;
         stats.sources_failed += usize::from(outcome.failed);
         stats.new_releases += usize::from(outcome.new_release);
         packages_observed += outcome.observations.len();
@@ -755,6 +988,12 @@ async fn poll_cycle(
         }
     }
 
+    if skipped > 0 {
+        info!(
+            "{} sources not polled (API rate limited); they stay due",
+            skipped
+        );
+    }
     stats.packages_observed = packages_observed;
     for repo in &observed_repos {
         if let Err(e) = db.mark_repo_bootstrapped(repo).await {
@@ -762,7 +1001,9 @@ async fn poll_cycle(
         }
     }
 
-    dispatcher.finish(stats, packages_observed, backoff).await
+    dispatcher
+        .finish(stats, packages_observed, backoff, &mut stop)
+        .await
 }
 
 /// Feeds a poll cycle's dispatched updates to an updater service that is
@@ -933,6 +1174,7 @@ impl<'a> Dispatcher<'a> {
         stats: &mut WatchCycleStats,
         packages_observed: usize,
         backoff: usize,
+        stop: &mut Stop,
     ) -> anyhow::Result<()> {
         for (repo, requests) in std::mem::take(&mut self.held) {
             let roots = self.roots.remove(&repo).unwrap_or_default();
@@ -944,12 +1186,19 @@ impl<'a> Dispatcher<'a> {
         if let Some(RunningService {
             session_id,
             tx,
-            handle,
-        }) = self.service
+            mut handle,
+        }) = self.service.take()
         {
             stats.session_id = Some(session_id.clone());
             drop(tx);
-            let outcome = handle.await.unwrap_or_else(|e| {
+            let joined = tokio::select! {
+                joined = &mut handle => joined,
+                () = stopped(stop) => {
+                    stop_service(self.db, &session_id, handle).await;
+                    anyhow::bail!("interrupted by a shutdown signal (session {session_id} cancelled)");
+                },
+            };
+            let outcome = joined.unwrap_or_else(|e| {
                 warn!("Updater service panicked: {}", e);
                 UpdaterStats {
                     failed: self.dispatched,
@@ -968,6 +1217,41 @@ impl<'a> Dispatcher<'a> {
                 .await?;
         }
         self.error.map_or(Ok(()), Err)
+    }
+
+    /// Stop on a shutdown signal: nothing more is dispatched, the updater
+    /// service (and its updates in flight) is aborted and its session closed
+    /// as `cancelled`.
+    async fn cancel(self) {
+        if let Some(RunningService {
+            session_id,
+            tx,
+            handle,
+        }) = self.service
+        {
+            drop(tx);
+            stop_service(self.db, &session_id, handle).await;
+        }
+    }
+}
+
+/// Abort an updater service, wait (briefly) for its updates to stop and close
+/// its session as `cancelled`. Aborting drops the service's `JoinSet`, which
+/// aborts every update task.
+async fn stop_service(
+    db: &Database,
+    session_id: &str,
+    handle: tokio::task::JoinHandle<UpdaterStats>,
+) {
+    handle.abort();
+    if tokio::time::timeout(SHUTDOWN_GRACE, handle).await.is_err() {
+        warn!("Some update tasks did not stop within {:?}", SHUTDOWN_GRACE);
+    }
+    if let Err(e) = db.close_session(session_id, SessionStatus::Cancelled).await {
+        warn!(
+            "Failed to close interrupted session {}: {:#}",
+            session_id, e
+        );
     }
 }
 
@@ -989,6 +1273,11 @@ mod tests {
         let polled = |minutes, health| SourcePollState {
             last_polled_at: Some(ago(now, minutes)),
             health,
+            consecutive_failures: i64::from(health == SourceHealth::Error),
+        };
+        let failing = |minutes, failures| SourcePollState {
+            consecutive_failures: failures,
+            ..polled(minutes, SourceHealth::Error)
         };
         for (state, due) in [
             (None, true),
@@ -996,6 +1285,7 @@ mod tests {
                 Some(SourcePollState {
                     last_polled_at: None,
                     health: SourceHealth::Ok,
+                    consecutive_failures: 0,
                 }),
                 true,
             ),
@@ -1011,8 +1301,32 @@ mod tests {
             (Some(polled(23 * 60 + 30, SourceHealth::NotFound)), true),
             // Last poll in the future (clock change).
             (Some(polled(-30, SourceHealth::Ok)), false),
+            // Failing sources back off: 1h, 2h, 4h, ... up to a day.
+            (Some(failing(61, 2)), false),
+            (Some(failing(2 * 60, 2)), true),
+            (Some(failing(3 * 60, 3)), false),
+            (Some(failing(4 * 60, 3)), true),
+            (Some(failing(23 * 60, 40)), false),
+            (Some(failing(24 * 60, 40)), true),
         ] {
             assert_eq!(source_due(state.as_ref(), now, hour), due, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn failure_backoff_cases() {
+        let hour = 60 * MIN;
+        for (failures, poll, expected) in [
+            (0, hour, hour),
+            (1, hour, hour),
+            (2, hour, 2 * hour),
+            (5, hour, 16 * hour),
+            (6, hour, 24 * hour),
+            (i64::MAX, hour, 24 * hour),
+            // Never shorter than the poll interval.
+            (3, 48 * hour, 48 * hour),
+        ] {
+            assert_eq!(failure_backoff(poll, failures), expected, "{failures}");
         }
     }
 
@@ -1159,6 +1473,11 @@ mod tests {
     }
 
     fn obs(repo: &str, attr: &str, current: &str, latest: &str, decision: Decision) -> Observation {
+        let pname = attr.rsplit('.').next().map(|p| {
+            p.trim_end_matches("-alias")
+                .trim_end_matches("_0_9")
+                .to_owned()
+        });
         Observation {
             entry: UpstreamIndexEntry {
                 repo_name: repo.into(),
@@ -1169,7 +1488,7 @@ mod tests {
                 current_version: Some(current.into()),
                 src_url: None,
                 drv_path: None,
-                pname: None,
+                pname,
                 semver_strategy: None,
                 version_regex: None,
                 include_prereleases: false,
@@ -1195,6 +1514,9 @@ mod tests {
             obs("", "bar", "2.0", "2.1", AlreadyProposed),
             obs("", "bar-alias", "2.0", "2.1", Dispatch),
             obs("", "baz", "1.0", "1.0", UpToDate),
+            // One source, same versions, but another package (a monorepo's
+            // second crate): independent.
+            obs("", "foo-cli", "1.0", "1.1", Dispatch),
         ];
         resolve_siblings(&mut observations);
         let decisions: Vec<(&str, &str, Decision)> = observations
@@ -1218,6 +1540,7 @@ mod tests {
                 ("", "bar", AlreadyProposed),
                 ("", "bar-alias", Duplicate),
                 ("", "baz", UpToDate),
+                ("", "foo-cli", Dispatch),
             ]
         );
     }

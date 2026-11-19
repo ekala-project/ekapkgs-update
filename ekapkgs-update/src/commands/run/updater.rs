@@ -387,10 +387,16 @@ pub(super) async fn perform_update(
             file_location,
             repo_dir.display()
         );
-        return Ok(UpdateResult::Skipped(format!(
+        // Lasting (the package is defined outside the repository): record a
+        // failure, so the failure backoff stops `watch` re-dispatching it
+        // every poll.
+        let error = anyhow::anyhow!(
             "Package file {file_location} is outside repository {}",
             repo_dir.display()
-        )));
+        );
+        return Ok(attempt
+            .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &error)
+            .await);
     };
     let Some(relative_entry_point) = relative_to_repo(Path::new(eval_entry_point), &repo_dir)
     else {
@@ -400,10 +406,14 @@ pub(super) async fn perform_update(
             eval_entry_point,
             repo_dir.display()
         );
-        return Ok(UpdateResult::Skipped(format!(
+        // A configuration error that lasts: recorded like the one above.
+        let error = anyhow::anyhow!(
             "Entry point {eval_entry_point} is outside repository {}",
             repo_dir.display()
-        )));
+        );
+        return Ok(attempt
+            .fail_setup(UpdatePhase::MetadataExtraction, "entry_point", &error)
+            .await);
     };
 
     // Create a worktree for this update (repo-qualified so the same attr

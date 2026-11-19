@@ -6,13 +6,18 @@
 //!   platform clients via [`UpstreamSource::fetch_all_releases`]
 
 use std::cmp::Ordering;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use anyhow::Context;
 use tracing::{debug, warn};
 
 use crate::database::{SourceHealth, UpstreamIndexEntry};
 use crate::github::parse_github_url;
-use crate::vcs_sources::{HttpStatusError, Release, UpstreamSource, compare_version_components};
+use crate::vcs_sources::{
+    HttpStatusError, Release, UpstreamSource, compare_version_components, is_version_acceptable,
+    version_looks_prerelease,
+};
 
 /// Decide whether an indexed package should be updated, given the releases
 /// polled for its upstream source.
@@ -31,6 +36,35 @@ pub fn update_version_for_entry(
     (compare_version_components(&version, current) == Ordering::Greater).then_some(version)
 }
 
+/// Whether any package tracking a source can use `releases`: for at least one
+/// entry, a release passes its version policy (prerelease and regex filters)
+/// and is either its current version (the feed shows it is up to date) or a
+/// newer one its strategy accepts. A feed whose entries are all filtered out
+/// (a monorepo's feed full of other components' tags, only a new major under
+/// a `minor` strategy, or only releases older than the package) is not an
+/// answer: the next feed or the API may list more.
+pub fn releases_usable(entries: &[UpstreamIndexEntry], releases: &[Release]) -> bool {
+    entries.iter().any(|entry| {
+        let Some(current) = entry.current_version.as_deref().filter(|v| !v.is_empty()) else {
+            return false;
+        };
+        let policy = entry.version_policy();
+        releases.iter().any(|release| {
+            if release.is_prerelease && !policy.include_prereleases {
+                return false;
+            }
+            let Ok(version) = release.resolved_version(policy.version_regex.as_deref()) else {
+                return false;
+            };
+            if !policy.include_prereleases && version_looks_prerelease(&version) {
+                return false;
+            }
+            compare_version_components(&version, current) == Ordering::Equal
+                || is_version_acceptable(current, &version, policy.strategy)
+        })
+    })
+}
+
 /// Releases polled from an upstream source.
 #[derive(Debug, Default)]
 pub struct PolledSource {
@@ -38,53 +72,184 @@ pub struct PolledSource {
     /// Where the source answered from when it redirected to another
     /// repository (a GitHub rename or transfer), as `owner/repo`.
     pub moved_to: Option<String>,
+    /// The releases came from an RSS/Atom feed, which carries no prerelease
+    /// (GitHub) or yanked (PyPI) flags: see [`release_flagged_prerelease`].
+    pub from_feed: bool,
 }
+
+/// Shared by a poll cycle's sources: once a platform API answered 429 (or
+/// GitHub's rate-limit 403), the rest of the cycle makes no more API
+/// fallback requests. Feeds (not rate limited the same way) are still read.
+#[derive(Debug, Default)]
+pub struct ApiGate {
+    rate_limited: AtomicBool,
+}
+
+impl ApiGate {
+    pub fn is_rate_limited(&self) -> bool {
+        self.rate_limited.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Note an API failure; returns whether it was a rate limit.
+    pub fn note_error(&self, err: &anyhow::Error) -> bool {
+        let limited = HttpStatusError::find(err).is_some_and(HttpStatusError::is_rate_limited);
+        if limited && !self.rate_limited.swap(true, AtomicOrdering::Relaxed) {
+            warn!("Upstream API rate limited ({err:#}); no more API polls this cycle");
+        }
+        limited
+    }
+}
+
+/// A source was not polled: it needs the API, which is rate limited for the
+/// rest of the cycle. Nothing is recorded for it, so it stays due.
+#[derive(Debug)]
+pub struct ApiSkipped;
+
+impl std::fmt::Display for ApiSkipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("API rate limited, poll skipped")
+    }
+}
+
+impl std::error::Error for ApiSkipped {}
 
 /// Poll a single upstream source for its releases.
 ///
-/// Uses RSS/Atom feeds when available (GitHub, PyPI) and falls back to API
-/// polling for platforms without feed support. A feed that redirects to
-/// another repository marks the source as moved (the GitHub API redirects to
-/// a numeric repository id, so only the feed shows the new name).
-pub async fn poll_source(source: &UpstreamSource) -> anyhow::Result<PolledSource> {
+/// Uses RSS/Atom feeds when available (GitHub releases then tags, PyPI); the
+/// first feed with entries `usable` accepts wins, so the common case stays
+/// one request. Otherwise the platform API is asked
+/// ([`UpstreamSource::fetch_all_releases`]); when it fails or lists nothing,
+/// the first non-empty feed is used anyway. A feed that redirects to another
+/// repository marks the source as moved (the GitHub API redirects to a
+/// numeric repository id, so only the feed shows the new name).
+pub async fn poll_source(
+    source: &UpstreamSource,
+    usable: impl Fn(&[Release]) -> bool,
+    gate: &ApiGate,
+) -> anyhow::Result<PolledSource> {
+    let label = format!("{}/{}", source.source_type(), source.source_key());
+    poll_with(
+        &label,
+        source.feed_urls(),
+        |url| async move {
+            let (releases, final_url) = poll_feed(&url).await?;
+            Ok((releases, relocation(source, &final_url)))
+        },
+        || async {
+            source
+                .fetch_all_releases()
+                .await
+                .with_context(|| format!("API poll failed for {label}"))
+        },
+        usable,
+        gate,
+    )
+    .await
+}
+
+/// [`poll_source`] with the requests passed in (tested without network).
+/// `feed` returns a feed's releases and the relocation it showed.
+pub async fn poll_with<F, FFut, A, AFut>(
+    label: &str,
+    feed_urls: Vec<String>,
+    feed: F,
+    api: A,
+    usable: impl Fn(&[Release]) -> bool,
+    gate: &ApiGate,
+) -> anyhow::Result<PolledSource>
+where
+    F: Fn(String) -> FFut,
+    FFut: Future<Output = anyhow::Result<(Vec<Release>, Option<String>)>>,
+    A: FnOnce() -> AFut,
+    AFut: Future<Output = anyhow::Result<Vec<Release>>>,
+{
     let mut moved_to = None;
-    for feed_url in source.feed_urls() {
-        match poll_feed(&feed_url).await {
-            Ok((releases, final_url)) => {
+    // First feed that had entries, none of them usable.
+    let mut unusable: Option<Vec<Release>> = None;
+    for feed_url in feed_urls {
+        match feed(feed_url.clone()).await {
+            Ok((releases, relocated)) => {
                 if moved_to.is_none() {
-                    moved_to = relocation(source, &final_url);
+                    moved_to = relocated;
                 }
-                if !releases.is_empty() {
-                    return Ok(PolledSource { releases, moved_to });
+                if releases.is_empty() {
+                    debug!("{label}: feed {feed_url} returned no entries");
+                } else if usable(&releases) {
+                    return Ok(PolledSource {
+                        releases,
+                        moved_to,
+                        from_feed: true,
+                    });
+                } else {
+                    debug!("{label}: no entry of feed {feed_url} is usable");
+                    unusable.get_or_insert(releases);
                 }
-                debug!(
-                    "{}/{}: feed {} returned no entries",
-                    source.source_type(),
-                    source.source_key(),
-                    feed_url
-                );
             },
-            Err(e) => {
-                debug!(
-                    "{}/{}: feed {} failed: {}",
-                    source.source_type(),
-                    source.source_key(),
-                    feed_url,
-                    e
-                );
-            },
+            Err(e) => debug!("{label}: feed {feed_url} failed: {e:#}"),
         }
     }
 
-    // Fall back to existing API-based fetching
-    let releases = source.fetch_all_releases().await.with_context(|| {
-        format!(
-            "API poll failed for {}/{}",
-            source.source_type(),
-            source.source_key()
-        )
-    })?;
-    Ok(PolledSource { releases, moved_to })
+    let from_feed = |releases| PolledSource {
+        releases,
+        moved_to: moved_to.clone(),
+        from_feed: true,
+    };
+    if gate.is_rate_limited() {
+        return match unusable {
+            Some(releases) => Ok(from_feed(releases)),
+            None => Err(ApiSkipped.into()),
+        };
+    }
+    match api().await {
+        Ok(releases) if releases.is_empty() && unusable.is_some() => {
+            Ok(from_feed(unusable.unwrap_or_default()))
+        },
+        Ok(releases) => Ok(PolledSource {
+            releases,
+            moved_to,
+            from_feed: false,
+        }),
+        Err(e) => {
+            gate.note_error(&e);
+            match unusable {
+                Some(releases) => {
+                    debug!("{label}: API fallback failed, using the feed: {e:#}");
+                    Ok(from_feed(releases))
+                },
+                None => Err(e),
+            }
+        },
+    }
+}
+
+/// Whether the platform flags a release the feed listed as a prerelease
+/// (GitHub's release `prerelease`) or withdrawn (a yanked PyPI version).
+/// Feeds carry neither flag. One API request; only asked for a release about
+/// to be dispatched. Other platforms' releases come from their APIs already.
+pub async fn release_flagged_prerelease(
+    source: &UpstreamSource,
+    release: &Release,
+) -> anyhow::Result<bool> {
+    match source {
+        UpstreamSource::GitHub { owner, repo } => {
+            let token = std::env::var("GITHUB_TOKEN").ok();
+            Ok(crate::github::fetch_github_release_by_tag(
+                owner,
+                repo,
+                &release.tag_name,
+                token.as_deref(),
+            )
+            .await?
+            .is_some_and(|r| r.prerelease))
+        },
+        UpstreamSource::PyPI { pname } => {
+            crate::pypi::release_is_yanked(pname, &release.tag_name).await
+        },
+        UpstreamSource::GitLab { .. }
+        | UpstreamSource::SourceHut { .. }
+        | UpstreamSource::DirectoryListing { .. }
+        | UpstreamSource::Script { .. } => Ok(false),
+    }
 }
 
 /// The repository a source answered from, when a request for it was
@@ -277,6 +442,236 @@ pub fn upstream_source_from_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn releases(tags: &[&str]) -> Vec<Release> {
+        tags.iter()
+            .map(|t| Release {
+                tag_name: (*t).to_owned(),
+                is_prerelease: false,
+            })
+            .collect()
+    }
+
+    fn entry(current: &str, regex: Option<&str>, strategy: Option<&str>) -> UpstreamIndexEntry {
+        UpstreamIndexEntry {
+            repo_name: String::new(),
+            attr_path: "foo".into(),
+            upstream_type: "github".into(),
+            upstream_key: "o/r".into(),
+            instance: None,
+            current_version: Some(current.into()),
+            src_url: None,
+            drv_path: None,
+            pname: None,
+            semver_strategy: strategy.map(str::to_owned),
+            version_regex: regex.map(str::to_owned),
+            include_prereleases: false,
+        }
+    }
+
+    #[test]
+    fn releases_usable_cases() {
+        let monorepo = releases(&["vscode-v0.3.0", "vscode-v0.2.0"]);
+        let regex = Some(r"^cli-v(.+)$");
+        assert!(!releases_usable(&[entry("1.0.0", regex, None)], &monorepo));
+        assert!(releases_usable(
+            &[entry("1.0.0", regex, None)],
+            &releases(&["cli-v1.0.0"])
+        ));
+        // Without a regex, other components' tags don't resolve to the
+        // package's versions either.
+        assert!(!releases_usable(&[entry("1.0.0", None, None)], &monorepo));
+        // Only a new major under a minor strategy: not usable.
+        assert!(!releases_usable(
+            &[entry("1.4.0", None, Some("minor"))],
+            &releases(&["v2.0.0"])
+        ));
+        // Any package of the source suffices.
+        assert!(releases_usable(
+            &[
+                entry("1.0.0", regex, None),
+                entry("0.2.0", Some(r"^vscode-v(.+)$"), None)
+            ],
+            &monorepo
+        ));
+        // The current version: up to date, usable. Only older ones: not.
+        assert!(releases_usable(
+            &[entry("1.4.0", None, Some("minor"))],
+            &releases(&["v2.0.0", "v1.4.0"])
+        ));
+        assert!(!releases_usable(
+            &[entry("1.4.0", None, None)],
+            &releases(&["v1.3.0", "v1.2.0"])
+        ));
+        assert!(!releases_usable(&[entry("1.0.0", None, None)], &[]));
+        assert!(!releases_usable(&[], &monorepo));
+    }
+
+    /// Feed outcome: `None` = request failed.
+    type Canned = Vec<(&'static str, Option<Vec<Release>>)>;
+
+    async fn run_poll(
+        feeds: Canned,
+        api: Option<Vec<Release>>,
+        api_status: Option<reqwest::StatusCode>,
+        usable: impl Fn(&[Release]) -> bool,
+        gate: &ApiGate,
+    ) -> (anyhow::Result<PolledSource>, Vec<String>) {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let urls = feeds.iter().map(|(u, _)| (*u).to_owned()).collect();
+        let result = poll_with(
+            "test",
+            urls,
+            |url: String| {
+                calls.lock().unwrap().push(url.clone());
+                let canned = feeds
+                    .iter()
+                    .find(|(u, _)| *u == url)
+                    .and_then(|(_, r)| r.clone());
+                async move {
+                    canned
+                        .map(|r| (r, None))
+                        .ok_or_else(|| anyhow::anyhow!("feed failed"))
+                }
+            },
+            || {
+                calls.lock().unwrap().push("api".to_owned());
+                async move {
+                    match (api, api_status) {
+                        (Some(r), _) => Ok(r),
+                        (None, Some(status)) => {
+                            Err(HttpStatusError::new("GitHub tags API request", status).into())
+                        },
+                        (None, None) => Err(anyhow::anyhow!("api failed")),
+                    }
+                }
+            },
+            usable,
+            gate,
+        )
+        .await;
+        (result, calls.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn poll_falls_back_until_usable() {
+        let wanted = |r: &[Release]| r.iter().any(|r| r.tag_name.starts_with("cli-"));
+        let tags = |r: &anyhow::Result<PolledSource>| -> Vec<String> {
+            r.as_ref()
+                .unwrap()
+                .releases
+                .iter()
+                .map(|r| r.tag_name.clone())
+                .collect()
+        };
+        let gate = ApiGate::default();
+
+        // Usable releases feed: one request.
+        let (r, calls) = run_poll(
+            vec![
+                ("releases", Some(releases(&["cli-v1.0"]))),
+                ("tags", Some(releases(&["cli-v0.9"]))),
+            ],
+            None,
+            None,
+            wanted,
+            &gate,
+        )
+        .await;
+        assert_eq!(
+            (tags(&r), calls),
+            (vec!["cli-v1.0".into()], vec!["releases".into()])
+        );
+        assert!(r.unwrap().from_feed);
+
+        // Releases feed without usable entries: tags feed.
+        let (r, calls) = run_poll(
+            vec![
+                ("releases", Some(releases(&["vscode-v1.0"]))),
+                ("tags", Some(releases(&["cli-v1.0"]))),
+            ],
+            None,
+            None,
+            wanted,
+            &gate,
+        )
+        .await;
+        assert_eq!(tags(&r), vec!["cli-v1.0"]);
+        assert_eq!(calls, vec!["releases", "tags"]);
+
+        // No feed usable: the API.
+        let (r, calls) = run_poll(
+            vec![
+                ("releases", Some(releases(&["vscode-v1.0"]))),
+                ("tags", Some(Vec::new())),
+            ],
+            Some(releases(&["cli-v1.0", "vscode-v1.0"])),
+            None,
+            wanted,
+            &gate,
+        )
+        .await;
+        assert_eq!(tags(&r), vec!["cli-v1.0", "vscode-v1.0"]);
+        assert_eq!(calls, vec!["releases", "tags", "api"]);
+        assert!(!r.unwrap().from_feed);
+
+        // API failed or empty: the unusable feed is still an answer.
+        for api in [None, Some(Vec::new())] {
+            let (r, _) = run_poll(
+                vec![("releases", Some(releases(&["vscode-v1.0"])))],
+                api,
+                None,
+                wanted,
+                &gate,
+            )
+            .await;
+            assert_eq!(tags(&r), vec!["vscode-v1.0"]);
+        }
+
+        // Every feed failed, API failed: the API's error.
+        let (r, _) = run_poll(vec![("releases", None)], None, None, wanted, &gate).await;
+        assert_eq!(r.unwrap_err().to_string(), "api failed");
+        assert!(!gate.is_rate_limited());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_stops_api_fallbacks() {
+        let gate = ApiGate::default();
+        let any = |_: &[Release]| true;
+        let (r, _) = run_poll(
+            Vec::new(),
+            None,
+            Some(reqwest::StatusCode::FORBIDDEN),
+            any,
+            &gate,
+        )
+        .await;
+        assert!(HttpStatusError::find(&r.unwrap_err()).is_some());
+        assert!(gate.is_rate_limited());
+
+        // Later sources needing the API are skipped without a request.
+        let (r, calls) = run_poll(
+            vec![("releases", Some(Vec::new()))],
+            Some(releases(&["v1"])),
+            None,
+            any,
+            &gate,
+        )
+        .await;
+        assert!(r.unwrap_err().downcast_ref::<ApiSkipped>().is_some());
+        assert_eq!(calls, vec!["releases"]);
+        // ... unless a feed listed something.
+        let (r, calls) = run_poll(
+            vec![("releases", Some(releases(&["v0"])))],
+            Some(releases(&["v1"])),
+            None,
+            |_: &[Release]| false,
+            &gate,
+        )
+        .await;
+        assert_eq!(r.unwrap().releases[0].tag_name, "v0");
+        assert_eq!(calls, vec!["releases"]);
+    }
 
     #[test]
     fn github_feed_uses_tag_from_link_not_release_name() {

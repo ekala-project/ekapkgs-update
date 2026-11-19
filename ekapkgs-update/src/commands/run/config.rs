@@ -543,7 +543,7 @@ impl RunConfig {
 /// Wait for SIGINT (Ctrl-C) or SIGTERM (systemd stop); returns its name.
 ///
 /// A signal whose handler cannot be installed is never reported.
-async fn shutdown_signal() -> &'static str {
+pub async fn shutdown_signal() -> &'static str {
     let ctrl_c = async {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;

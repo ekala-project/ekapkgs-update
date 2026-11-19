@@ -25,7 +25,7 @@ startup ── recover interrupted state ── register repos
    │
    ├─ every --poll-interval: poll ── dispatch new releases ── update session
    │
-   └─ every --index-refresh-hours: sync + re-index every repo
+   └─ every --index-refresh-hours: sync + re-index each repo whose index expired
 ```
 
 ### 1. Sync (multi-repo mode)
@@ -101,7 +101,7 @@ its own strategy, regex and prerelease settings. The checks run in this order:
 | backlog | newer than current, but not newer than the baseline |
 | already proposed | this exact version was already built and proposed |
 | backoff | this exact version failed recently and its backoff hasn't expired |
-| duplicate | an alias with the same source, current and target version is handled instead |
+| duplicate | an alias with the same source, `pname`, current and target version is handled instead |
 | **dispatch** | otherwise |
 
 Aliases (for example `python312Packages.foo` and `python313Packages.foo`) are
@@ -112,6 +112,28 @@ dispatched.
 A failed attempt only blocks **that** version: a newer release is dispatched
 right away, even while the backoff for the failed version is still running.
 
+The current version is the newer of the indexed one and the one recorded in
+`updates`, so an update merged between two re-indexes is not dispatched again.
+
+Feeds carry no prerelease or yanked flags. Before a release from a feed is
+dispatched to a package that excludes prereleases, the platform is asked once
+whether it is a GitHub prerelease or a yanked PyPI version; if it is, the next
+best release is used instead.
+
+### Polling
+
+- A source's feeds are tried in order (GitHub: `releases.atom`, then
+  `tags.atom`). The first feed with an entry some package can use (its
+  current version, or a newer one its regex and strategy accept) wins.
+  Otherwise the platform API is asked.
+- A source whose polls keep failing backs off: the wait doubles with each
+  consecutive failure, up to a day. Sources that were not found are rechecked
+  daily.
+- Once an API answers 429 (or GitHub's rate-limit 403), the rest of the cycle
+  makes no more API requests. The sources that needed one stay due.
+- After each poll cycle, known vulnerabilities are rescanned for packages that
+  are due (`--skip-cve` disables this).
+
 ### 5. Sessions and cycles
 
 - A poll cycle that dispatches at least one update creates an update session
@@ -121,7 +143,9 @@ right away, even while the backoff for the failed version is still running.
   the dashboard's Watch page.
 - Uneventful poll cycles are pruned after 7 days.
 
-If the watch process is killed, the next start closes out what it left behind:
+SIGINT or SIGTERM during a cycle stops dispatching, aborts the updates in
+flight and closes the session as `cancelled`. If the watch process is killed,
+the next start closes out what it left behind:
 
 - running cycles are marked `failed`
 - repos stuck in `indexing` are marked `error`
@@ -131,7 +155,7 @@ If the watch process is killed, the next start closes out what it left behind:
 
 ```toml
 [watch]
-poll_interval_minutes = 10   # default: 10 (minimum 1)
+poll_interval_minutes = 60   # default: 60 (minimum 1)
 index_refresh_hours = 24     # default: 24
 
 [[repos]]
@@ -157,7 +181,7 @@ history is kept.
 |------|---------|-------------|
 | `-f, --file` | `default.nix` | Entry point (legacy single-repo mode) |
 | `-d, --database` | XDG data dir | SQLite database |
-| `--poll-interval` | `10` | Minutes between polls |
+| `--poll-interval` | `60` | Minutes between polls |
 | `--index-refresh-hours` | `24` | Hours between sync + re-index |
 | `--upstream` | inferred | Upstream remote (legacy mode) |
 | `--fork` | `origin` | Remote to push branches to (legacy mode) |

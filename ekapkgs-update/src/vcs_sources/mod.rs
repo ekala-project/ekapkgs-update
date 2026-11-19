@@ -417,34 +417,26 @@ impl UpstreamSource {
                     debug!("GitHub releases endpoint failed, falling back to tags: {e}");
                 }
 
-                match all_releases {
-                    Ok(gh_releases) if !gh_releases.is_empty() => Ok(gh_releases
+                let releases = all_releases.map(|releases| {
+                    releases
                         .into_iter()
                         .map(|r| Release {
                             tag_name: r.tag_name,
                             is_prerelease: r.prerelease,
                         })
-                        .collect()),
-                    Ok(_) => {
-                        debug!("GitHub releases endpoint returned empty, falling back to tags");
-                        Ok(fetch_github_tags(owner, repo, token.as_deref())
-                            .await?
-                            .into_iter()
-                            .map(|t| Release {
-                                tag_name: t.name,
-                                is_prerelease: false,
-                            })
-                            .collect())
-                    },
-                    Err(_) => Ok(fetch_github_tags(owner, repo, token.as_deref())
+                        .collect()
+                });
+                releases_or_tags(releases, || async {
+                    Ok(fetch_github_tags(owner, repo, token.as_deref())
                         .await?
                         .into_iter()
                         .map(|t| Release {
                             tag_name: t.name,
                             is_prerelease: false,
                         })
-                        .collect()),
-                }
+                        .collect())
+                })
+                .await
             },
             UpstreamSource::GitLab {
                 instance,
@@ -466,15 +458,17 @@ impl UpstreamSource {
                     debug!("GitLab releases endpoint failed, falling back to tags: {e}");
                 }
 
-                match all_releases {
-                    Ok(gl_releases) => Ok(gl_releases
+                let releases = all_releases.map(|releases| {
+                    releases
                         .into_iter()
                         .map(|r| Release {
                             tag_name: r.tag_name,
                             is_prerelease: r.upcoming_release,
                         })
-                        .collect()),
-                    Err(_) => Ok(
+                        .collect()
+                });
+                releases_or_tags(releases, || async {
+                    Ok(
                         fetch_gitlab_tags(instance, owner, project, token.as_deref())
                             .await?
                             .into_iter()
@@ -483,8 +477,9 @@ impl UpstreamSource {
                                 is_prerelease: false,
                             })
                             .collect(),
-                    ),
-                }
+                    )
+                })
+                .await
             },
             UpstreamSource::SourceHut { owner, repo } => {
                 let token = env::var("SOURCEHUT_TOKEN").ok();
@@ -727,6 +722,27 @@ impl UpstreamSource {
             | Self::DirectoryListing { .. }
             | Self::Script { .. } => Vec::new(),
         }
+    }
+}
+
+/// The releases a releases endpoint returned, or the project's tags when it
+/// failed or listed none (projects that only push tags). Shared by GitHub and
+/// GitLab, so a tags-only project is never reported as having no releases.
+pub(crate) async fn releases_or_tags<F, Fut>(
+    releases: anyhow::Result<Vec<Release>>,
+    tags: F,
+) -> anyhow::Result<Vec<Release>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<Release>>>,
+{
+    match releases {
+        Ok(releases) if !releases.is_empty() => Ok(releases),
+        Ok(_) => {
+            debug!("Releases endpoint listed nothing, falling back to tags");
+            tags().await
+        },
+        Err(_) => tags().await,
     }
 }
 

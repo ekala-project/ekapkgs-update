@@ -235,7 +235,7 @@ pub struct GithubConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WatchFileConfig {
-    /// Feed poll interval in minutes (default: 10).
+    /// Feed poll interval in minutes (default: 60).
     pub poll_interval_minutes: Option<u64>,
 
     /// Full index refresh interval in hours (default: 24).

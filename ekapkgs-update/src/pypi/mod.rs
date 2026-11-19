@@ -120,6 +120,44 @@ pub async fn fetch_release_files(pname: &str, version: &str) -> anyhow::Result<V
     Ok(release.urls)
 }
 
+#[derive(Debug, Deserialize)]
+struct PypiReleaseInfoResponse {
+    info: PypiReleaseInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiReleaseInfo {
+    #[serde(default)]
+    yanked: bool,
+}
+
+/// Whether one release of a PyPI project was yanked
+/// (`https://pypi.org/pypi/{pname}/{version}/json`, `info.yanked`).
+///
+/// The RSS feed lists yanked releases like any other.
+pub async fn release_is_yanked(pname: &str, version: &str) -> anyhow::Result<bool> {
+    let url = format!("https://pypi.org/pypi/{pname}/{version}/json");
+
+    debug!("Fetching PyPI release info from {}", url);
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("User-Agent", "ekapkgs-update")
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    if !response.status().is_success() {
+        return Err(HttpStatusError::new("PyPI API request", response.status()).into());
+    }
+
+    let release: PypiReleaseInfoResponse = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))?;
+    Ok(release.info.yanked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
