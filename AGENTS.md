@@ -107,6 +107,7 @@ ekapkgs-update/                     # Main CLI crate
         index.rs                    #   Per-repo upstream index: one `iets eval-jobs` pass with --apply → upstream_index
         feeds.rs                    #   Feed polling (RSS/Atom/API), per-entry version policy, UpstreamSource reconstruction, source health (moved/not found)
         listener.rs                 #   Event loop: poll cycles, observe-only bootstrap, dispatch decisions
+        webhook.rs                  #   GitHub webhook endpoint (axum, --webhook-listen): verify, dedupe, trigger head checks / withdraw closed PRs
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
       retry.rs, worktrees.rs        # Failure recovery and worktree management
@@ -119,6 +120,9 @@ ekapkgs-update/                     # Main CLI crate
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
       http_status.rs                #   HttpStatusError: typed non-success status from release endpoints (404/410 = not found)
+    github/app.rs                   # GitHub App: RS256 JWT (openssl), installation tokens (cached), bot identity
+    github/auth.rs                  # Credential choice: App installation tokens else $GITHUB_TOKEN; git env (bot identity + token helper)
+    github/webhook.rs               # Pure: X-Hub-Signature-256 verification, push/pull_request payloads → WebhookEvent
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab: custom instances, nested groups, fetchFromGitLab `api/v4/projects/<encoded>` URLs; SourceHut: GraphQL `user { repository(name:) }`, needs SOURCEHUT_TOKEN)
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
@@ -265,7 +269,7 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 **Event loop** (`commands/watch/listener.rs`):
 
 - The first poll runs immediately after the startup index. After that, polls run every `poll_interval`, and sync + re-index runs every `index_refresh`.
-- **Merged PRs are picked up within minutes** (`refresh.rs`): each index records the commit it was built from (`watched_repos.indexed_commit`, kept by a failed build). A background task checks every `--head-check-interval` minutes (default 5, `0` = off; NixOS `watch.headCheckMinutes`): `git ls-remote` of the managed repo's base branch (no API quota, no fetch); when it moved, sync; when `HEAD` then differs from `indexed_commit`, re-index the repo (a full index takes seconds). Re-indexing registers the merged version as `current_version`, which marks the proposal merged (`upsert_package_info`). Poll cycles reload the sources from the database. Webhooks are meant to trigger the same check.
+- **Merged PRs are picked up within minutes** (`refresh.rs`): each index records the commit it was built from (`watched_repos.indexed_commit`, kept by a failed build). A background task checks every `--head-check-interval` minutes (default 5, `0` = off; NixOS `watch.headCheckMinutes`): `git ls-remote` of the managed repo's base branch (no API quota, no fetch); when it moved, sync; when `HEAD` then differs from `indexed_commit`, re-index the repo (a full index takes seconds). Re-indexing registers the merged version as `current_version`, which marks the proposal merged (`upsert_package_info`). Poll cycles reload the sources from the database. With `--webhook-listen`, webhook deliveries trigger the same check for their repo immediately (see GitHub App and Webhooks).
 - **Restarts resume from the database.** At startup every repo is synced, but a repo's index is reused when its last build succeeded within `index_refresh`, indexed something, was built at the current `HEAD` (`indexed_commit`), and has the same `watched_repos.index_config` (`index_config`: binary path, entry points, `select`; a new deploy or config change re-indexes; `index_reuse_remaining`). The re-index timer starts from the oldest reused index. Each poll cycle only polls sources that are due by `upstream_sources.last_polled_at` (`source_due`: half a poll interval of slack; `not_found` sources daily); a cycle with nothing due records no `watch_cycles` row.
 - Each poll is a `watch_cycles` row. Each source's health is recorded in `upstream_sources`, and each package's observation in `updates` (`record_observation`). A source that cannot be observed (poll failed, no releases/tags, not pollable) marks its packages `upstream_error` (`record_unobserved` → `record_upstream_error`, baseline and backoff kept), so newly indexed packages never stay `pending`.
 - **Observe-only bootstrap:** the first observation of a package records `baseline_version` and dispatches nothing. Only releases newer than the baseline are dispatched; the backlog is left to `run`.
@@ -393,6 +397,17 @@ Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system string
 ### Config File Values as CLI Defaults (`main.rs`, `cli.rs`)
 
 `main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments). `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
+
+### GitHub App and Webhooks (`github/app.rs`, `github/auth.rs`, `commands/watch/webhook.rs`)
+
+`[github_app]` in the config file (`client_id`, `private_key_file`, `webhook_secret_file`; overridable by `EKAPKGS_GITHUB_APP_CLIENT_ID` / `EKAPKGS_GITHUB_APP_KEY_FILE` / `EKAPKGS_GITHUB_WEBHOOK_SECRET_FILE`) is loaded by `main.rs` (`auth::configure`). Every GitHub credential goes through `github::auth`: `token_for(owner, repo)` (PRs, reviews, forks: installation token, else `$GITHUB_TOKEN`), `read_token()` (release lookups: `$GITHUB_TOKEN`, else any installation token) and `git_env(owner, repo)`. `git::create_and_push_branch` and the standalone PR path commit and push with `git::github_git_env`: the bot's identity (`<slug>[bot]`, `<id>+<slug>[bot]@users.noreply.github.com`) and a `GIT_CONFIG_*` credential helper reading the token from `$EKAPKGS_GIT_TOKEN` (never argv or URLs). Without an app it returns nothing and git's own config (the NixOS credential helper) applies. Do not read `GITHUB_TOKEN` directly in new code.
+
+`watch --webhook-listen <addr>` serves `POST /github/webhook` behind a TLS-terminating proxy. Deliveries are verified (`X-Hub-Signature-256`, constant time), deduplicated by `X-GitHub-Delivery` in `webhook_deliveries` (kept 7 days, with an `outcome`), matched to a watched repo by `pr_config` owner/repo, and answered at once:
+
+- a push to the base branch, or a merged PR → the head watcher checks that repo now (forced sync, then re-index if `HEAD` moved);
+- a PR closed unmerged → `record_pr_closed`: the `proposed` row (by `pr_number`) becomes `failed` with `failed_version` = the proposal and failure backoff, so the same version is retried after the backoff and a newer release is dispatched at once.
+
+GitHub never redelivers on its own; the periodic head check covers missed deliveries. NixOS: `githubApp.{clientId,privateKeyFile,webhookSecretFile}` (secrets via `LoadCredential=`) and `watch.webhook.{enable,host,port}` (default `127.0.0.1:3041`). App permissions: Contents and Pull requests read & write; events: Push, Pull request.
 
 ### Explicit Upstream Source
 

@@ -570,6 +570,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "axum",
  "camino",
  "chrono",
  "clap",
@@ -592,6 +593,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",

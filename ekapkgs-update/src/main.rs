@@ -67,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
         args
     };
 
+    github::auth::configure(&config_file.github_app)?;
+
     args.command.execute(config_file).await
 }
 

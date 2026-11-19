@@ -402,11 +402,11 @@ impl UpstreamSource {
     pub async fn fetch_all_releases(&self) -> anyhow::Result<Vec<Release>> {
         match self {
             UpstreamSource::GitHub { owner, repo } => {
-                let token = env::var("GITHUB_TOKEN").ok();
+                let token = crate::github::auth::read_token().await;
 
                 if token.is_none() {
                     warn!(
-                        "GITHUB_TOKEN not set - using unauthenticated GitHub API (60 \
+                        "No GITHUB_TOKEN or GitHub App - using unauthenticated GitHub API (60 \
                          requests/hour rate limit)"
                     );
                 }
@@ -597,7 +597,7 @@ impl UpstreamSource {
     async fn fetch_tag_releases(&self) -> anyhow::Result<Option<Vec<Release>>> {
         let tags: Vec<String> = match self {
             UpstreamSource::GitHub { owner, repo } => {
-                let token = env::var("GITHUB_TOKEN").ok();
+                let token = crate::github::auth::read_token().await;
                 fetch_github_tags(owner, repo, token.as_deref())
                     .await?
                     .into_iter()
