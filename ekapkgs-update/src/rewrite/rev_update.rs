@@ -87,7 +87,8 @@ pub(crate) fn extract_rev_value(content: &str) -> Result<String> {
     use regex::Regex;
 
     // Match: rev = "...";
-    let pattern = r#"(?m)\s*rev\s*=\s*"([^"]*)"\s*;"#;
+    // `rev` must start a binding: not `src_rev`, `myrev` or `src.rev`.
+    let pattern = r#"(?m)(?:^|[\s{;])rev\s*=\s*"([^"]*)"\s*;"#;
     let re = Regex::new(pattern)?;
 
     let caps = re
@@ -168,5 +169,24 @@ mod tests {
         let result = extract_rev_value(content);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "v${version}");
+    }
+
+    #[test]
+    fn test_extract_rev_value_boundary() {
+        // (content, expected rev)
+        let cases = [
+            ("{ rev = \"v1\"; }", Some("v1")),
+            ("{\nrev = \"v1\";\n}", Some("v1")),
+            ("{ src_rev = \"v0\"; rev = \"v1\"; }", Some("v1")),
+            ("{ myrev = \"v0\"; }", None),
+            ("{ src.rev = \"v0\"; }", None),
+        ];
+        for (content, expected) in cases {
+            assert_eq!(
+                extract_rev_value(content).ok().as_deref(),
+                expected,
+                "{content}"
+            );
+        }
     }
 }

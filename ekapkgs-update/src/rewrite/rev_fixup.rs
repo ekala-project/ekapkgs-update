@@ -107,7 +107,7 @@ pub fn try_fixup_stale_rev(content: &str, tag_name: &str, new_version: &str) -> 
     // Replace rev = "<40-hex-sha>" with rev = "<new_rev_nix>"
     // We use replacen on the raw string to avoid regex capture group conflicts
     // with Nix's ${...} interpolation syntax.
-    let pattern = Regex::new(r#"(?m)(\s*rev\s*=\s*)"[0-9a-fA-F]{40}"(\s*;)"#)?;
+    let pattern = Regex::new(r#"(?m)((?:^|[\s{;])rev\s*=\s*)"[0-9a-fA-F]{40}"(\s*;)"#)?;
     let caps = pattern.captures(content).ok_or_else(|| {
         RewriteError::attr_not_found("rev fixup (could not locate commit SHA rev in file)")
     })?;

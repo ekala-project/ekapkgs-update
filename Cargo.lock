@@ -583,7 +583,6 @@ dependencies = [
  "reqwest",
  "rlimit",
  "rnix",
- "semver",
  "serde",
  "serde_json",
  "shellexpand",

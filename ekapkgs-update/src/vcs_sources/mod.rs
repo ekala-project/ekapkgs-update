@@ -6,13 +6,14 @@ use std::{env, fmt};
 
 use anyhow::Context;
 use regex::Regex;
-use semver::Version;
 use tokio::process::Command;
 use tracing::{debug, info, trace, warn};
 
 mod http_status;
+mod version_order;
 
 pub use http_status::HttpStatusError;
+pub use version_order::compare_version_components;
 
 use crate::github::{fetch_github_releases, fetch_github_tags, parse_github_url};
 use crate::gitlab::{fetch_gitlab_releases, fetch_gitlab_tags, parse_gitlab_url};
@@ -785,16 +786,21 @@ pub fn find_best_release(
 
     // Sort all releases by version descending (newest first) so we can
     // short-circuit as soon as we find the first compatible release.
-    let mut releases = releases;
-    releases.sort_by(|a, b| {
-        let version_a = extract_version_from_tag(&a.tag_name);
-        let version_b = extract_version_from_tag(&b.tag_name);
-        version_cmp_desc(version_a, version_b)
-    });
+    // The sort key is the version the filters see: with a `version_regex`,
+    // the captured version (tags it doesn't match sort by their prefix-stripped
+    // version; they are rejected by the filter anyway).
+    let sort_key = |r: &Release| {
+        r.resolved_version(version_regex)
+            .unwrap_or_else(|_| r.version().to_owned())
+    };
+    let mut releases: Vec<(String, Release)> =
+        releases.into_iter().map(|r| (sort_key(&r), r)).collect();
+    releases.sort_by(|(a, _), (b, _)| version_cmp_desc(a, b));
 
     // Return the first (newest) release that passes all filters.
     releases
         .into_iter()
+        .map(|(_, r)| r)
         .find(|r| {
             r.matches(
                 current_version,
@@ -812,34 +818,10 @@ pub fn find_best_release(
         })
 }
 
-/// Compare two version strings descendingly (newest first).
-///
-/// Tries to parse both sides as semver (after stripping a leading `v`) and
-/// returns `b.cmp(&a)` so that the larger version sorts first.
-///
-/// To maintain a valid total order (required by Rust's sort), this function
-/// ensures parseable and non-parseable versions are partitioned consistently:
-/// parseable versions always sort before non-parseable versions (when descending,
-/// this means parseable versions are considered "newer" and appear first).
+/// Compare two version strings descendingly (newest first), using
+/// [`compare_version_components`] (a total order, as `sort_by` requires).
 fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    match (
-        Version::parse(a.trim_start_matches('v')),
-        Version::parse(b.trim_start_matches('v')),
-    ) {
-        // Both parse as semver: use semantic version comparison (descending)
-        (Ok(va), Ok(vb)) => vb.cmp(&va),
-
-        // Both fail to parse: use string comparison (descending)
-        (Err(_), Err(_)) => b.cmp(a),
-
-        // One parses, one doesn't: parseable versions always sort first (descending)
-        // This ensures transitivity: if a and c both parse, and b doesn't, then
-        // a > b and c > b, and a vs c is compared via semver (transitive).
-        (Ok(_), Err(_)) => Ordering::Less, // a is parseable, sorts first (less in descending)
-        (Err(_), Ok(_)) => Ordering::Greater, // b is parseable, sorts first
-    }
+    compare_version_components(b, a)
 }
 
 /// Extract version from tag name by pruning leading non-numerical characters
@@ -865,6 +847,7 @@ fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
 /// assert_eq!(extract_version_from_tag("release-2.3.4"), "2.3.4");
 /// assert_eq!(extract_version_from_tag("version-1.2.3"), "1.2.3");
 /// assert_eq!(extract_version_from_tag("1.0.0"), "1.0.0");
+/// assert_eq!(extract_version_from_tag("lz4-1.9.4"), "1.9.4");
 /// assert_eq!(extract_version_from_tag("1.2.3-unstable"), "1.2.3");
 /// assert_eq!(
 ///     extract_version_from_tag("v2.0.0-unstable-2024-01-01"),
@@ -873,12 +856,27 @@ fn version_cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
 /// ```
 pub fn extract_version_from_tag(tag: &str) -> &str {
     // Find the first digit in the tag
-    let version = if let Some(pos) = tag.find(|c: char| c.is_ascii_digit()) {
-        &tag[pos..]
-    } else {
+    let Some(pos) = tag.find(|c: char| c.is_ascii_digit()) else {
         // If no digit found, return the original tag
         return tag;
     };
+    let mut version = &tag[pos..];
+
+    // A name ending in digits (`lz4-1.9.4`, `gtk4-4.12.0`, `py3_2.0`): the
+    // first digit belongs to the name when it follows at least two letters
+    // and its number is followed by `-`/`_` and another number.
+    let letters_before = tag[..pos]
+        .bytes()
+        .rev()
+        .take_while(u8::is_ascii_alphabetic)
+        .count();
+    if letters_before >= 2 {
+        let digits = version.bytes().take_while(u8::is_ascii_digit).count();
+        let rest = &version.as_bytes()[digits..];
+        if rest.len() > 1 && matches!(rest[0], b'-' | b'_') && rest[1].is_ascii_digit() {
+            version = &version[digits + 1..];
+        }
+    }
 
     // Truncate '-unstable' suffix if present
     if let Some(unstable_pos) = version.find("-unstable") {
@@ -937,51 +935,6 @@ pub fn extract_version_with_regex(tag: &str, regex_pattern: &str) -> anyhow::Res
     Ok(version)
 }
 
-/// Normalize a version string to ensure it has at least 3 components for semver parsing
-///
-/// Appends missing version components to ensure the version can be parsed as valid semver.
-/// This prevents falling back to lexicographic string comparison for versions like "1.25".
-///
-/// # Arguments
-/// * `version` - The version string to normalize
-///
-/// # Returns
-/// A normalized version string with at least 3 components (MAJOR.MINOR.PATCH)
-///
-/// # Examples
-/// ```
-/// use ekapkgs_update::vcs_sources::normalize_version;
-///
-/// assert_eq!(normalize_version("1.25"), "1.25.0");
-/// assert_eq!(normalize_version("1.9"), "1.9.0");
-/// assert_eq!(normalize_version("2"), "2.0.0");
-/// assert_eq!(normalize_version("1.2.3"), "1.2.3");
-/// assert_eq!(normalize_version("1.0.0-beta"), "1.0.0-beta");
-/// ```
-pub fn normalize_version(version: &str) -> String {
-    // Count the number of dots to determine component count
-    // Handle pre-release versions by splitting on '-' first
-    let (base_version, suffix) = if let Some(dash_pos) = version.find('-') {
-        (&version[..dash_pos], Some(&version[dash_pos..]))
-    } else {
-        (version, None)
-    };
-
-    let dot_count = base_version.matches('.').count();
-
-    let normalized_base = match dot_count {
-        0 => format!("{base_version}.0.0"), // "1" -> "1.0.0"
-        1 => format!("{base_version}.0"),   // "1.25" -> "1.25.0"
-        _ => base_version.to_owned(),       // "1.2.3" or more -> unchanged
-    };
-
-    if let Some(suffix) = suffix {
-        format!("{normalized_base}{suffix}")
-    } else {
-        normalized_base
-    }
-}
-
 /// Check whether a version string contains common prerelease indicators
 /// (alpha, beta, rc, dev, pre) that the upstream API may not have flagged.
 pub fn version_looks_prerelease(version: &str) -> bool {
@@ -1015,52 +968,6 @@ pub fn version_looks_prerelease(version: &str) -> bool {
     false
 }
 
-/// Compare two version strings component-by-component using numeric ordering.
-///
-/// Splits on `.`, parses each component as `u64` for numeric comparison,
-/// and falls back to string comparison for non-numeric components.
-/// Missing components are treated as `0`.
-pub fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
-    // Strip any trailing prerelease suffixes for base comparison
-    let a_base = a.split('-').next().unwrap_or(a);
-    let b_base = b.split('-').next().unwrap_or(b);
-
-    let a_parts: Vec<&str> = a_base.split('.').collect();
-    let b_parts: Vec<&str> = b_base.split('.').collect();
-    let max_len = a_parts.len().max(b_parts.len());
-
-    for i in 0..max_len {
-        let a_part = a_parts.get(i).copied().unwrap_or("0");
-        let b_part = b_parts.get(i).copied().unwrap_or("0");
-
-        // Extract leading numeric portion for comparison
-        let a_num: Option<u64> = a_part
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .ok();
-        let b_num: Option<u64> = b_part
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .ok();
-
-        match (a_num, b_num) {
-            (Some(an), Some(bn)) => match an.cmp(&bn) {
-                std::cmp::Ordering::Equal => continue,
-                ord => return ord,
-            },
-            _ => match a_part.cmp(b_part) {
-                std::cmp::Ordering::Equal => continue,
-                ord => return ord,
-            },
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
 /// Check if a new version is acceptable based on the semver strategy
 ///
 /// # Arguments
@@ -1071,8 +978,13 @@ pub fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
 /// # Returns
 /// `true` if the new version satisfies the strategy constraints, `false` otherwise.
 ///
-/// Versions that fail to parse as semver fall back to lexicographic string
-/// comparison for `Latest`/`Major`, and are rejected for `Minor`/`Patch`.
+/// Versions are compared with [`compare_version_components`], so prereleases
+/// (`1.0.0rc1`) rank below their release and 4-component or date versions
+/// compare numerically. `Minor`/`Patch` require the first one/two
+/// dot-separated numbers to match (`2024.01.15 -> 2024.02.01` is a minor
+/// update). Dot-less versions (`137`, `20240115`, `2024-01-15`) are accepted
+/// under `Latest`/`Major` only, and never across schemes: a dotted version
+/// against a dot-less one, or a dot-less date against a dot-less counter.
 ///
 /// # Examples
 /// ```
@@ -1115,96 +1027,109 @@ pub fn compare_version_components(a: &str, b: &str) -> std::cmp::Ordering {
 /// ));
 /// ```
 pub fn is_version_acceptable(current: &str, new: &str, strategy: SemverStrategy) -> bool {
+    use std::cmp::Ordering;
+
     // Strip common prefixes like 'v' or 'version-'
     let clean_current = current
         .trim_start_matches('v')
         .trim_start_matches("version-");
     let clean_new = new.trim_start_matches('v').trim_start_matches("version-");
 
-    // Reject versions that don't have at least major and minor components
-    // Extract base version (before any '-' for pre-release)
-    let base_new = clean_new.split('-').next().unwrap_or(clean_new);
-    let base_current = clean_current.split('-').next().unwrap_or(clean_current);
-
-    // Require at least one dot (indicating major.minor format)
-    if !base_new.contains('.') || !base_current.contains('.') {
+    let starts_with_digit = |v: &str| v.starts_with(|c: char| c.is_ascii_digit());
+    if !starts_with_digit(clean_current) || !starts_with_digit(clean_new) {
         debug!(
-            "Rejecting version without major.minor components (current: {}, new: {})",
+            "Rejecting non-numeric version (current: {}, new: {})",
             clean_current, clean_new
         );
         return false;
     }
 
-    // Normalize versions to ensure they have 3 components for semver parsing
-    let normalized_current = normalize_version(clean_current);
-    let normalized_new = normalize_version(clean_new);
+    // A dotted version (`1.2`) and a dot-less one (`137`, `20240115`,
+    // `2024-01-15`) are different schemes: `1.13.1 -> 120715` is a stray tag,
+    // not an update. Likewise a dot-less date and a dot-less counter.
+    let dotted = |v: &str| v.split('-').next().unwrap_or(v).contains('.');
+    let single = !dotted(clean_current);
+    if single != !dotted(clean_new)
+        || (single && is_date_like(clean_current) != is_date_like(clean_new))
+    {
+        debug!(
+            "Rejecting version scheme change (current: {}, new: {})",
+            clean_current, clean_new
+        );
+        return false;
+    }
 
-    // Try semantic versioning first
-    if let (Ok(curr_ver), Ok(new_ver)) = (
-        Version::parse(&normalized_current),
-        Version::parse(&normalized_new),
-    ) {
-        // First check if new version is actually newer
-        if new_ver < curr_ver {
+    match compare_version_components(clean_new, clean_current) {
+        Ordering::Greater => {},
+        Ordering::Equal => {
+            debug!("Rejecting same version: {} -> {} (no change)", current, new);
+            return false;
+        },
+        Ordering::Less => {
             debug!(
                 "Rejecting downgrade: {} -> {} (current version is newer)",
                 current, new
             );
             return false;
-        }
-        if new_ver == curr_ver {
-            debug!("Rejecting same version: {} -> {} (no change)", current, new);
-            return false;
-        }
+        },
+    }
 
-        // Apply strategy-specific constraints
-        match strategy {
-            // Accept any newer version
-            SemverStrategy::Latest | SemverStrategy::Major => true,
-            // Only accept if major version matches
-            SemverStrategy::Minor => new_ver.major == curr_ver.major,
-            // Only accept if major and minor versions match
-            SemverStrategy::Patch => {
-                new_ver.major == curr_ver.major && new_ver.minor == curr_ver.minor
-            },
-        }
-    } else {
-        // For non-semver versions, use numeric component comparison instead of
-        // lexicographic string comparison (which incorrectly treats "9" > "12")
+    // How many leading components must match.
+    let fixed = match strategy {
+        SemverStrategy::Latest | SemverStrategy::Major => return true,
+        SemverStrategy::Minor => 1,
+        SemverStrategy::Patch => 2,
+    };
+    if single {
         debug!(
-            "Could not parse versions as semver (current: {}, new: {}), using component \
-             comparison (strategy: {})",
-            clean_current, clean_new, strategy
+            "Version '{}' has no minor component, cannot apply {} strategy. Skipping update.",
+            clean_current, strategy
         );
+        return false;
+    }
+    match (
+        leading_components(clean_current, fixed),
+        leading_components(clean_new, fixed),
+    ) {
+        (Some(c), Some(n)) => c == n,
+        _ => {
+            debug!(
+                "Version '{}' or '{}' has non-numeric leading components, cannot apply {} \
+                 strategy",
+                clean_current, clean_new, strategy
+            );
+            false
+        },
+    }
+}
 
-        match strategy {
-            SemverStrategy::Latest | SemverStrategy::Major => {
-                match compare_version_components(clean_new, clean_current) {
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Equal => {
-                        debug!(
-                            "Rejecting same version (component comparison): {} -> {}",
-                            current, new
-                        );
-                        false
-                    },
-                    std::cmp::Ordering::Less => {
-                        warn!(
-                            "Rejecting downgrade: {} -> {} (current version is newer)",
-                            current, new
-                        );
-                        false
-                    },
-                }
+/// The first `count` dot-separated components of `version` (before any
+/// `-` suffix) as numbers, missing ones as `0` (`1.9` → `[1, 9]`,
+/// `2024.01.15` → `[2024, 1]`, `4.7.0rc1` → `[4, 7]`). `None` when one of
+/// them doesn't start with a number.
+fn leading_components(version: &str, count: usize) -> Option<Vec<u64>> {
+    let base = version.split('-').next().unwrap_or(version);
+    let mut parts = base.split('.');
+    (0..count)
+        .map(|_| match parts.next() {
+            None => Some(0),
+            Some(part) => {
+                let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
             },
-            SemverStrategy::Minor | SemverStrategy::Patch => {
-                warn!(
-                    "Version '{}' is not valid semver, cannot apply {} strategy. Skipping update.",
-                    clean_current, strategy
-                );
-                false
-            },
-        }
+        })
+        .collect()
+}
+
+/// Whether a version starts with a date: a year (`2024`, `2024-01-15`,
+/// `2024.01`) or `YYYYMMDD` (`20240115`).
+fn is_date_like(version: &str) -> bool {
+    let digits: String = version.chars().take_while(char::is_ascii_digit).collect();
+    let year_like = |y: &str| y.parse::<u32>().is_ok_and(|y| (1970..2100).contains(&y));
+    match digits.len() {
+        4 => year_like(&digits),
+        8 => year_like(&digits[..4]),
+        _ => false,
     }
 }
 

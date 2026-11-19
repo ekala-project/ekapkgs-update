@@ -119,6 +119,7 @@ ekapkgs-update/                     # Main CLI crate
     llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
     package/                        # PackageMetadata extraction via nix-instantiate
     vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
+      version_order.rs              #   compare_version_components: the one version order (numeric, prereleases below release, dates)
       http_status.rs                #   HttpStatusError: typed non-success status from release endpoints (404/410 = not found)
     github/app.rs                   # GitHub App: RS256 JWT (openssl), installation tokens (cached), bot identity
     github/auth.rs                  # Credential choice: App installation tokens else $GITHUB_TOKEN; git env (bot identity + token helper)
@@ -369,7 +370,7 @@ Packages that must be updated together (corepkgs' `aws-c-*` and `aws-crt-cpp`) d
 Uses **regex with rnix AST validation**, not pure AST transformation:
 
 1. Parse content with `rnix::Root::parse()` to validate syntax
-2. Build a regex to match `attr_name = "value";` patterns
+2. Build a regex to match `attr_name = "value";` patterns; the name must start a binding (line start, whitespace, `{` or `;` before it), so `version` never matches `node_version`, `minversion` or a dotted `src.version` (same for `rev` in `rev_update`/`rev_fixup`)
 3. Perform text replacement
 4. Re-parse to validate the result is still valid Nix
 
@@ -411,6 +412,12 @@ Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system string
 - a PR closed unmerged → `record_pr_closed`: the `proposed` row (by `pr_number`) becomes `failed` with `failed_version` = the proposal and failure backoff, so the same version is retried after the backoff and a newer release is dispatched at once.
 
 GitHub never redelivers on its own; the periodic head check covers missed deliveries. NixOS: `githubApp.{clientId,privateKeyFile,webhookSecretFile}` (secrets via `LoadCredential=`) and `watch.webhook.{enable,host,port}` (default `127.0.0.1:3041`). App permissions: Contents and Pull requests read & write; events: Push, Pull request.
+
+### Version Comparison (`vcs_sources/version_order.rs`, `vcs_sources/mod.rs`)
+
+`compare_version_components` is the single version order, used for release sorting (`find_best_release`), `is_version_acceptable`, watch dispatch (`is_newer`, `update_version_for_entry`), `UpdateStatus::observed` and `version_at_least`. Versions are tokenized at `.`/`-`/`_`/`+`/`~` and digit/letter boundaries; numbers compare numerically, trailing zeros of a number run don't count (`1.0 == 1.0.0`). Prerelease words rank below the release, separated or not (`dev < alpha/a<n> < beta/b<n> < pre/preview < rc < end`, so `3.0.0rc1 < 3.0.0` and `1.3.0-rc1 < 1.3.0`); other words rank above the end but below a number (`1.1.1 < 1.1.1w`, `1.2.3 < 1.2.3-unstable-…`, `0-unstable-2024-02-01 < 0.1`). It is a total order.
+
+`is_version_acceptable` accepts dot-less versions (`137`, `20240115`, `2024-01-15`) under Latest/Major only, and never across schemes (dotted ↔ dot-less, dot-less date ↔ dot-less counter). Minor/Patch compare the first one/two dot-separated numbers, so 4-component and leading-zero date versions (`2024.01.15`) work. The version written for a release is `Release::resolved_version(version_regex)` (checker target, update workflow, variants), so `version-regex` `v(.*)-release` writes `1.2.3`. `extract_version_from_tag` drops a name ending in digits (`lz4-1.9.4` → `1.9.4`, `gtk4-4.12.0` → `4.12.0`).
 
 ### Explicit Upstream Source
 

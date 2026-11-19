@@ -343,7 +343,10 @@ async fn check_for_update(
         },
     };
 
-    let latest_version = best_release.version().to_owned();
+    // The version `version-regex` captures, as the update workflow writes it.
+    let latest_version = best_release
+        .resolved_version(version_regex)
+        .unwrap_or_else(|_| best_release.version().to_owned());
     debug!("{}: Latest version: {}", attr_path, latest_version);
 
     // Cross-check with Repology for validation (if enabled)

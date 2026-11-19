@@ -122,3 +122,39 @@ fn test_find_and_update_attr_with_special_chars() {
     let updated = result.unwrap();
     assert!(updated.contains(r#"version = "2.0.0+build.456";"#));
 }
+
+#[test]
+fn test_find_and_update_attr_name_boundary() {
+    // (content, expected after updating `version` 1.2.3 -> 2.0.0; None = not found)
+    let cases: [(&str, Option<&str>); 9] = [
+        (
+            r#"{ version = "1.2.3"; }"#,
+            Some(r#"{ version = "2.0.0"; }"#),
+        ),
+        (r#"{version = "1.2.3";}"#, Some(r#"{version = "2.0.0";}"#)),
+        (
+            "{\nversion = \"1.2.3\";\n}",
+            Some("{\nversion = \"2.0.0\";\n}"),
+        ),
+        (
+            r#"{ a = 1;version = "1.2.3"; }"#,
+            Some(r#"{ a = 1;version = "2.0.0"; }"#),
+        ),
+        (r#"{ node_version = "1.2.3"; }"#, None),
+        (r#"{ minversion = "1.2.3"; }"#, None),
+        (r#"{ src.version = "1.2.3"; }"#, None),
+        (r#"{ foo-version = "1.2.3"; }"#, None),
+        // Only the binding itself, not a suffix-named sibling with the same value.
+        (
+            "{\n  version = \"1.2.3\";\n  node_version = \"1.2.3\";\n}",
+            Some("{\n  version = \"2.0.0\";\n  node_version = \"1.2.3\";\n}"),
+        ),
+    ];
+    for (content, expected) in cases {
+        let result = find_and_update_attr(content, "version", "2.0.0", Some("1.2.3"));
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap(), expected, "{content}"),
+            None => assert!(result.unwrap_err().is_not_found(), "{content}"),
+        }
+    }
+}

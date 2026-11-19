@@ -130,8 +130,12 @@ pub async fn update_single_variant(
         )
         .await?;
 
-    // Normalize version from release tag (removes "v" prefix, etc.)
-    let new_version = extract_version_from_tag(&release.tag_name);
+    // Normalize version from release tag (removes "v" prefix, etc., or
+    // applies `version-regex`)
+    let new_version = release
+        .resolved_version(version_regex)
+        .unwrap_or_else(|_| extract_version_from_tag(&release.tag_name).to_owned());
+    let new_version = new_version.as_str();
 
     if new_version == metadata.version {
         info!(

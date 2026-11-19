@@ -20,31 +20,15 @@ use crate::vcs_sources::compare_version_components;
 const LOG_COLUMNS: &str = "drv_path, attr_path, timestamp, status, error_log, old_version, \
                            new_version, repo_name, session_id, phase, error_type";
 
-/// `a >= b` using the same component-wise comparison as release selection.
-///
-/// That comparison ignores everything after the first `-`, so when the bases
-/// tie the suffixes decide: a plain release beats a suffixed one (`1.0` >
-/// `1.0-rc1`), and two suffixes are compared component-wise, which orders
-/// date-based versions such as `0-unstable-2024-02-01`.
+/// `a >= b` using the same comparison as release selection
+/// ([`compare_version_components`]): numeric components, prereleases below
+/// their release (`1.0.0rc1 < 1.0.0`, `1.0-rc1 < 1.0-rc2`), and date-based
+/// versions such as `0-unstable-2024-02-01` ordered by their date.
 ///
 /// This is the single rule for "the tree has reached this version" (merged
 /// proposals, stale failures, updates a sibling attribute already made).
 pub(crate) fn version_at_least(a: &str, b: &str) -> bool {
-    use std::cmp::Ordering;
-
-    if a == b {
-        return true;
-    }
-    match compare_version_components(a, b) {
-        Ordering::Equal => match (a.split_once('-'), b.split_once('-')) {
-            (Some((_, sa)), Some((_, sb))) => {
-                compare_version_components(&sa.replace('-', "."), &sb.replace('-', ".")).is_ge()
-            },
-            (Some(_), None) => false,
-            (None, _) => true,
-        },
-        ord => ord.is_gt(),
-    }
+    a == b || compare_version_components(a, b).is_ge()
 }
 
 /// Backoff applied after a check that found nothing to do.
@@ -1294,6 +1278,17 @@ mod tests {
             ("0-unstable-2024-01-15", "0-unstable-2024-02-01", false),
             ("abd", "abc", true),
             ("abc", "abd", false),
+            // Unseparated (PEP 440) and separated prereleases.
+            ("1.0.0rc1", "1.0.0", false),
+            ("1.0.0", "1.0.0rc1", true),
+            ("1.0.0rc1", "1.0.0rc2", false),
+            ("1.0.0rc2", "1.0.0rc1", true),
+            ("3.0.0rc1", "3.0.0", false),
+            ("1.3.0-rc1", "1.3.0", false),
+            ("1.3.0", "1.3.0-rc1", true),
+            ("2.0b1", "2.0a2", true),
+            ("2.0.dev1", "2.0a1", false),
+            ("1.0.0-beta", "1.0.0-alpha.2", true),
         ];
         for (a, b, expected) in cases {
             assert_eq!(version_at_least(a, b), expected, "{a} >= {b}");
