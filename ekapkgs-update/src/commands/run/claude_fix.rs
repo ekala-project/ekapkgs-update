@@ -10,11 +10,42 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::commands::update::build_nix_expr;
+
+/// Read a child's output pipe to the end in the background.
+fn spawn_reader<R>(pipe: Option<R>) -> tokio::task::JoinHandle<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf).await;
+        }
+        buf
+    })
+}
+
+/// Kill `child` and everything in its process group (it was spawned with
+/// `process_group(0)`, so the group id is its pid), then reap it.
+async fn kill_process_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // `kill -KILL -- -<pgid>`: signals the whole group without `unsafe`.
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    if let Err(e) = child.kill().await {
+        debug!("Failed to kill claude process: {}", e);
+    }
+}
 
 /// Configuration for Claude Code fix attempts.
 #[derive(Debug, Clone)]
@@ -153,6 +184,11 @@ pub async fn attempt_claude_fix(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Never outlive this attempt (timeout, or the task being aborted).
+        .kill_on_drop(true)
+        // Own process group, so a timeout also stops what claude started
+        // (e.g. a nix-build from its Bash tool).
+        .process_group(0)
         .spawn()
     {
         Ok(child) => child,
@@ -173,25 +209,35 @@ pub async fn attempt_claude_fix(
         drop(stdin); // Close stdin so claude can proceed
     }
 
-    // Wait with timeout
+    // Wait with timeout. The output is read alongside the wait (a full pipe
+    // would block claude); the child stays owned here so a timed-out run can
+    // be killed and reaped.
     let timeout = Duration::from_secs(config.timeout_secs);
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
+    let stdout_reader = spawn_reader(child.stdout.take());
+    let stderr_reader = spawn_reader(child.stderr.take());
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
         Ok(Err(e)) => {
+            kill_process_group(&mut child).await;
             return ClaudeFixResult::InvocationError {
                 message: format!("Failed to wait for claude process: {e}"),
             };
         },
         Err(_) => {
             warn!(
-                "{}: Claude Code fix attempt timed out after {}s",
+                "{}: Claude Code fix attempt timed out after {}s, killing it",
                 attr_path, config.timeout_secs
             );
-            // Kill the timed-out process
-            // child has been consumed by wait_with_output, but the timeout
-            // means it hasn't completed — the drop will handle cleanup
+            kill_process_group(&mut child).await;
+            stdout_reader.abort();
+            stderr_reader.abort();
             return ClaudeFixResult::TimedOut;
         },
+    };
+    let output = std::process::Output {
+        status,
+        stdout: stdout_reader.await.unwrap_or_default(),
+        stderr: stderr_reader.await.unwrap_or_default(),
     };
 
     if !output.status.success() {

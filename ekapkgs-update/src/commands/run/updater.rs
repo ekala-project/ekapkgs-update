@@ -511,8 +511,11 @@ pub(super) async fn perform_update(
             let rebuild_count = rebuild_analysis.as_ref().map(|a| a.rebuild_count);
 
             // Create PR if configured. The update is recorded as successful
-            // once the PR exists; without a PR it is recorded right away.
-            let mut pr_failure = None;
+            // (`proposed`) only once the PR exists. Without a PR (no PR
+            // configuration, or declined interactively) nothing durable is
+            // left once the worktree is removed, so the update is reported
+            // as skipped and the package stays `outdated`.
+            let mut not_proposed = None;
             if let Some(config) = pr_config {
                 // In interactive mode, show PR details and prompt for confirmation
                 let should_create_pr = if interactive {
@@ -571,14 +574,16 @@ pub(super) async fn perform_update(
                                 info!("{}: Created PR #{}: {}", attr_path, pr_number, pr_url);
                             }
                         },
-                        Err(failed) => pr_failure = Some(failed),
+                        Err(failed) => not_proposed = Some(failed),
                     }
                 } else {
                     info!("{}: Skipping PR creation (user declined)", attr_path);
-                    attempt.record_success(rebuild_count).await;
+                    not_proposed = Some(UpdateResult::Skipped(format!(
+                        "built {new_version}, PR declined"
+                    )));
                 }
             } else {
-                attempt.record_success(rebuild_count).await;
+                not_proposed = Some(not_proposed_without_pr_config(attr_path, new_version));
             }
 
             // Clean up the worktree. A PR failure is not preserved: the
@@ -587,8 +592,8 @@ pub(super) async fn perform_update(
                 warn!("{}: Failed to clean up worktree: {}", attr_path, e);
             }
 
-            if let Some(failed) = pr_failure {
-                return Ok(failed);
+            if let Some(result) = not_proposed {
+                return Ok(result);
             }
 
             Ok(UpdateResult::Updated {
@@ -650,7 +655,7 @@ pub(super) async fn perform_update(
 
                         // Create PR if configured (recording success once it
                         // exists), else record the success right away.
-                        let mut pr_failure = None;
+                        let mut not_proposed = None;
                         if let Some(config) = pr_config {
                             let pr = attempt
                                 .tracker
@@ -680,10 +685,11 @@ pub(super) async fn perform_update(
                                         attr_path, pr_number, pr_url
                                     );
                                 },
-                                Err(failed) => pr_failure = Some(failed),
+                                Err(failed) => not_proposed = Some(failed),
                             }
                         } else {
-                            attempt.record_success(None).await;
+                            not_proposed =
+                                Some(not_proposed_without_pr_config(attr_path, new_version));
                         }
 
                         // Clean up the worktree
@@ -695,8 +701,8 @@ pub(super) async fn perform_update(
                             );
                         }
 
-                        if let Some(failed) = pr_failure {
-                            return Ok(failed);
+                        if let Some(result) = not_proposed {
+                            return Ok(result);
                         }
 
                         return Ok(UpdateResult::Updated {
@@ -719,6 +725,7 @@ pub(super) async fn perform_update(
                     req.repo(),
                     attr_path,
                     failure.phase(),
+                    &repo_dir,
                     &worktree_path,
                     &worktree_entry_point,
                     &failure,
@@ -753,7 +760,9 @@ pub(super) async fn perform_update(
                 None
             };
 
-            // Clean up the worktree (only if not preserved)
+            // Clean up the worktree unless it was preserved (preservation
+            // moves it into the artifacts, or keeps it when only a copy
+            // could be made)
             if artifacts_path.is_none() {
                 if let Err(cleanup_err) = cleanup_worktree(&repo_dir, &worktree_path).await {
                     warn!(
@@ -771,6 +780,19 @@ pub(super) async fn perform_update(
             Ok(attempt.record_failure(&failure, &error_message).await)
         },
     }
+}
+
+/// Result of a worktree update that built but cannot be proposed because
+/// there is no PR configuration. Not recorded as `proposed`: no PR exists,
+/// and the change is gone with the worktree. The package stays `outdated`.
+pub(super) fn not_proposed_without_pr_config(attr_path: &str, new_version: &str) -> UpdateResult {
+    info!(
+        "{}: Built {} but not proposed (no PR configuration)",
+        attr_path, new_version
+    );
+    UpdateResult::Skipped(format!(
+        "built {new_version}, not proposed: no PR configuration"
+    ))
 }
 
 /// Do additional processing depending on the result of the update
@@ -1315,6 +1337,45 @@ async fn create_pr_for_update(
 ) -> anyhow::Result<(String, i64)> {
     let github_token = crate::github::auth::token_for(&config.owner, &config.repo).await?;
 
+    // A branch pushed to a fork must be addressed as `<fork-owner>:<branch>`.
+    let branch_name = crate::git::update_branch_name(attr_path, new_version);
+    let push_owner = match crate::git::remote_github_owner(worktree_path, fork).await {
+        Ok(owner) => Some(owner),
+        Err(e) => {
+            debug!(
+                "{}: could not determine owner of remote '{}': {e:#}",
+                attr_path, fork
+            );
+            None
+        },
+    };
+    let head = crate::git::pr_head(&config.owner, push_owner.as_deref(), &branch_name);
+
+    // A retry of a version whose PR already exists (e.g. recording it
+    // failed) reuses that PR, without pushing over its branch.
+    let qualified_head = format!(
+        "{}:{branch_name}",
+        push_owner.as_deref().unwrap_or(&config.owner)
+    );
+    match crate::github::find_open_pull_request(
+        &config.owner,
+        &config.repo,
+        &qualified_head,
+        &github_token,
+    )
+    .await
+    {
+        Ok(Some(existing)) => {
+            info!(
+                "{}: PR #{} from {} is already open, reusing it",
+                attr_path, existing.number, branch_name
+            );
+            return Ok((existing.html_url, existing.number));
+        },
+        Ok(None) => {},
+        Err(e) => debug!("{}: open PR lookup failed: {e:#}", attr_path),
+    }
+
     // Our open PRs for this package from any branch: one proposing this
     // version or a newer one is reused; older ones are superseded.
     let existing = crate::github::existing_prs::scan(
@@ -1334,15 +1395,10 @@ async fn create_pr_for_update(
     }
     let superseded = existing.superseded_numbers();
 
-    // Create and push branch
-    let branch_name = crate::git::create_and_push_branch(
-        worktree_path,
-        attr_path,
-        old_version,
-        new_version,
-        fork,
-    )
-    .await?;
+    // Create (or reset) and force-push the branch: a retry after a failed
+    // push / PR replaces what the earlier attempt left behind.
+    crate::git::create_and_push_branch(worktree_path, attr_path, old_version, new_version, fork)
+        .await?;
 
     // Fetch package metadata for PR body from the updated worktree (not
     // `<nixpkgs>`, which resolves through NIX_PATH to an unrelated tree).
@@ -1476,19 +1532,6 @@ async fn create_pr_for_update(
     ));
     body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
-    // A branch pushed to a fork must be addressed as `<fork-owner>:<branch>`.
-    let push_owner = match crate::git::remote_github_owner(worktree_path, fork).await {
-        Ok(owner) => Some(owner),
-        Err(e) => {
-            debug!(
-                "{}: could not determine owner of remote '{}': {e:#}",
-                attr_path, fork
-            );
-            None
-        },
-    };
-    let head = crate::git::pr_head(&config.owner, push_owner.as_deref(), &branch_name);
-
     // Create PR via GitHub API (draft if tests failed)
     let pr = crate::github::create_pull_request_with_options(
         &config.owner,
@@ -1521,9 +1564,7 @@ async fn prompt_for_pr_confirmation(
 
     use tokio::process::Command;
 
-    // Create branch name (same logic as in create_pr_for_update)
-    let sanitized_attr = attr_path.replace(['.', '/'], "-");
-    let branch_name = format!("update/{sanitized_attr}/{new_version}");
+    let branch_name = crate::git::update_branch_name(attr_path, new_version);
 
     // Create PR title
     let title = crate::git::update_title(attr_path, old_version, new_version);

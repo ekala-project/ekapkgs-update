@@ -72,6 +72,14 @@ impl UpdateJob {
             UpdateJob::Group(group) => group.members.len(),
         }
     }
+
+    /// The package updates this job attempts.
+    pub fn requests(&self) -> &[UpdateRequest] {
+        match self {
+            UpdateJob::Single(req) => std::slice::from_ref(req),
+            UpdateJob::Group(group) => &group.members,
+        }
+    }
 }
 
 /// Result of an update operation
@@ -94,4 +102,14 @@ pub enum UpdateResult {
         current_version: String,
         new_version: String,
     },
+}
+
+impl UpdateResult {
+    /// The dry-run report for `req` (the update is not performed).
+    pub fn dry_run(req: &UpdateRequest) -> Self {
+        Self::DryRun {
+            current_version: req.current_version.clone(),
+            new_version: req.new_version.clone(),
+        }
+    }
 }

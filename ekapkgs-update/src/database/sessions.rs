@@ -19,6 +19,61 @@ use super::{Database, parse_rfc3339};
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::types::UpdatePhase;
 
+/// Hostname of this machine (`None` when it cannot be read).
+fn current_host() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+}
+
+/// Whether process `pid` exists on this machine; `None` without procfs.
+fn pid_alive(pid: i64) -> Option<bool> {
+    if !std::path::Path::new("/proc/self").exists() {
+        return None;
+    }
+    Some(std::path::Path::new(&format!("/proc/{pid}")).exists())
+}
+
+/// A session without an owner (created before owners were recorded) is
+/// only considered stale after this long without a heartbeat.
+const LEGACY_STALE_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// Owner and heartbeat of a `running` session.
+#[derive(Debug, Clone)]
+struct SessionOwner {
+    host: Option<String>,
+    pid: Option<i64>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+/// Whether a `running` `run` session belongs to a process that is gone.
+///
+/// - Created on this host by this process's PID: stale. The caller has no
+///   session yet, so it is an earlier process whose PID was reused.
+/// - Created on this host by a PID that no longer exists: stale.
+/// - Another (or an unknown) host, a live PID, or no procfs: kept.
+/// - No owner recorded (older sessions): stale once its heartbeat
+///   (`updated_at`) is older than [`LEGACY_STALE_AFTER`].
+fn is_stale_run_session(
+    owner: &SessionOwner,
+    host: Option<&str>,
+    own_pid: i64,
+    now: DateTime<Utc>,
+    alive: impl Fn(i64) -> Option<bool>,
+) -> bool {
+    match owner.pid {
+        Some(pid) => {
+            let same_host = matches!((owner.host.as_deref(), host), (Some(a), Some(b)) if a == b);
+            same_host && (pid == own_pid || alive(pid) == Some(false))
+        },
+        None => owner
+            .updated_at
+            .is_some_and(|t| now.signed_duration_since(t) > LEGACY_STALE_AFTER),
+    }
+}
+
 /// Status of an update session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -204,14 +259,17 @@ impl Database {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO update_sessions (id, mode, started_at, updated_at, status, config_json)
-             VALUES (?, ?, ?, ?, 'running', ?)",
+            "INSERT INTO update_sessions (id, mode, started_at, updated_at, status, config_json,
+                                          owner_host, owner_pid)
+             VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
         )
         .bind(&id)
         .bind(mode.as_str())
         .bind(&now)
         .bind(&now)
         .bind(config_json)
+        .bind(current_host())
+        .bind(i64::from(std::process::id()))
         .execute(&self.pool)
         .await?;
 
@@ -291,22 +349,40 @@ impl Database {
         packages_evaluated: usize,
         packages_backoff: usize,
     ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE update_sessions
+             SET packages_evaluated = ?,
+                 packages_backoff = ?
+             WHERE id = ?",
+        )
+        .bind(to_i64(packages_evaluated))
+        .bind(to_i64(packages_backoff))
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        self.close_session(session_id, status).await
+    }
+
+    /// Close a session with `status`, keeping its counters (the checker's
+    /// last recorded progress included). Used when the totals are unknown:
+    /// an interrupted run, or a service task that panicked.
+    pub async fn close_session(
+        &self,
+        session_id: &str,
+        status: SessionStatus,
+    ) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
             "UPDATE update_sessions
              SET status = ?,
                  completed_at = ?,
-                 updated_at = ?,
-                 packages_evaluated = ?,
-                 packages_backoff = ?
+                 updated_at = ?
              WHERE id = ?",
         )
         .bind(status.as_str())
         .bind(&now)
         .bind(&now)
-        .bind(to_i64(packages_evaluated))
-        .bind(to_i64(packages_backoff))
         .bind(session_id)
         .execute(&self.pool)
         .await?;
@@ -323,6 +399,39 @@ impl Database {
         .await?;
 
         Ok(())
+    }
+
+    /// Close `run` sessions still `running` whose process is gone: cancel
+    /// them and skip their running phases. Called by `run` before it creates
+    /// its own session. Returns the number of sessions closed.
+    ///
+    /// Only sessions known to be stale are closed (see
+    /// [`is_stale_run_session`]): another `run` still working on the same
+    /// database keeps its session.
+    pub async fn recover_stale_run_sessions(&self) -> anyhow::Result<usize> {
+        let rows = sqlx::query(
+            "SELECT id, owner_host, owner_pid, updated_at FROM update_sessions
+             WHERE mode = 'run' AND status = 'running'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let host = current_host();
+        let own_pid = i64::from(std::process::id());
+        let now = Utc::now();
+        let mut closed = 0;
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let owner = SessionOwner {
+                host: row.try_get("owner_host")?,
+                pid: row.try_get("owner_pid")?,
+                updated_at: parse_rfc3339(row.try_get("updated_at")?),
+            };
+            if is_stale_run_session(&owner, host.as_deref(), own_pid, now, pid_alive) {
+                self.close_session(&id, SessionStatus::Cancelled).await?;
+                closed += 1;
+            }
+        }
+        Ok(closed)
     }
 
     /// Record the start of a phase
@@ -633,6 +742,82 @@ mod tests {
         assert_eq!(phases[0].id, phase);
         assert_eq!(phases[0].repo_name, "r");
         assert_eq!(phases[0].status, "skipped");
+    }
+
+    #[test]
+    fn stale_run_session_detection() {
+        let now = Utc::now();
+        let owner = |host: Option<&str>, pid: Option<i64>, hours_ago: i64| SessionOwner {
+            host: host.map(str::to_owned),
+            pid,
+            updated_at: Some(now - chrono::Duration::hours(hours_ago)),
+        };
+        // pid 10 is alive, 20 is gone; this process is pid 1.
+        let alive = |pid: i64| Some(pid == 10);
+        let cases = [
+            ("dead pid, same host", owner(Some("h"), Some(20), 0), true),
+            ("live pid, same host", owner(Some("h"), Some(10), 0), false),
+            ("own pid reused", owner(Some("h"), Some(1), 0), true),
+            ("dead pid, other host", owner(Some("x"), Some(20), 0), false),
+            ("unknown owner host", owner(None, Some(20), 0), false),
+            ("legacy, recent heartbeat", owner(None, None, 1), false),
+            ("legacy, old heartbeat", owner(None, None, 48), true),
+        ];
+        for (name, owner, expected) in cases {
+            assert_eq!(
+                is_stale_run_session(&owner, Some("h"), 1, now, alive),
+                expected,
+                "{name}"
+            );
+        }
+        // Without procfs a live process cannot be ruled out.
+        assert!(!is_stale_run_session(
+            &owner(Some("h"), Some(20), 0),
+            Some("h"),
+            1,
+            now,
+            |_| None
+        ));
+        // An unknown local host never matches.
+        assert!(!is_stale_run_session(
+            &owner(Some("h"), Some(20), 0),
+            None,
+            1,
+            now,
+            alive
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovers_only_stale_run_sessions() {
+        let db = setup_db().await;
+        let stale = db.create_session(SessionMode::Run, None).await.unwrap();
+        let live = db.create_session(SessionMode::Run, None).await.unwrap();
+        let watch = db.create_session(SessionMode::Watch, None).await.unwrap();
+        // `stale` was created by this process's PID: an earlier process.
+        // `live` belongs to a process that is still running (pid 1, init).
+        sqlx::query("UPDATE update_sessions SET owner_pid = 1 WHERE id = ?")
+            .bind(&live)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        db.record_phase_start(&stale, "", "hello", UpdatePhase::Build)
+            .await
+            .unwrap();
+
+        let closed = db.recover_stale_run_sessions().await.unwrap();
+        let status = |id: String| {
+            let db = db.clone();
+            async move { db.get_session(&id).await.unwrap().unwrap().status }
+        };
+        if current_host().is_some() && pid_alive(1) == Some(true) {
+            assert_eq!(closed, 1);
+            assert_eq!(status(stale).await, SessionStatus::Cancelled);
+            let phases = db.get_phases_by_attr("hello").await.unwrap();
+            assert_eq!(phases[0].status, "skipped");
+        }
+        assert_eq!(status(live).await, SessionStatus::Running);
+        assert_eq!(status(watch).await, SessionStatus::Running);
     }
 
     #[tokio::test]

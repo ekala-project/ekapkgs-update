@@ -229,6 +229,19 @@ pub async fn cleanup_worktree(repo_dir: &Path, worktree_path: &Path) -> anyhow::
 
     debug!("Cleaning up worktree at {:?}", worktree_path);
 
+    // The update branch checked out in the worktree (if any) is deleted with
+    // it, so a retry of the same version can create it again.
+    let branch = run_git(
+        Some(worktree_path),
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .map(|b| b.trim().to_owned())
+    .filter(|b| is_update_branch(b));
+
     // Remove the worktree using git worktree remove
     let output = run_git(
         Some(repo_dir),
@@ -255,8 +268,35 @@ pub async fn cleanup_worktree(repo_dir: &Path, worktree_path: &Path) -> anyhow::
         }
     }
 
+    if let Some(branch) = branch {
+        match run_git(Some(repo_dir), ["branch", "-D", &branch]).await {
+            Ok(o) if o.status.success() => debug!("Deleted local branch '{}'", branch),
+            Ok(o) => debug!(
+                "Failed to delete local branch '{}': {}",
+                branch,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => debug!("Failed to delete local branch '{}': {e:#}", branch),
+        }
+    }
+
     debug!("Worktree cleaned up successfully");
     Ok(())
+}
+
+/// Whether `branch` is one of the tool's update branches
+/// ([`update_branch_name`], [`group_branch_name`]).
+fn is_update_branch(branch: &str) -> bool {
+    branch.starts_with("update/")
+}
+
+/// Branch name of a single-package update, e.g. `update/python3Packages-foo/1.1`.
+#[must_use]
+pub fn update_branch_name(attr_path: &str, new_version: &str) -> String {
+    format!(
+        "update/{}/{new_version}",
+        attr_path.replace(['.', '/'], "-")
+    )
 }
 
 /// Title of an update: the commit subject and PR title, e.g. `python3Packages.foo: 1.0 -> 1.1`.
@@ -268,9 +308,15 @@ pub fn update_title(attr_path: &str, old_version: &str, new_version: &str) -> St
 /// Create a git branch, commit changes, and push to remote
 /// Returns the branch name
 ///
+/// The branch is created with `checkout -B` and force-pushed: a retry of a
+/// version whose earlier push or PR failed replaces that attempt's branch
+/// (locally and on the remote) instead of failing on "already exists". The
+/// caller checks for an open PR from the branch first and reuses it rather
+/// than pushing over it.
+///
 /// # Errors
 ///
-/// Returns an error if any git command (`checkout -b`, `add -A`, `commit`, or `push`)
+/// Returns an error if any git command (`checkout -B`, `add -A`, `commit`, or `push`)
 /// fails with a non-zero exit status.
 pub async fn create_and_push_branch(
     worktree_path: &Path,
@@ -279,17 +325,15 @@ pub async fn create_and_push_branch(
     new_version: &str,
     remote_repo: &str,
 ) -> anyhow::Result<String> {
-    // Create a safe branch name from attr_path and version
-    let sanitized_attr = attr_path.replace(['.', '/'], "-");
-    let branch_name = format!("update/{sanitized_attr}/{new_version}");
+    let branch_name = update_branch_name(attr_path, new_version);
 
     debug!(
         "{}: Creating branch '{}' in worktree {:?}",
         attr_path, branch_name, worktree_path
     );
 
-    // Create new branch
-    let output = run_git(Some(worktree_path), ["checkout", "-b", &branch_name]).await?;
+    // Create (or reset) the branch
+    let output = run_git(Some(worktree_path), ["checkout", "-B", &branch_name]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -322,8 +366,8 @@ pub async fn create_and_push_branch(
         attr_path, branch_name
     );
 
-    // Push to remote
-    let push_target = format!("{branch_name}:{branch_name}");
+    // Force-push to remote (replacing an earlier attempt's branch)
+    let push_target = format!("+{branch_name}:{branch_name}");
     let output = run_git_env(
         Some(worktree_path),
         ["push", "-u", remote_repo, &push_target],
@@ -653,6 +697,73 @@ async fn get_default_branch(cwd: Option<&Path>, remote: &str) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn update_branch_names() {
+        assert_eq!(
+            update_branch_name("python3Packages.foo", "1.1"),
+            "update/python3Packages-foo/1.1"
+        );
+        assert!(is_update_branch(&update_branch_name("foo", "1")));
+        assert!(is_update_branch(&group_branch_name("aws-crt-cpp")));
+        assert!(!is_update_branch("master"));
+    }
+
+    /// A retry of the same version (after a failed PR step) recreates the
+    /// branch and replaces the remote one, instead of failing on "already
+    /// exists" or a non-fast-forward push.
+    #[tokio::test]
+    async fn retrying_an_update_branch_replaces_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        let remote = root.join("remote.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("pkg.nix"), "v1").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        git(&root, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        let remote_str = remote.to_str().unwrap();
+
+        for (attempt, content) in ["v2-first", "v2-second"].iter().enumerate() {
+            let worktree = root.join(format!("wt{attempt}"));
+            git(
+                &repo,
+                &["worktree", "add", "-q", worktree.to_str().unwrap(), "HEAD"],
+            );
+            std::fs::write(worktree.join("pkg.nix"), content).unwrap();
+            let branch = create_and_push_branch(&worktree, "foo", "1", "2", remote_str)
+                .await
+                .unwrap();
+            assert_eq!(branch, "update/foo/2");
+            cleanup_worktree(&repo, &worktree).await.unwrap();
+            assert!(!worktree.exists());
+            // The local branch went with the worktree.
+            assert!(git(&repo, &["branch", "--list", "update/foo/2"]).is_empty());
+        }
+
+        let pushed = git(&remote, &["show", "update/foo/2:pkg.nix"]);
+        assert_eq!(pushed, "v2-second");
+    }
 
     #[test]
     fn update_title_uses_attr_path_arrow_format() {

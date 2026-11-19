@@ -420,6 +420,11 @@ async fn check_for_update(
                 {
                     warn!("{}: Failed to update database: {}", attr_path, e);
                 }
+                // The proposal covers this package's aliases too: keep them
+                // from being dispatched as a duplicate PR.
+                if let Some(ref pname) = metadata.pname {
+                    claim_dedup_slot(queued_updates, pname, current_version).await;
+                }
                 return Ok(());
             } else {
                 // Proposed version differs from latest - attempt new update
@@ -442,9 +447,24 @@ async fn check_for_update(
     // underlying package expression (e.g., python312Packages.foo and
     // python313Packages.foo share one source file). Updating one updates all.
     if let Some(ref pname) = metadata.pname {
-        let dedup_key = (pname.clone(), current_version.clone());
-        let mut queued = queued_updates.lock().await;
-        if !queued.insert(dedup_key) {
+        // An alias proposed in an earlier run (and now in its success
+        // backoff, so not checked this run) already covers this update.
+        match db
+            .proposed_alias(RUN_REPO, attr_path, pname, current_version, &latest_version)
+            .await
+        {
+            Ok(Some(alias)) => {
+                debug!(
+                    "{}: Skipping - {} already proposed via alias {}",
+                    attr_path, latest_version, alias
+                );
+                claim_dedup_slot(queued_updates, pname, current_version).await;
+                return Ok(());
+            },
+            Ok(None) => {},
+            Err(e) => warn!("{}: Failed to look up proposed aliases: {:#}", attr_path, e),
+        }
+        if !claim_dedup_slot(queued_updates, pname, current_version).await {
             debug!(
                 "{}: Skipping - update already queued for {} {}",
                 attr_path, pname, current_version
@@ -475,4 +495,78 @@ async fn check_for_update(
     }
 
     Ok(())
+}
+
+/// Claim the `(pname, version)` dedup slot. Returns `false` when an alias
+/// already holds it (queued for update, or already proposed).
+async fn claim_dedup_slot(
+    queued: &Mutex<HashSet<(String, String)>>,
+    pname: &str,
+    version: &str,
+) -> bool {
+    queued
+        .lock()
+        .await
+        .insert((pname.to_owned(), version.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dedup_slot_is_claimed_once_per_pname_and_version() {
+        let queued = Mutex::new(HashSet::new());
+        let cases = [
+            ("foo", "1.0", true),
+            ("foo", "1.0", false),
+            ("foo", "2.0", true),
+            ("bar", "1.0", true),
+        ];
+        for (pname, version, expected) in cases {
+            assert_eq!(
+                claim_dedup_slot(&queued, pname, version).await,
+                expected,
+                "{pname} {version}"
+            );
+        }
+    }
+
+    /// Run 2: the alias proposed in run 1 is in its success backoff, so only
+    /// the database shows the update is already proposed.
+    #[tokio::test]
+    async fn proposed_alias_survives_across_runs() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let db = Database::from(pool);
+        let info = PackageInfo {
+            pname: Some("foo".to_owned()),
+            ..PackageInfo::default()
+        };
+        for attr in ["python312Packages.foo", "python313Packages.foo"] {
+            db.upsert_package_info(RUN_REPO, attr, "1.0", &info)
+                .await
+                .unwrap();
+        }
+        let alias = |attr: &'static str, target: &'static str| {
+            let db = db.clone();
+            async move {
+                db.proposed_alias(RUN_REPO, attr, "foo", "1.0", target)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(alias("python313Packages.foo", "1.1").await, None);
+
+        db.record_successful_update(RUN_REPO, "python312Packages.foo", "1.0", "1.1", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            alias("python313Packages.foo", "1.1").await.as_deref(),
+            Some("python312Packages.foo")
+        );
+        // Not its own alias, and a newer release is a new update.
+        assert_eq!(alias("python312Packages.foo", "1.1").await, None);
+        assert_eq!(alias("python313Packages.foo", "1.2").await, None);
+    }
 }
