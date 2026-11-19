@@ -26,6 +26,15 @@ impl HttpStatusError {
         matches!(self.status, StatusCode::NOT_FOUND | StatusCode::GONE)
     }
 
+    /// The platform is throttling us (429, or 403, which GitHub answers when
+    /// the API rate limit is exhausted).
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self.status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::FORBIDDEN
+        )
+    }
+
     /// The first `HttpStatusError` in an error's chain.
     pub fn find(err: &anyhow::Error) -> Option<&Self> {
         err.chain().find_map(|e| e.downcast_ref::<Self>())
@@ -52,6 +61,7 @@ mod tests {
             (StatusCode::NOT_FOUND, true),
             (StatusCode::GONE, true),
             (StatusCode::FORBIDDEN, false),
+            (StatusCode::TOO_MANY_REQUESTS, false),
             (StatusCode::SERVICE_UNAVAILABLE, false),
         ] {
             let err: anyhow::Result<()> =
@@ -59,6 +69,14 @@ mod tests {
             let err = err.context("API poll failed for github/o/r").unwrap_err();
             let found = HttpStatusError::find(&err).expect("status error in chain");
             assert_eq!(found.is_not_found(), not_found, "{status}");
+            assert_eq!(
+                found.is_rate_limited(),
+                matches!(
+                    status,
+                    StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+                ),
+                "{status}"
+            );
         }
         assert!(HttpStatusError::find(&anyhow::anyhow!("timeout")).is_none());
         assert_eq!(

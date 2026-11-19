@@ -113,11 +113,21 @@ pub(super) async fn perform_group_update(
     };
     let Some(relative_entry_point) = relative_to_repo(Path::new(opts.eval_entry_point), &repo_dir)
     else {
-        return skip_all(format!(
+        // Lasting: every member records the failure (and backs off) instead
+        // of being re-dispatched on every poll.
+        let error = anyhow::anyhow!(
             "Entry point {} is outside repository {}",
             opts.eval_entry_point,
             repo_dir.display()
-        ));
+        );
+        let mut outputs = Vec::with_capacity(attempts.len());
+        for (attempt, req) in attempts.iter().zip(&group.members) {
+            let result = attempt
+                .fail_setup(UpdatePhase::MetadataExtraction, "entry_point", &error)
+                .await;
+            outputs.push((Ok(result), label(req)));
+        }
+        return outputs;
     };
     let worktree_key = super::preservation::repo_scoped_name(
         group.lead().repo(),

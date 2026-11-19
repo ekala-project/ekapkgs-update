@@ -922,6 +922,76 @@ async fn replace_upstream_index_prunes_orphaned_sources() {
     assert_eq!(sources(&db).await, vec!["BurntSushi/ripgrep".to_owned()]);
 }
 
+#[tokio::test]
+async fn source_poll_state_counts_consecutive_failures() {
+    use ekapkgs_update::database::{SourceHealth, SourcePoll};
+
+    let db = setup_db().await;
+    let failure = SourcePoll::Failure {
+        error: "503",
+        health: SourceHealth::Error,
+    };
+    let state = |db: &Database| {
+        let db = db.clone();
+        async move {
+            db.source_poll_states()
+                .await
+                .unwrap()
+                .remove(&("github".to_owned(), "o/r".to_owned(), String::new()))
+                .unwrap()
+        }
+    };
+    for expected in 1..=3 {
+        db.record_source_poll("github", "o/r", None, &failure)
+            .await
+            .unwrap();
+        let s = state(&db).await;
+        assert_eq!(s.consecutive_failures, expected);
+        assert_eq!(s.health, SourceHealth::Error);
+        assert!(s.last_polled_at.is_some());
+    }
+    db.record_source_poll(
+        "github",
+        "o/r",
+        None,
+        &SourcePoll::Success {
+            latest_version: Some("1.0"),
+            latest_tag: Some("v1.0"),
+            release_count: 1,
+            moved_to: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(state(&db).await.consecutive_failures, 0);
+}
+
+#[tokio::test]
+async fn merged_update_is_not_redispatched_before_reindex() {
+    use ekapkgs_update::database::{PackageInfo, effective_current_version};
+
+    let db = setup_db().await;
+    db.upsert_package_info("r", "foo", "1.2", &PackageInfo::default())
+        .await
+        .unwrap();
+    db.record_observation("r", "foo", "1.2", "1.2")
+        .await
+        .unwrap();
+    // A human merged 1.3; the dispatched update found the tree there.
+    db.record_no_update("r", "foo", "1.3", Some("1.3"), None)
+        .await
+        .unwrap();
+    // The poll still reads the stale indexed 1.2.
+    let prev = db.get_update_record("r", "foo").await.unwrap().unwrap();
+    let current = effective_current_version("1.2", prev.current_version.as_deref());
+    assert_eq!(current, "1.3");
+    db.record_observation("r", "foo", "1.2", "1.3")
+        .await
+        .unwrap();
+    let rec = db.get_update_record("r", "foo").await.unwrap().unwrap();
+    assert_eq!(rec.current_version.as_deref(), Some("1.3"));
+}
+
 // ── Update groups ─────────────────────────────────────────────────
 
 fn group_request(attr: &str, current: &str, new: &str) -> UpdateRequest {

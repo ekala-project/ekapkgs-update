@@ -956,3 +956,39 @@ fn test_resolved_version_and_tag_prefixes() {
         );
     }
 }
+
+#[tokio::test]
+async fn releases_or_tags_falls_back_when_empty_or_failed() {
+    let release = |tag: &str| Release {
+        tag_name: tag.to_owned(),
+        is_prerelease: false,
+    };
+    let tags = || async { Ok(vec![release("v1.0.0")]) };
+    let names = |r: anyhow::Result<Vec<Release>>| -> Vec<String> {
+        r.unwrap().into_iter().map(|r| r.tag_name).collect()
+    };
+
+    // Releases listed: tags are not fetched.
+    let listed = releases_or_tags(Ok(vec![release("v2.0.0")]), || async {
+        Err(anyhow::anyhow!(
+            "tags fetched although releases were listed"
+        ))
+    })
+    .await;
+    assert_eq!(names(listed), vec!["v2.0.0"]);
+    // Tags-only project (GitLab answers an empty list): tags.
+    assert_eq!(
+        names(releases_or_tags(Ok(Vec::new()), tags).await),
+        vec!["v1.0.0"]
+    );
+    // Releases endpoint failed: tags.
+    assert_eq!(
+        names(releases_or_tags(Err(anyhow::anyhow!("403")), tags).await),
+        vec!["v1.0.0"]
+    );
+    // Both failed: the tags error.
+    let err = releases_or_tags(Ok(Vec::new()), || async { anyhow::bail!("tags down") })
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "tags down");
+}

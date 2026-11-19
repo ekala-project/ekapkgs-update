@@ -62,6 +62,7 @@ pub use types::{
     FailedUpdate, FailureResetFilter, PackageInfo, ResetFailure, UpdateLog, UpdateRecord,
     UpdateStatus,
 };
+pub use updates::effective_current_version;
 pub(crate) use updates::version_at_least;
 #[allow(unused_imports)] // Some re-exports are only used by ekapkgs-update-web / tests
 pub use watch::{

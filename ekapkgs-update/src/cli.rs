@@ -603,8 +603,9 @@ pub enum Commands {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
-        /// Poll interval in minutes (how often to check feeds)
-        #[arg(long, default_value = "10")]
+        /// Poll interval in minutes (how often to check feeds). Every poll
+        /// requests one feed per source, so keep it in the tens of minutes.
+        #[arg(long, default_value = "60")]
         poll_interval: u64,
         /// Index refresh interval in hours (how often to rebuild the full index)
         #[arg(long, default_value = "24")]

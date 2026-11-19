@@ -128,6 +128,8 @@ pub struct RepoIndexState {
 pub struct SourcePollState {
     pub last_polled_at: Option<DateTime<Utc>>,
     pub health: SourceHealth,
+    /// Failed polls since the last successful one (drives the poll backoff).
+    pub consecutive_failures: i64,
 }
 
 /// `(upstream_type, upstream_key, instance)`, instance `''` when absent.
@@ -561,8 +563,8 @@ impl Database {
     /// When every recorded upstream source was last polled, and its health.
     pub async fn source_poll_states(&self) -> Result<HashMap<SourceKey, SourcePollState>> {
         let rows = sqlx::query(
-            "SELECT upstream_type, upstream_key, instance, last_polled_at, health \
-             FROM upstream_sources",
+            "SELECT upstream_type, upstream_key, instance, last_polled_at, health, \
+             consecutive_failures FROM upstream_sources",
         )
         .fetch_all(&self.pool)
         .await
@@ -579,6 +581,7 @@ impl Database {
                     SourcePollState {
                         last_polled_at: parse_rfc3339(row.get("last_polled_at")),
                         health: SourceHealth::parse(row.get::<&str, _>("health")),
+                        consecutive_failures: row.get("consecutive_failures"),
                     },
                 )
             })

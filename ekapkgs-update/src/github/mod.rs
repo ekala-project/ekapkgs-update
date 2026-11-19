@@ -255,6 +255,41 @@ pub async fn fetch_github_releases(
     Ok(releases)
 }
 
+/// Fetch the release published for one tag (`GET /repos/{o}/{r}/releases/tags/{tag}`).
+///
+/// Returns `None` when the tag has no release (404): a bare tag.
+pub async fn fetch_github_release_by_tag(
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    token: Option<&str>,
+) -> anyhow::Result<Option<GithubRelease>> {
+    let mut url = reqwest::Url::parse("https://api.github.com/repos")?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("GitHub API URL cannot have path segments"))?
+        .extend([owner, repo, "releases", "tags", tag]);
+
+    debug!("Fetching release for tag from {}", url);
+
+    let client = Client::new();
+    let response = github_request_builder(&client, reqwest::Method::GET, url.as_str(), token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(HttpStatusError::new("GitHub release API request", response.status()).into());
+    }
+    let release: GithubRelease = response
+        .json()
+        .await
+        .with_context(|| format!("decode JSON from {url}"))?;
+    Ok(Some(release))
+}
+
 /// Create a pull request on GitHub
 ///
 /// # Arguments

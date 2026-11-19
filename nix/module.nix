@@ -596,11 +596,14 @@ in
 
       pollIntervalMinutes = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 10;
-        example = 5;
+        default = 60;
+        example = 30;
         description = ''
           How often (in minutes) to poll upstream RSS/Atom feeds and APIs for
-          new releases.
+          new releases. Each poll requests one feed per upstream source
+          (thousands for a large package set), so keep this in the tens of
+          minutes or more. Sources whose polls keep failing back off on their
+          own (up to a day).
         '';
       };
 

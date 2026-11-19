@@ -31,6 +31,22 @@ pub(crate) fn version_at_least(a: &str, b: &str) -> bool {
     a == b || compare_version_components(a, b).is_ge()
 }
 
+/// The version a `watch` poll treats as a package's current version: the
+/// indexed one, unless `updates` already records a newer one.
+///
+/// `upstream_index` is only refreshed by a re-index, but updates land in
+/// between: an update that finds the tree already at its target (a merged
+/// PR) records the new version (`record_no_update`). Without this, the next
+/// poll would write the stale indexed version back and dispatch the merged
+/// update again on every poll until the next re-index. A re-index writes the
+/// tree's version to both tables, so a genuine downgrade is picked up then.
+pub fn effective_current_version<'a>(indexed: &'a str, recorded: Option<&'a str>) -> &'a str {
+    match recorded.filter(|r| !r.is_empty()) {
+        Some(recorded) if !version_at_least(indexed, recorded) => recorded,
+        _ => indexed,
+    }
+}
+
 /// Backoff applied after a check that found nothing to do.
 ///
 /// First check → 2 days; re-checked soon after the previous window → 4 days;
@@ -493,6 +509,10 @@ impl Database {
         latest_upstream_version: &str,
     ) -> Result<Option<UpdateRecord>> {
         let prev = self.get_update_record(repo_name, attr_path).await?;
+        let current_version = effective_current_version(
+            current_version,
+            prev.as_ref().and_then(|r| r.current_version.as_deref()),
+        );
         let state = reconcile(
             prev.as_ref(),
             current_version,
@@ -528,6 +548,10 @@ impl Database {
         error: &str,
     ) -> Result<()> {
         let prev = self.get_update_record(repo_name, attr_path).await?;
+        let current_version = effective_current_version(
+            current_version,
+            prev.as_ref().and_then(|r| r.current_version.as_deref()),
+        );
         let state = reconcile(prev.as_ref(), current_version, None, Some(error));
         self.write_observation(
             repo_name,
@@ -1483,6 +1507,53 @@ mod tests {
         let rec = db.get_update_record("a", "hello").await.unwrap().unwrap();
         assert_eq!(rec.failure_count, 0);
         assert_eq!(rec.failed_version, None);
+    }
+
+    #[test]
+    fn effective_current_version_cases() {
+        for (indexed, recorded, expected) in [
+            ("1.2", None, "1.2"),
+            ("1.2", Some(""), "1.2"),
+            ("1.2", Some("1.2"), "1.2"),
+            // A merged update recorded between re-indexes wins.
+            ("1.2", Some("1.3"), "1.3"),
+            ("1.3.0rc1", Some("1.3.0"), "1.3.0"),
+            // The index is newer (re-index after an update): the index.
+            ("1.4", Some("1.3"), "1.4"),
+        ] {
+            assert_eq!(
+                effective_current_version(indexed, recorded),
+                expected,
+                "{indexed} / {recorded:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_never_regresses_current_version() {
+        let db = setup_db().await;
+        db.upsert_package_info("w", "foo", "1.2", &PackageInfo::default())
+            .await
+            .unwrap();
+        db.record_observation("w", "foo", "1.2", "1.3")
+            .await
+            .unwrap();
+        // A human merged 1.3; the dispatched update found the tree there.
+        db.record_no_update("w", "foo", "1.3", Some("1.3"), None)
+            .await
+            .unwrap();
+        // The next poll still sees the stale indexed 1.2.
+        db.record_observation("w", "foo", "1.2", "1.3")
+            .await
+            .unwrap();
+        let rec = db.get_update_record("w", "foo").await.unwrap().unwrap();
+        assert_eq!(rec.current_version.as_deref(), Some("1.3"));
+        assert_eq!(rec.status, UpdateStatus::UpToDate);
+        db.record_upstream_error("w", "foo", "1.2", "503")
+            .await
+            .unwrap();
+        let rec = db.get_update_record("w", "foo").await.unwrap().unwrap();
+        assert_eq!(rec.current_version.as_deref(), Some("1.3"));
     }
 
     #[tokio::test]
