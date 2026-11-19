@@ -267,12 +267,7 @@ pub async fn create_and_push_branch(
         anyhow::bail!("Failed to stage changes: {stderr}");
     }
 
-    // Create commit message
-    let commit_message = format!(
-        "{}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
-         <noreply@ekapkgs.org>",
-        update_title(attr_path, old_version, new_version)
-    );
+    let commit_message = commit_message(&update_title(attr_path, old_version, new_version));
 
     // Commit changes
     let output = run_git(Some(worktree_path), ["commit", "-m", &commit_message]).await?;
@@ -306,6 +301,75 @@ pub async fn create_and_push_branch(
     );
 
     Ok(branch_name)
+}
+
+/// Commit message for a tool-generated commit with the given title.
+pub fn commit_message(title: &str) -> String {
+    format!(
+        "{title}\n\n🤖 Generated with ekapkgs-update\n\nCo-Authored-By: ekapkgs-update \
+         <noreply@ekapkgs.org>"
+    )
+}
+
+/// Stage every change in `worktree_path` and commit it as `title`.
+///
+/// Returns `false` (without committing) when there is nothing to commit.
+pub async fn commit_all(worktree_path: &Path, title: &str) -> anyhow::Result<bool> {
+    let output = run_git(Some(worktree_path), ["add", "-A"]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to stage changes: {stderr}");
+    }
+    let output = run_git(
+        Some(worktree_path),
+        ["diff", "--cached", "--quiet", "--exit-code"],
+    )
+    .await?;
+    if output.status.success() {
+        return Ok(false);
+    }
+    let output = run_git(
+        Some(worktree_path),
+        ["commit", "-m", &commit_message(title)],
+    )
+    .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to commit changes: {stderr}");
+    }
+    Ok(true)
+}
+
+/// Stable branch name of an update group's PR.
+pub fn group_branch_name(root: &str) -> String {
+    format!("update/group/{}", root.replace(['.', '/', '"'], "-"))
+}
+
+/// Point `branch_name` at the worktree's `HEAD` and force-push it to
+/// `remote_repo`, replacing whatever the branch held before (a group PR is
+/// regenerated from the current base on every update).
+pub async fn force_push_branch(
+    worktree_path: &Path,
+    branch_name: &str,
+    remote_repo: &str,
+) -> anyhow::Result<()> {
+    let output = run_git(Some(worktree_path), ["checkout", "-B", branch_name]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to create branch '{branch_name}': {stderr}");
+    }
+    let push_target = format!("+{branch_name}:{branch_name}");
+    let output = run_git(
+        Some(worktree_path),
+        ["push", "-u", remote_repo, &push_target],
+    )
+    .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to push branch '{branch_name}' to remote '{remote_repo}': {stderr}");
+    }
+    debug!("Force-pushed branch '{}' to '{}'", branch_name, remote_repo);
+    Ok(())
 }
 
 /// PR configuration for creating pull requests

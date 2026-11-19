@@ -25,7 +25,9 @@ use crate::vcs_sources::SemverStrategy;
 /// (`/repo/ci/packages.nix`) resolve to `/repo`, falling back to the entry
 /// point's directory when it is not inside a git repository. The result is
 /// canonical.
-async fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result<PathBuf> {
+pub(super) async fn get_repo_dir_from_entry_point(
+    eval_entry_point: &str,
+) -> anyhow::Result<PathBuf> {
     let path = std::fs::canonicalize(eval_entry_point)
         .with_context(|| format!("Cannot resolve entry point path: {eval_entry_point}"))?;
     let parent = path.parent().ok_or_else(|| {
@@ -51,7 +53,7 @@ async fn get_repo_dir_from_entry_point(eval_entry_point: &str) -> anyhow::Result
 /// whose `meta.position` points into the Nix store. Joining an absolute path
 /// onto the worktree would silently yield the original path and edit files
 /// outside the worktree, so callers must not proceed.
-fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
+pub(super) fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
     if let Ok(relative) = path.strip_prefix(repo_dir) {
         return Some(relative.to_path_buf());
     }
@@ -64,15 +66,15 @@ fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
 /// Database bookkeeping for one update attempt, shared by worktree and
 /// branch mode: workflow phase rows (via [`PhaseTracker`]), the package's
 /// `updates` row and its failure log.
-struct Attempt<'a> {
+pub(super) struct Attempt<'a> {
     db: &'a Database,
     session_id: &'a str,
-    req: &'a UpdateRequest,
-    tracker: PhaseTracker,
+    pub(super) req: &'a UpdateRequest,
+    pub(super) tracker: PhaseTracker,
 }
 
 impl<'a> Attempt<'a> {
-    fn new(db: &'a Database, session_id: &'a str, req: &'a UpdateRequest) -> Self {
+    pub(super) fn new(db: &'a Database, session_id: &'a str, req: &'a UpdateRequest) -> Self {
         let tracker = PhaseTracker::new(db.clone(), session_id, req.repo(), &req.attr_path);
         Self {
             db,
@@ -84,7 +86,10 @@ impl<'a> Attempt<'a> {
 
     /// Build an [`crate::commands::update::UpdateConfig`] for running the
     /// update workflow in place (no commit / PR; handled by the caller).
-    fn update_config(&self, run_passthru_tests: bool) -> crate::commands::update::UpdateConfig {
+    pub(super) fn update_config(
+        &self,
+        run_passthru_tests: bool,
+    ) -> crate::commands::update::UpdateConfig {
         crate::commands::update::UpdateConfig {
             commit: false,             // Don't auto-commit in run mode
             create_pr: false,          // PRs / commits are handled by the caller
@@ -101,7 +106,7 @@ impl<'a> Attempt<'a> {
 
     /// The structured error of the phase that failed, falling back to a
     /// generic infrastructure error when the failure was not tracked.
-    fn failure(&self, error_message: &str) -> UpdateError {
+    pub(super) fn failure(&self, error_message: &str) -> UpdateError {
         self.tracker
             .last_failure()
             .unwrap_or_else(|| UpdateError::InfrastructureError {
@@ -112,7 +117,7 @@ impl<'a> Attempt<'a> {
     }
 
     /// Record a successful update (status `proposed`, backoff reset).
-    async fn record_success(&self, rebuild_count: Option<usize>) {
+    pub(super) async fn record_success(&self, rebuild_count: Option<usize>) {
         if let Err(e) = self
             .db
             .record_successful_update(
@@ -134,7 +139,11 @@ impl<'a> Attempt<'a> {
 
     /// Record a failed attempt (failure log, `failed` status, backoff) and
     /// return the result to report.
-    async fn record_failure(&self, error: &UpdateError, error_log: &str) -> UpdateResult {
+    pub(super) async fn record_failure(
+        &self,
+        error: &UpdateError,
+        error_log: &str,
+    ) -> UpdateResult {
         let record = FailedUpdate {
             repo_name: self.req.repo(),
             attr_path: &self.req.attr_path,
@@ -162,7 +171,7 @@ impl<'a> Attempt<'a> {
     /// as a failed update (failure backoff, `failed_version`) so the version
     /// is retried instead of staying `proposed` without a PR. Returns the
     /// PR on success, or the [`UpdateResult::Failed`] to report.
-    async fn record_pr_outcome(
+    pub(super) async fn record_pr_outcome(
         &self,
         rebuild_count: Option<usize>,
         pr: anyhow::Result<(String, i64)>,
@@ -201,7 +210,7 @@ impl<'a> Attempt<'a> {
     /// attribute built from the same file was updated first, or the change
     /// landed some other way. Record the package as observed at that version,
     /// which reconciles it to `up_to_date` instead of a failure.
-    async fn already_at_version(&self, already: &AlreadyAtVersion) -> UpdateResult {
+    pub(super) async fn already_at_version(&self, already: &AlreadyAtVersion) -> UpdateResult {
         info!(
             "{}: Already at {} (requested {}), nothing to update",
             self.req.attr_path, already.current, already.target
@@ -227,7 +236,7 @@ impl<'a> Attempt<'a> {
 
     /// Fail the attempt before the update workflow ran (e.g. the package's
     /// file could not be located).
-    async fn fail_setup(
+    pub(super) async fn fail_setup(
         &self,
         phase: UpdatePhase,
         component: &str,
@@ -245,7 +254,7 @@ impl<'a> Attempt<'a> {
 }
 
 /// Finish an `agent_fix` phase according to the Claude fix outcome.
-async fn record_agent_fix(handle: PhaseHandle<'_>, result: &ClaudeFixResult) {
+pub(super) async fn record_agent_fix(handle: PhaseHandle<'_>, result: &ClaudeFixResult) {
     let infra = |details: &str| UpdateError::InfrastructureError {
         phase: UpdatePhase::AgentFix,
         component: "claude".to_owned(),
@@ -270,7 +279,7 @@ async fn record_agent_fix(handle: PhaseHandle<'_>, result: &ClaudeFixResult) {
 }
 
 /// Log a Claude fix outcome that did not fix the build.
-fn log_unfixed(attr_path: &str, result: &ClaudeFixResult) {
+pub(super) fn log_unfixed(attr_path: &str, result: &ClaudeFixResult) {
     match result {
         ClaudeFixResult::Fixed => {},
         ClaudeFixResult::StillBroken { stderr } => {
@@ -1104,7 +1113,10 @@ pub(super) async fn perform_direct_update(
 }
 
 /// Get the file location for a package from meta.position
-async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<String> {
+pub(super) async fn get_file_location(
+    eval_entry_point: &str,
+    attr_path: &str,
+) -> anyhow::Result<String> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
     let position_expr =
         format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.meta.position");
@@ -1121,6 +1133,86 @@ async fn get_file_location(eval_entry_point: &str, attr_path: &str) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
 
     Ok(file_path.to_owned())
+}
+
+/// `## Rebuild Impact` PR body section (with its leading blank lines).
+pub(super) fn rebuild_impact_section(
+    analysis: &crate::nix::rebuild_count::RebuildAnalysis,
+) -> String {
+    let mut body = String::new();
+    body.push_str("\n\n## Rebuild Impact\n\n");
+    body.push_str(&format!(
+        "- **Packages affected:** {}\n",
+        analysis.rebuild_count
+    ));
+    body.push_str(&format!(
+        "- **Impact:** {:.1}% of {} total packages\n",
+        analysis.rebuild_percentage(),
+        analysis.total_packages
+    ));
+
+    if !analysis.new_packages.is_empty() {
+        body.push_str(&format!(
+            "- **New packages:** {}\n",
+            analysis.new_packages.len()
+        ));
+    }
+
+    if !analysis.removed_packages.is_empty() {
+        body.push_str(&format!(
+            "- **Removed packages:** {}\n",
+            analysis.removed_packages.len()
+        ));
+    }
+
+    // List affected packages if the count is reasonable
+    if analysis.rebuild_count > 0 && analysis.rebuild_count <= 20 {
+        body.push_str("\n### Affected packages:\n");
+        for pkg in &analysis.rebuilt_packages {
+            body.push_str(&format!("- `{pkg}`\n"));
+        }
+    } else if analysis.rebuild_count > 20 {
+        body.push_str(&format!(
+            "\n<details>\n<summary>Show all {} affected packages</summary>\n\n",
+            analysis.rebuild_count
+        ));
+        for pkg in &analysis.rebuilt_packages {
+            body.push_str(&format!("- `{pkg}`\n"));
+        }
+        body.push_str("\n</details>\n");
+    }
+    body
+}
+
+/// `## Tests` PR body section (empty when tests were not run) and whether
+/// the PR should be a draft (tests failed).
+pub(super) fn test_section(test_result: &crate::commands::update::TestResult) -> (String, bool) {
+    let mut body = String::new();
+    let draft = match test_result {
+        crate::commands::update::TestResult::Passed => {
+            body.push_str("\n\n## Tests\n\n✅ `passthru.tests` passed");
+            false
+        },
+        crate::commands::update::TestResult::Failed(stderr) => {
+            body.push_str("\n\n## Tests\n\n❌ `passthru.tests` **failed**\n\n");
+            body.push_str(
+                "This PR is opened as a draft because the package's passthru.tests did not pass \
+                 after the update.\n\n",
+            );
+            // Truncate very long output
+            let truncated = if stderr.len() > 4000 {
+                format!("{}...\n\n(truncated)", &stderr[..4000])
+            } else {
+                stderr.clone()
+            };
+            body.push_str(&format!(
+                "<details>\n<summary>Test output</summary>\n\n```\n{truncated}\n```\n\n</details>"
+            ));
+            true
+        },
+        _ => false,
+    };
+    (body, draft)
 }
 
 /// Create a pull request for a successful update
@@ -1256,47 +1348,7 @@ async fn create_pr_for_update(
 
     // Add rebuild impact analysis if available
     if let Some(analysis) = rebuild_analysis {
-        body.push_str("\n\n## Rebuild Impact\n\n");
-        body.push_str(&format!(
-            "- **Packages affected:** {}\n",
-            analysis.rebuild_count
-        ));
-        body.push_str(&format!(
-            "- **Impact:** {:.1}% of {} total packages\n",
-            analysis.rebuild_percentage(),
-            analysis.total_packages
-        ));
-
-        if !analysis.new_packages.is_empty() {
-            body.push_str(&format!(
-                "- **New packages:** {}\n",
-                analysis.new_packages.len()
-            ));
-        }
-
-        if !analysis.removed_packages.is_empty() {
-            body.push_str(&format!(
-                "- **Removed packages:** {}\n",
-                analysis.removed_packages.len()
-            ));
-        }
-
-        // List affected packages if the count is reasonable
-        if analysis.rebuild_count > 0 && analysis.rebuild_count <= 20 {
-            body.push_str("\n### Affected packages:\n");
-            for pkg in &analysis.rebuilt_packages {
-                body.push_str(&format!("- `{pkg}`\n"));
-            }
-        } else if analysis.rebuild_count > 20 {
-            body.push_str(&format!(
-                "\n<details>\n<summary>Show all {} affected packages</summary>\n\n",
-                analysis.rebuild_count
-            ));
-            for pkg in &analysis.rebuilt_packages {
-                body.push_str(&format!("- `{pkg}`\n"));
-            }
-            body.push_str("\n</details>\n");
-        }
+        body.push_str(&rebuild_impact_section(analysis));
     }
 
     // Add CVE analysis if available
@@ -1320,30 +1372,8 @@ async fn create_pr_for_update(
     }
 
     // Add test results section
-    let draft = match test_result {
-        crate::commands::update::TestResult::Passed => {
-            body.push_str("\n\n## Tests\n\n✅ `passthru.tests` passed");
-            false
-        },
-        crate::commands::update::TestResult::Failed(stderr) => {
-            body.push_str("\n\n## Tests\n\n❌ `passthru.tests` **failed**\n\n");
-            body.push_str(
-                "This PR is opened as a draft because the package's passthru.tests did not pass \
-                 after the update.\n\n",
-            );
-            // Truncate very long output
-            let truncated = if stderr.len() > 4000 {
-                format!("{}...\n\n(truncated)", &stderr[..4000])
-            } else {
-                stderr.clone()
-            };
-            body.push_str(&format!(
-                "<details>\n<summary>Test output</summary>\n\n```\n{truncated}\n```\n\n</details>"
-            ));
-            true
-        },
-        _ => false,
-    };
+    let (tests, draft) = test_section(test_result);
+    body.push_str(&tests);
 
     body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
