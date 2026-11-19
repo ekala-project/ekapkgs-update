@@ -141,6 +141,9 @@ pub struct ConfigFile {
     /// Watch (passive/event-driven) mode settings.
     pub watch: WatchFileConfig,
 
+    /// GitHub App credentials (PRs as the app's bot, webhooks).
+    pub github_app: GithubAppConfig,
+
     /// Repositories to watch for updates. When non-empty, each repo carries
     /// its own entry point and PR target. Used by the `watch` command.
     #[serde(default)]
@@ -194,6 +197,24 @@ pub struct NixConfig {
     /// Maximum number of local build jobs.
     /// Passed as `--max-jobs` to `nix-build`.
     pub max_jobs: Option<usize>,
+}
+
+/// GitHub App credentials. Without them, `GITHUB_TOKEN` is used.
+///
+/// Each value can be overridden by an environment variable
+/// (`EKAPKGS_GITHUB_APP_CLIENT_ID`, `EKAPKGS_GITHUB_APP_KEY_FILE`,
+/// `EKAPKGS_GITHUB_WEBHOOK_SECRET_FILE`), e.g. to point at systemd
+/// credentials.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GithubAppConfig {
+    /// The app's client ID (recommended) or app ID.
+    pub client_id: Option<String>,
+    /// PEM private key generated in the app's settings.
+    pub private_key_file: Option<String>,
+    /// File holding the webhook secret set in the app's settings (needed
+    /// for `watch --webhook-listen`).
+    pub webhook_secret_file: Option<String>,
 }
 
 /// Watch (passive/event-driven) mode settings.

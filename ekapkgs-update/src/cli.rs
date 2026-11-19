@@ -582,6 +582,11 @@ pub enum Commands {
         /// moved (e.g. a PR was merged) and re-index it. 0 disables.
         #[arg(long, default_value = "5", value_name = "MINUTES")]
         head_check_interval: u64,
+        /// Serve the GitHub webhook endpoint (`POST /github/webhook`) on this
+        /// address, e.g. 127.0.0.1:3041 behind a TLS-terminating proxy.
+        /// Needs `github_app.webhook_secret_file` in the config file.
+        #[arg(long, value_name = "ADDR")]
+        webhook_listen: Option<std::net::SocketAddr>,
         /// Upstream git remote. Inferred if left unset.
         #[arg(long)]
         upstream: Option<String>,
@@ -1180,6 +1185,7 @@ impl Commands {
                 poll_interval,
                 index_refresh_hours,
                 head_check_interval,
+                webhook_listen,
                 upstream,
                 fork,
                 run_passthru_tests,
@@ -1214,6 +1220,16 @@ impl Commands {
                     claude_fix_timeout,
                 );
                 watch_config.repos = config_file.repos;
+                if let Some(listen) = webhook_listen {
+                    let secret = crate::github::auth::webhook_secret(&config_file.github_app)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--webhook-listen needs github_app.webhook_secret_file (or \
+                                 EKAPKGS_GITHUB_WEBHOOK_SECRET_FILE)"
+                            )
+                        })?;
+                    watch_config.webhook = Some(commands::watch::WebhookListen { listen, secret });
+                }
                 watch_config.execute().await
             },
         }

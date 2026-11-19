@@ -58,10 +58,24 @@ where
     I: IntoIterator<Item = S> + Clone,
     S: AsRef<OsStr>,
 {
+    run_git_env(cwd, args, &[]).await
+}
+
+/// [`run_git`] with extra environment variables (see [`github_git_env`]).
+async fn run_git_env<I, S>(
+    cwd: Option<&Path>,
+    args: I,
+    env: &[(String, String)],
+) -> anyhow::Result<Output>
+where
+    I: IntoIterator<Item = S> + Clone,
+    S: AsRef<OsStr>,
+{
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    cmd.envs(env.iter().map(|(k, v)| (k, v)));
     cmd.args(args.clone())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -297,8 +311,11 @@ pub async fn create_and_push_branch(
         update_title(attr_path, old_version, new_version)
     );
 
+    // With a GitHub App: commit as its bot and push with its token.
+    let env = github_git_env(Some(worktree_path), remote_repo).await?;
+
     // Commit changes
-    let output = run_git(Some(worktree_path), ["commit", "-m", &commit_message]).await?;
+    let output = run_git_env(Some(worktree_path), ["commit", "-m", &commit_message], &env).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -312,9 +329,10 @@ pub async fn create_and_push_branch(
 
     // Push to remote
     let push_target = format!("{branch_name}:{branch_name}");
-    let output = run_git(
+    let output = run_git_env(
         Some(worktree_path),
         ["push", "-u", remote_repo, &push_target],
+        &env,
     )
     .await?;
 
@@ -489,6 +507,28 @@ async fn get_remote_url(cwd: Option<&Path>, remote: &str) -> anyhow::Result<Stri
     Ok(decode_git_stdout(output, "remote get-url")?
         .trim()
         .to_owned())
+}
+
+/// Environment for committing to and pushing to `remote` as the configured
+/// GitHub App ([`crate::github::auth::git_env`]). Empty without an app or
+/// when `remote` is not on GitHub.
+///
+/// # Errors
+///
+/// Returns an error if an app is configured but no installation token could
+/// be obtained for the remote's repository.
+pub async fn github_git_env(
+    cwd: Option<&Path>,
+    remote: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    if crate::github::auth::app().is_none() {
+        return Ok(Vec::new());
+    }
+    let url = get_remote_url(cwd, remote).await?;
+    let Some(gh) = parse_github_url(&url) else {
+        return Ok(Vec::new());
+    };
+    crate::github::auth::git_env(&gh.owner, &gh.repo).await
 }
 
 /// Get the default branch for a remote

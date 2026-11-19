@@ -596,6 +596,63 @@ impl Database {
     }
 
     /// Record PR information for a successful update
+    /// A proposed update's PR was closed without being merged: the proposal
+    /// is withdrawn and recorded like a failed attempt at that version
+    /// (`failed`, failure backoff), so the same version is proposed again
+    /// only after the backoff, while a newer release is proposed right away.
+    ///
+    /// Returns the attr path and version, or `None` when no package is
+    /// `proposed` with that PR (unknown PR, or already merged or handled).
+    pub async fn record_pr_closed(
+        &self,
+        repo_name: &str,
+        pr_number: i64,
+    ) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String, i64)> = sqlx::query_as(
+            r#"
+            SELECT attr_path, proposed_version, failure_count FROM updates
+            WHERE repo_name = ? AND pr_number = ? AND status = 'proposed'
+              AND proposed_version IS NOT NULL
+            "#,
+        )
+        .bind(repo_name)
+        .bind(pr_number)
+        .fetch_optional(&self.pool)
+        .await
+        .context("look up proposal by PR number")?;
+        let Some((attr_path, version, failure_count)) = row else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let next_attempt = now + Duration::days(failure_backoff_days(failure_count + 1));
+        let changed = sqlx::query(
+            r#"
+            UPDATE updates SET
+                status = 'failed',
+                failed_version = proposed_version,
+                proposed_version = NULL,
+                failure_count = failure_count + 1,
+                last_error = ?,
+                last_attempted = ?,
+                next_attempt = ?
+            WHERE repo_name = ? AND attr_path = ? AND status = 'proposed'
+              AND pr_number = ? AND proposed_version = ?
+            "#,
+        )
+        .bind(format!("PR #{pr_number} was closed without merging"))
+        .bind(now.to_rfc3339())
+        .bind(next_attempt.to_rfc3339())
+        .bind(repo_name)
+        .bind(&attr_path)
+        .bind(pr_number)
+        .bind(&version)
+        .execute(&self.pool)
+        .await
+        .context("withdraw closed proposal")?
+        .rows_affected();
+        Ok((changed > 0).then_some((attr_path, version)))
+    }
+
     pub async fn record_pr_info(
         &self,
         repo_name: &str,

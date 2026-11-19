@@ -1214,9 +1214,7 @@ async fn create_pr_for_update(
     test_result: &crate::commands::update::TestResult,
     components: &[crate::commands::update::ComponentUpdate],
 ) -> anyhow::Result<(String, i64)> {
-    // Get GitHub token from environment
-    let github_token = std::env::var("GITHUB_TOKEN")
-        .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN environment variable not set"))?;
+    let github_token = crate::github::auth::token_for(&config.owner, &config.repo).await?;
 
     // Create and push branch
     let branch_name = crate::git::create_and_push_branch(

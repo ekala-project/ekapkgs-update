@@ -1,6 +1,5 @@
 use std::process::Stdio;
 
-use anyhow::Context;
 use tokio::process::Command;
 use tracing::{debug, info};
 
@@ -91,11 +90,8 @@ pub async fn create_pr_for_update(
         get_pr_config_from_git().await?
     };
 
-    // Get GitHub token from environment
-    let github_token = std::env::var("GITHUB_TOKEN").context(
-        "GITHUB_TOKEN environment variable is required for PR creation. Set it with: export \
-         GITHUB_TOKEN=your_token_here",
-    )?;
+    let github_token = crate::github::auth::token_for(&pr_config.owner, &pr_config.repo).await?;
+    let git_env = crate::git::github_git_env(None, fork).await?;
 
     info!("Creating pull request for {}", attr_path);
 
@@ -150,6 +146,7 @@ pub async fn create_pr_for_update(
     debug!("Creating commit");
     let output = Command::new("git")
         .args(["commit", "-m", &commit_message])
+        .envs(git_env.iter().map(|(k, v)| (k, v)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -165,6 +162,7 @@ pub async fn create_pr_for_update(
     let push_target = format!("{branch_name}:{branch_name}");
     let output = Command::new("git")
         .args(["push", "-u", fork, &push_target])
+        .envs(git_env.iter().map(|(k, v)| (k, v)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()

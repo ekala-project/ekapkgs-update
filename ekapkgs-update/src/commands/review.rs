@@ -214,10 +214,8 @@ async fn find_scoped_attr_path(
 
 /// Execute the review command.
 pub async fn execute(config: ReviewConfig) -> anyhow::Result<()> {
-    let token = std::env::var("GITHUB_TOKEN")
-        .context("GITHUB_TOKEN environment variable is required for the review command")?;
-
     let RepoCoords { owner, repo } = &config.repo;
+    let token = crate::github::auth::token_for(owner, repo).await?;
 
     // 1. Fetch PR details
     info!("Fetching PR #{} from {}/{}", config.pr_number, owner, repo);
