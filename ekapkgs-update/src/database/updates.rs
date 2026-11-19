@@ -859,12 +859,20 @@ impl Database {
         Ok(log)
     }
 
-    /// Get all failed logs for an attr_path (any repo), most recent first
-    pub async fn get_all_failed_logs_by_attr(&self, attr_path: &str) -> Result<Vec<UpdateLog>> {
+    /// Get all failed logs for an attr_path (of `repo_name`, or any repo),
+    /// most recent first
+    pub async fn get_all_failed_logs_by_attr(
+        &self,
+        repo_name: Option<&str>,
+        attr_path: &str,
+    ) -> Result<Vec<UpdateLog>> {
         let logs = sqlx::query_as::<_, UpdateLog>(&format!(
-            "SELECT {LOG_COLUMNS} FROM update_logs WHERE attr_path = ? ORDER BY timestamp DESC"
+            "SELECT {LOG_COLUMNS} FROM update_logs
+             WHERE attr_path = ?1 AND (?2 IS NULL OR repo_name = ?2)
+             ORDER BY timestamp DESC"
         ))
         .bind(attr_path)
+        .bind(repo_name)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("get failed logs for {attr_path}"))?;
@@ -872,23 +880,46 @@ impl Database {
         Ok(logs)
     }
 
-    /// Query failed update logs with optional filtering
+    /// Query failed update logs with optional filtering.
+    ///
+    /// With `still_failing`, only logs of packages whose `updates` row is
+    /// still `failed` are returned (packages fixed since are left out).
     pub async fn query_failed_logs(
         &self,
+        repo_name: Option<&str>,
         package_pattern: Option<&str>,
         since: Option<DateTime<Utc>>,
         limit: Option<usize>,
+        still_failing: bool,
     ) -> Result<Vec<UpdateLog>> {
-        let mut query = format!("SELECT {LOG_COLUMNS} FROM update_logs WHERE status = 'failed'");
+        let columns = LOG_COLUMNS
+            .split(',')
+            .map(|c| {
+                let c = c.trim();
+                format!("l.{c} AS {c}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut query = format!("SELECT {columns} FROM update_logs l");
+        if still_failing {
+            query.push_str(
+                " JOIN updates u ON u.repo_name = l.repo_name AND u.attr_path = l.attr_path \
+                 AND u.status = 'failed'",
+            );
+        }
+        query.push_str(" WHERE l.status = 'failed'");
 
+        if repo_name.is_some() {
+            query.push_str(" AND l.repo_name = ?");
+        }
         if package_pattern.is_some() {
-            query.push_str(" AND attr_path LIKE ?");
+            query.push_str(" AND l.attr_path LIKE ?");
         }
         if since.is_some() {
-            query.push_str(" AND timestamp >= ?");
+            query.push_str(" AND l.timestamp >= ?");
         }
 
-        query.push_str(" ORDER BY timestamp DESC");
+        query.push_str(" ORDER BY l.timestamp DESC");
 
         if let Some(lim) = limit {
             query.push_str(&format!(" LIMIT {lim}"));
@@ -896,6 +927,9 @@ impl Database {
 
         let mut q = sqlx::query_as::<_, UpdateLog>(&query);
 
+        if let Some(repo) = repo_name {
+            q = q.bind(repo.to_owned());
+        }
         if let Some(pattern) = package_pattern {
             q = q.bind(pattern.to_owned());
         }
@@ -1507,6 +1541,59 @@ mod tests {
         let rec = db.get_update_record("a", "hello").await.unwrap().unwrap();
         assert_eq!(rec.failure_count, 0);
         assert_eq!(rec.failed_version, None);
+    }
+
+    #[tokio::test]
+    async fn query_failed_logs_scopes_repos_and_skips_fixed_packages() {
+        let db = setup_db().await;
+        for repo in ["a", "b"] {
+            let failure = FailedUpdate {
+                repo_name: repo,
+                attr_path: "hello",
+                old_version: Some("1.0"),
+                new_version: Some("1.1"),
+                error_log: "error: builder failed\n",
+                ..FailedUpdate::default()
+            };
+            db.record_failed_update(&failure).await.unwrap();
+        }
+        let keys = |logs: Vec<UpdateLog>| {
+            let mut keys: Vec<_> = logs.into_iter().map(|l| l.repo_name).collect();
+            keys.sort();
+            keys
+        };
+
+        let all = db
+            .query_failed_logs(None, None, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(keys(all), ["a", "b"]);
+        let only_b = db
+            .query_failed_logs(Some("b"), None, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(keys(only_b), ["b"]);
+
+        // Fixed in repo a: its log stays, but it is no longer a failure.
+        db.record_successful_update("a", "hello", "1.0", "1.1", None, None)
+            .await
+            .unwrap();
+        let failing = db
+            .query_failed_logs(None, None, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(keys(failing), ["b"]);
+        let history = db
+            .query_failed_logs(None, None, None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(keys(history), ["a", "b"]);
+
+        let logs = db
+            .get_all_failed_logs_by_attr(Some("a"), "hello")
+            .await
+            .unwrap();
+        assert_eq!(keys(logs), ["a"]);
     }
 
     #[test]

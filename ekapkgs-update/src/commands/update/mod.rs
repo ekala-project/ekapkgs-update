@@ -418,9 +418,24 @@ pub async fn update_from_file_path(
         TestResult::NotRequested
     };
 
-    // Step 8: Format the file if requested
+    // Step 8: Format the file if requested. Formatting prepares the commit,
+    // so it is tracked under PrCreation (an untracked failure would be
+    // classified as a build error by the caller's fallback).
     if update_config.format {
-        format_nix_file(&actual_file_location).await?;
+        let handle = tracker.start(UpdatePhase::PrCreation).await;
+        match format_nix_file(&actual_file_location).await {
+            Ok(()) => handle.success().await,
+            Err(e) => {
+                handle
+                    .fail(errors::UpdateError::InfrastructureError {
+                        phase: UpdatePhase::PrCreation,
+                        component: "nixfmt".to_owned(),
+                        details: format!("{e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            },
+        }
     }
 
     if test_result.failed() {

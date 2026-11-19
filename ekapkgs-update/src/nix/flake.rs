@@ -182,7 +182,10 @@ pub async fn get_flake_package_metadata(
         .await
         .or_else(|| try_eval_flake_attr_sync(installable, "vendorSha256"));
     let npm_deps_hash = try_eval_flake_attr(installable, "npmDepsHash").await;
-    let nuget_deps_hash = try_eval_flake_attr(installable, "nugetDeps").await;
+    let nuget_deps_hash = crate::package::nuget_deps_hash(
+        installable,
+        try_eval_flake_attr(installable, "nugetDeps").await,
+    );
     let composer_deps_hash = try_eval_flake_attr(installable, "composerDepsHash").await;
 
     Ok(PackageMetadata {

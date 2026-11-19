@@ -47,9 +47,62 @@ pub fn extract_hash_for(stderr_output: &str, specified: &str) -> Option<String> 
     None
 }
 
+/// Whether `value` is written like a Nix hash: SRI (`sha256-…`), a
+/// `<algo>:`-prefixed hash, or a bare nix32 / base16 sha256.
+///
+/// Used to tell hash-valued attributes from ones that name a file or
+/// derivation, such as `nugetDeps = ./deps.json;` (evaluates to a path).
+pub fn looks_like_hash(value: &str) -> bool {
+    let value = value.trim();
+    let is_base64 = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+    };
+    for algo in ["sha1", "sha256", "sha512", "md5"] {
+        if let Some(rest) = value.strip_prefix(algo) {
+            if let Some(b64) = rest.strip_prefix('-') {
+                return is_base64(b64);
+            }
+            if let Some(digest) = rest.strip_prefix(':') {
+                return is_base64(digest);
+            }
+        }
+    }
+    let nix32 = value.len() == 52
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || (c.is_ascii_lowercase() && !"eotu".contains(c)));
+    let base16 = value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit());
+    nix32 || base16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looks_like_hash_cases() {
+        for (value, expected) in [
+            ("sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", true),
+            ("sha512-abc+/=", true),
+            (
+                "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+                true,
+            ),
+            ("0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73", true),
+            (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                true,
+            ),
+            ("/nix/store/abc-deps.json", false),
+            ("/home/user/pkgs/foo/deps.nix", false),
+            ("", false),
+            ("sha256-", false),
+        ] {
+            assert_eq!(looks_like_hash(value), expected, "{value}");
+        }
+    }
 
     #[test]
     fn extract_hash_for_the_fake_hash_only() {

@@ -25,7 +25,7 @@ use crate::vcs_sources::SemverStrategy;
 /// (`/repo/ci/packages.nix`) resolve to `/repo`, falling back to the entry
 /// point's directory when it is not inside a git repository. The result is
 /// canonical.
-pub(super) async fn get_repo_dir_from_entry_point(
+pub(crate) async fn get_repo_dir_from_entry_point(
     eval_entry_point: &str,
 ) -> anyhow::Result<PathBuf> {
     let path = std::fs::canonicalize(eval_entry_point)
@@ -53,7 +53,7 @@ pub(super) async fn get_repo_dir_from_entry_point(
 /// whose `meta.position` points into the Nix store. Joining an absolute path
 /// onto the worktree would silently yield the original path and edit files
 /// outside the worktree, so callers must not proceed.
-pub(super) fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> {
     if let Ok(relative) = path.strip_prefix(repo_dir) {
         return Some(relative.to_path_buf());
     }

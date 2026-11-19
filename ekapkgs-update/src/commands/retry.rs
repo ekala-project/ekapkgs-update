@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use tokio::fs;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::commands::run::preservation::{find_preserved, list_preserved_failures};
 
@@ -16,9 +16,25 @@ pub async fn retry(
     repo: Option<String>,
     from_phase: Option<String>,
     apply_patch: Option<PathBuf>,
-    _version: Option<String>,
+    version: Option<String>,
 ) -> anyhow::Result<()> {
     let _expanded_path = shellexpand::tilde(&database_path).to_string();
+
+    if let Some(phase) = from_phase {
+        bail!(
+            "--from-phase is not implemented yet (requested: {phase}); retry only prepares a copy \
+             of the preserved worktree for manual work"
+        );
+    }
+    if let Some(version) = version {
+        bail!("--version is not implemented yet (requested: {version})");
+    }
+
+    // Resolve the patch before anything else: a relative path is relative
+    // to the directory the command was run from.
+    let apply_patch = apply_patch
+        .map(|p| std::fs::canonicalize(&p).with_context(|| format!("patch file {}", p.display())))
+        .transpose()?;
 
     info!("Attempting to retry update for: {}", attr_path);
 
@@ -53,19 +69,10 @@ pub async fn retry(
     // Copy the preserved worktree to the retry directory
     copy_dir_all(&artifact.worktree_path, &retry_dir).await?;
 
-    // Change to the retry directory
-    std::env::set_current_dir(&retry_dir)?;
-
     // Apply patch if provided
     if let Some(ref patch_path) = apply_patch {
         info!("Applying patch: {}", patch_path.display());
-        apply_patch_file(patch_path).await?;
-    }
-
-    // Determine what phase to resume from
-    if let Some(phase) = from_phase {
-        warn!("Resume-from-phase not yet implemented, starting from beginning");
-        warn!("Requested phase: {}", phase);
+        apply_patch_file(&retry_dir, patch_path).await?;
     }
 
     info!("Retrying update for {}", attr_path);
@@ -124,16 +131,34 @@ pub async fn retry(
     Ok(())
 }
 
-/// Copy directory recursively (async version)
+/// Whether a symlink named `name` is a `nix-build` out-link (`result`,
+/// `result-dev`, …), which is not part of the tree and is not copied.
+fn is_out_link(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| n == "result" || n.starts_with("result-"))
+}
+
+/// Copy directory recursively (async version). Symlinks are copied as
+/// symlinks (never followed into the Nix store), except out-links.
 async fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(dst).await?;
     let mut entries = fs::read_dir(src).await?;
 
     while let Some(entry) = entries.next_entry().await? {
+        // `DirEntry::file_type` does not follow symlinks.
         let ty = entry.file_type().await?;
-        let dst_path = dst.join(entry.file_name());
+        let name = entry.file_name();
+        let dst_path = dst.join(&name);
 
-        if ty.is_dir() {
+        if ty.is_symlink() {
+            if is_out_link(&name) {
+                continue;
+            }
+            let target = fs::read_link(entry.path()).await?;
+            fs::symlink(&target, &dst_path)
+                .await
+                .with_context(|| format!("copy symlink {}", entry.path().display()))?;
+        } else if ty.is_dir() {
             Box::pin(copy_dir_all(&entry.path(), &dst_path)).await?;
         } else {
             fs::copy(entry.path(), dst_path).await?;
@@ -142,11 +167,12 @@ async fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply a patch file to the current directory
-async fn apply_patch_file(patch_path: &Path) -> anyhow::Result<()> {
+/// Apply a patch file to the tree in `dir`
+async fn apply_patch_file(dir: &Path, patch_path: &Path) -> anyhow::Result<()> {
     let output = Command::new("git")
         .args(["apply", "--verbose"])
         .arg(patch_path)
+        .current_dir(dir)
         .output()
         .await?;
 
@@ -161,4 +187,46 @@ async fn apply_patch_file(patch_path: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn out_links_are_result_symlinks() {
+        for (name, expected) in [
+            ("result", true),
+            ("result-dev", true),
+            ("result-bin", true),
+            ("results", false),
+            ("default.nix", false),
+        ] {
+            assert_eq!(is_out_link(std::ffi::OsStr::new(name)), expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_dir_all_keeps_symlinks_and_skips_out_links() {
+        let tmp = std::env::temp_dir().join(format!("ekapkgs-retry-test-{}", uuid::Uuid::new_v4()));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(src.join("pkgs")).unwrap();
+        std::fs::write(src.join("pkgs/default.nix"), "{ }").unwrap();
+        std::os::unix::fs::symlink("pkgs/default.nix", src.join("link.nix")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/store/path", src.join("result")).unwrap();
+
+        copy_dir_all(&src, &dst).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("pkgs/default.nix")).unwrap(),
+            "{ }"
+        );
+        assert_eq!(
+            std::fs::read_link(dst.join("link.nix")).unwrap(),
+            PathBuf::from("pkgs/default.nix")
+        );
+        assert!(std::fs::symlink_metadata(dst.join("result")).is_err());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 }

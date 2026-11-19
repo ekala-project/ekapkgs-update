@@ -1,10 +1,14 @@
 //! Lint a Nix package expression for whitespace formatting compliance.
 //!
 //! Checks three rules from the best-practices skill:
-//! 1. Header attributes (`pname`, `version`, `extensions`, `pyproject`, `disabled`)
-//!    must be grouped at the top of the attrset with no blank lines between them.
+//! 1. Header attributes (`pname`, `version`, `format`, `extensions`, `pyproject`,
+//!    `disabled`) must be grouped at the top of the attrset with no blank lines
+//!    between them.
 //! 2. All other attributes must be separated by a blank line.
 //! 3. `meta` must be the last attribute.
+//!
+//! The exit code is 1 when any file has violations, or cannot be read or
+//! parsed as Nix.
 
 use std::fmt;
 
@@ -102,7 +106,9 @@ async fn lint_directory(dir: &str, fix: bool, no_ignore: bool) -> Result<()> {
                 }
             },
             Err(e) => {
-                tracing::warn!("{file}: {e:#}");
+                // An unreadable or unparsable file is a failure, not a pass.
+                tracing::error!("{file}: {e:#}");
+                has_violations = true;
             },
         }
     }

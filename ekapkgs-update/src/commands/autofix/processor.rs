@@ -3,7 +3,7 @@
 //! Dequeues failed updates one at a time, sends them to the LLM for a fix
 //! proposal, applies and validates the fix, and records the outcome.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use tokio::fs;
@@ -149,6 +149,19 @@ pub async fn process_queue(
             continue;
         }
 
+        let entry_point = match repo_relative_entry_point(config, &item.repo_name).await {
+            Ok(relative) => worktree_path.join(relative),
+            Err(e) => {
+                warn!(
+                    "{}: Cannot locate the entry point in the worktree: {e:#}",
+                    item.display_name()
+                );
+                db.update_autofix_status(item.id, "skipped").await?;
+                stats.skipped += 1;
+                continue;
+            },
+        };
+
         let nix_file_info = find_nix_file(&worktree_path, &item.attr_path).await;
         let (nix_file_path, nix_file_content) = match nix_file_info {
             Ok((path, content)) => (path, content),
@@ -257,13 +270,8 @@ pub async fn process_queue(
         let changes_json_str = serde_json::to_string(&changes).unwrap_or_default();
 
         // Apply and validate
-        let validation = apply_and_validate(
-            &worktree_path,
-            &item.attr_path,
-            &changes,
-            &config.eval_entry_point,
-        )
-        .await?;
+        let validation =
+            apply_and_validate(&worktree_path, &item.attr_path, &changes, &entry_point).await?;
 
         // Pre-compute embedding (non-fatal if unavailable)
         let embedding = Embedding::compute(llm, &error_summary).await.ok().flatten();
@@ -346,6 +354,53 @@ pub async fn process_queue(
     }
 
     Ok(stats)
+}
+
+/// The evaluation entry point of `repo_name`, relative to its repository
+/// root, so it can be joined onto a preserved worktree.
+///
+/// `[[repos]]` entries are relative already. The unnamed scope's `--file` is
+/// resolved against its git top level, like `perform_update` does.
+async fn repo_relative_entry_point(
+    config: &AutofixConfig,
+    repo_name: &str,
+) -> anyhow::Result<PathBuf> {
+    if let Some(relative) = config.repo_entry_points.get(repo_name) {
+        return Ok(PathBuf::from(relative));
+    }
+    let entry = Path::new(&config.eval_entry_point);
+    if repo_name.is_empty() && entry.exists() {
+        let repo_dir =
+            crate::commands::run::updater::get_repo_dir_from_entry_point(&config.eval_entry_point)
+                .await?;
+        let canonical = std::fs::canonicalize(entry)?;
+        return crate::commands::run::updater::relative_to_repo(&canonical, &repo_dir).ok_or_else(
+            || {
+                anyhow::anyhow!(
+                    "entry point {} is outside repository {}",
+                    canonical.display(),
+                    repo_dir.display()
+                )
+            },
+        );
+    }
+    fallback_relative_entry_point(entry, repo_name)
+}
+
+/// A `--file` that cannot be resolved here is taken as repo-relative when it
+/// is relative; an absolute one belongs to some checkout, not this worktree.
+fn fallback_relative_entry_point(entry: &Path, repo_name: &str) -> anyhow::Result<PathBuf> {
+    if entry.is_absolute() {
+        if repo_name.is_empty() {
+            anyhow::bail!("entry point {} does not exist", entry.display());
+        }
+        anyhow::bail!(
+            "repo '{repo_name}' is not in the config file's [[repos]], and --file {} is \
+             absolute",
+            entry.display()
+        );
+    }
+    Ok(entry.to_path_buf())
 }
 
 /// Handle a failed attempt: re-queue if under max attempts, otherwise escalate.

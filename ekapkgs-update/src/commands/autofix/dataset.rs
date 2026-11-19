@@ -114,7 +114,7 @@ struct SampleMetadata {
 /// Export the training dataset.
 pub async fn export_dataset(db: &Database, config: DatasetExportConfig) -> anyhow::Result<()> {
     // Get all queue items
-    let items = db.get_autofix_history(None, None).await?;
+    let items = db.get_autofix_history(None, None, None).await?;
 
     if items.is_empty() {
         println!("No autofix data found.");

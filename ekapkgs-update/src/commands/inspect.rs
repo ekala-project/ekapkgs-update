@@ -11,14 +11,24 @@ use crate::commands::update::errors::UpdateError;
 use crate::database::{Database, PhaseRecord};
 
 /// Inspect a package's update history and failure details
-pub async fn inspect(database_path: String, identifier: String) -> anyhow::Result<()> {
+///
+/// Without `repo` (a `--repo` label), phases of every repo are shown, grouped
+/// by session.
+pub async fn inspect(
+    database_path: String,
+    identifier: String,
+    repo: Option<String>,
+) -> anyhow::Result<()> {
     let expanded_path = shellexpand::tilde(&database_path).to_string();
     let db = Database::new(&expanded_path).await?;
 
     info!("Inspecting update history for: {}", identifier);
 
     // Try to find the most recent failures for this package
-    let phases = db.get_phases_by_attr(&identifier).await?;
+    let repo_name = repo
+        .as_deref()
+        .map(crate::commands::run::preservation::repo_from_label);
+    let phases = db.get_phases_by_attr(repo_name, &identifier).await?;
 
     if phases.is_empty() {
         println!("No update history found for package: {}", identifier);

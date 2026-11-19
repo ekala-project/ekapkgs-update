@@ -96,6 +96,23 @@ impl PackageQuery {
     }
 }
 
+/// `nugetDeps` is only updated by hash discovery when it holds a hash. In
+/// most .NET packages it is a lock file or derivation (`./deps.json`, which
+/// evaluates to a path): that has to be regenerated with the package's
+/// `fetch-deps` script, and rewriting it as a hash would fail.
+pub fn nuget_deps_hash(attr_path: &str, value: Option<String>) -> Option<String> {
+    let value = value?;
+    if crate::hash_discovery::looks_like_hash(&value) {
+        Some(value)
+    } else {
+        tracing::warn!(
+            "{attr_path}: nugetDeps is a file or derivation ({value}), not a hash; it is not \
+             updated (regenerate it with the package's fetch-deps script)"
+        );
+        None
+    }
+}
+
 impl PackageMetadata {
     /// Extract package metadata from Nix evaluation
     pub async fn from_attr_path(eval_entry_point: &str, attr_path: &str) -> anyhow::Result<Self> {
@@ -108,7 +125,7 @@ impl PackageMetadata {
         let cargo_hash = package.get_attr("cargoHash").await;
         let vendor_hash = package.get_attr("vendorHash").await;
         let npm_deps_hash = package.get_attr("npmDepsHash").await;
-        let nuget_deps_hash = package.get_attr("nugetDeps").await;
+        let nuget_deps_hash = nuget_deps_hash(attr_path, package.get_attr("nugetDeps").await);
         let composer_deps_hash = package.get_attr("composerDepsHash").await;
         let pname = package.get_attr("pname").await;
         let description = package.get_attr("meta.description").await;

@@ -147,6 +147,11 @@ let
       ${lib.optionalString cfg.watch.webhook.enable "--webhook-listen ${cfg.watch.webhook.host}:${toString cfg.watch.webhook.port}"} \
       ${
         lib.optionalString (
+          cfg.cachix.cacheName != null
+        ) "--cachix-cache ${lib.escapeShellArg cfg.cachix.cacheName}"
+      } \
+      ${
+        lib.optionalString (
           cfg.watch.commitStrategy != null
         ) "--commit-strategy ${cfg.watch.commitStrategy}"
       } \
@@ -479,8 +484,8 @@ in
         example = "ekapkgs";
         description = ''
           Name of the Cachix cache to push successful builds to. When set,
-          the corresponding `--cachix-cache` CLI flag is
-          appended automatically. Set to `null` to leave
+          `--cachix-cache` is appended automatically to both the `run` and
+          the `watch` service. Set to `null` to leave
           Cachix push disabled regardless of any token.
         '';
       };
@@ -574,11 +579,12 @@ in
 
       database = lib.mkOption {
         type = lib.types.str;
-        default = "/var/lib/${cfg.stateDirectory}/updates.db";
-        defaultText = lib.literalExpression ''"/var/lib/''${config.services.ekapkgs-update.stateDirectory}/updates.db"'';
+        default = cfg.settings.database or "/var/lib/${cfg.stateDirectory}/updates.db";
+        defaultText = lib.literalExpression ''config.services.ekapkgs-update.settings.database or "/var/lib/''${config.services.ekapkgs-update.stateDirectory}/updates.db"'';
         description = ''
           Path to the SQLite database. Defaults to the same database used by
-          the main ekapkgs-update service. The web portal has read-only access.
+          the main ekapkgs-update service (`settings.database` when set). The
+          web portal has read-only access.
         '';
       };
 

@@ -132,8 +132,9 @@ pub async fn export(
     };
 
     // Get historical context from database
-    let mut phases = db.get_phases_by_attr(&attr_path).await?;
-    phases.retain(|p| p.repo_name == artifact.repo_name);
+    let phases = db
+        .get_phases_by_attr(Some(&artifact.repo_name), &attr_path)
+        .await?;
     let mut sessions: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
     for phase in &phases {
         sessions

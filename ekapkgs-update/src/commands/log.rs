@@ -1,27 +1,46 @@
 use anyhow::Context;
 use tracing::info;
 
+use crate::commands::run::preservation::repo_from_label;
 use crate::database::Database;
 
-pub async fn show_log(database_path: String, identifier: String) -> anyhow::Result<()> {
+/// Whether `identifier` names a derivation (`/nix/store/…` or `….drv`)
+/// rather than an attr path. Attr paths often contain `-` (`aws-c-common`).
+fn is_drv_identifier(identifier: &str) -> bool {
+    identifier.starts_with("/nix/store/") || identifier.ends_with(".drv")
+}
+
+pub async fn show_log(
+    database_path: String,
+    identifier: String,
+    repo: Option<String>,
+) -> anyhow::Result<()> {
     // Expand tilde in database path
     let expanded_db_path = shellexpand::tilde(&database_path).to_string();
 
     // Initialize database
     let db = Database::new(&expanded_db_path).await?;
+    let repo_name = repo.as_deref().map(repo_from_label);
 
-    // Determine if identifier is a drv_path or attr_path
-    let is_drv_path = identifier.starts_with("/nix/store/")
-        || identifier.contains(".drv")
-        || identifier.contains('-');
-
-    if is_drv_path {
-        // Query by drv_path
-        show_log_by_drv(&db, &identifier).await
-    } else {
-        // Query by attr_path
-        show_logs_by_attr(&db, &identifier).await
+    if is_drv_identifier(&identifier) {
+        return show_log_by_drv(&db, &identifier).await;
     }
+
+    let logs = db
+        .get_all_failed_logs_by_attr(repo_name, &identifier)
+        .await?;
+    if logs.is_empty() {
+        // Not an attr path with logs: maybe a log key without `.drv`
+        // (`<repo>:<attr>@<version>`).
+        if let Some(log) = db.get_log_by_drv(&identifier).await? {
+            print_log_entry(&log, true);
+            return Ok(());
+        }
+        info!("No failed update logs found for {}", identifier);
+        return Ok(());
+    }
+    show_logs_by_attr(&identifier, &logs);
+    Ok(())
 }
 
 async fn show_log_by_drv(db: &Database, drv_identifier: &str) -> anyhow::Result<()> {
@@ -34,14 +53,7 @@ async fn show_log_by_drv(db: &Database, drv_identifier: &str) -> anyhow::Result<
     Ok(())
 }
 
-async fn show_logs_by_attr(db: &Database, attr_path: &str) -> anyhow::Result<()> {
-    let logs = db.get_all_failed_logs_by_attr(attr_path).await?;
-
-    if logs.is_empty() {
-        info!("No failed update logs found for {}", attr_path);
-        return Ok(());
-    }
-
+fn show_logs_by_attr(attr_path: &str, logs: &[crate::database::UpdateLog]) {
     // Show the latest log in detail
     info!("Showing most recent failed update for: {}", attr_path);
     info!("");
@@ -62,8 +74,6 @@ async fn show_logs_by_attr(db: &Database, attr_path: &str) -> anyhow::Result<()>
         info!("");
         info!("Use 'ekapkgs-update log <drv-path>' to view details of a specific attempt");
     }
-
-    Ok(())
 }
 
 fn print_log_entry(log: &crate::database::UpdateLog, show_full_log: bool) {
@@ -137,6 +147,21 @@ fn extract_drv_name(drv_path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drv_identifiers_are_store_paths_or_drv_files() {
+        for (identifier, expected) in [
+            ("/nix/store/abc123-cmake-3.29.6.drv", true),
+            ("abc123-cmake-3.29.6.drv", true),
+            ("/nix/store/abc123-cmake-3.29.6", true),
+            ("aws-c-common", false),
+            ("python3Packages.setuptools-scm", false),
+            ("hello", false),
+            ("repo:hello@1.1", false),
+        ] {
+            assert_eq!(is_drv_identifier(identifier), expected, "{identifier}");
+        }
+    }
 
     #[test]
     fn test_extract_drv_name_full_store_path() {

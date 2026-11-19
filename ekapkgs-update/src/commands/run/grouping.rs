@@ -19,7 +19,9 @@ use crate::groups::{resolve_parent, resolve_roots};
 ///
 /// A group's job includes every member with a newer known upstream release
 /// (from the database), not just the requested ones, so a regenerated group
-/// PR keeps the members it proposed before. Requested versions win over the
+/// PR keeps the members it proposed before. Members whose update to that
+/// release failed and are still in backoff are left out unless requested
+/// ([`crate::database::GroupMember::pending_update`]). Requested versions win over the
 /// database's. Every tracked member and the root are verified.
 pub async fn group_jobs(
     db: &Database,
@@ -54,13 +56,14 @@ pub async fn group_jobs(
             .map(|r| (r.attr_path.clone(), r))
             .collect();
 
+        let now = chrono::Utc::now();
         let mut group_members = Vec::new();
         let mut verify = Vec::new();
         for member in &members {
             verify.push(member.attr_path.clone());
             if let Some(req) = by_attr.remove(&member.attr_path) {
                 group_members.push(req);
-            } else if let Some((current, latest)) = member.pending_update() {
+            } else if let Some((current, latest)) = member.pending_update(now) {
                 group_members.push(UpdateRequest {
                     attr_path: member.attr_path.clone(),
                     drv_path: None,
@@ -143,6 +146,9 @@ pub(super) struct RunGroups {
     previous_roots: BTreeMap<String, String>,
     /// Declared parents stored by previous runs (child → parent).
     previous_parents: BTreeMap<String, String>,
+    /// The enumeration stopped early (stream error, failed `iets`): `known`
+    /// is partial, so the stored groups must not be replaced from it.
+    incomplete: std::sync::atomic::AtomicBool,
 }
 
 impl RunGroups {
@@ -161,6 +167,13 @@ impl RunGroups {
 
     pub(super) fn note_known(&self, attr: &str) {
         lock(&self.known).insert(attr.to_owned());
+    }
+
+    /// The enumeration did not finish: keep the stored groups (as watch's
+    /// `prune_decision` keeps the index).
+    pub(super) fn note_incomplete(&self) {
+        self.incomplete
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(super) fn note_declaration(&self, attr: &str, parent: Option<String>) {
@@ -200,6 +213,7 @@ impl RunGroups {
     ) -> Vec<UpdateJob> {
         let known = lock(&self.known).clone();
         let declared = lock(&self.declared).clone();
+        let incomplete = self.incomplete.load(std::sync::atomic::Ordering::Relaxed);
 
         let mut parents = self.previous_parents.clone();
         let fresh: Vec<(&str, &str)> = declared
@@ -211,12 +225,17 @@ impl RunGroups {
                 parents.remove(attr);
             }
         }
-        // Packages gone from the repo leave their groups.
-        parents.retain(|attr, _| known.is_empty() || known.contains(attr));
+        // Packages gone from the repo leave their groups (only known when
+        // the enumeration completed).
+        if !incomplete {
+            parents.retain(|attr, _| known.is_empty() || known.contains(attr));
+        }
         parents.extend(resolve_declarations(fresh, &known, "run"));
 
         let roots = resolve_roots(&parents);
-        if let Err(e) = db.replace_groups(repo, &parents, &roots).await {
+        if incomplete {
+            warn!("Evaluation incomplete: keeping the stored update groups");
+        } else if let Err(e) = db.replace_groups(repo, &parents, &roots).await {
             warn!("Failed to store update groups: {e:#}");
         }
         group_jobs(db, repo, held, &roots).await
@@ -225,4 +244,43 @@ impl RunGroups {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::PackageInfo;
+
+    async fn setup_db() -> Database {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        Database::from(pool)
+    }
+
+    #[tokio::test]
+    async fn incomplete_evaluation_keeps_stored_groups() {
+        let db = setup_db().await;
+        for attr in ["aws-c-io", "aws-crt-cpp", "hello"] {
+            db.upsert_package_info("", attr, "1.0", &PackageInfo::default())
+                .await
+                .unwrap();
+        }
+        let parents = BTreeMap::from([("aws-c-io".to_owned(), "aws-crt-cpp".to_owned())]);
+        let roots = resolve_roots(&parents);
+        db.replace_groups("", &parents, &roots).await.unwrap();
+
+        // The enumeration broke off after `hello`: aws-c-io was never seen.
+        let groups = RunGroups::load(&db, "").await;
+        groups.note_known("hello");
+        groups.note_incomplete();
+        groups.finish(&db, "", Vec::new()).await;
+        assert_eq!(db.group_roots("").await.unwrap(), roots);
+
+        // A complete enumeration without the child drops the group.
+        let groups = RunGroups::load(&db, "").await;
+        groups.note_known("hello");
+        groups.note_known("aws-crt-cpp");
+        groups.finish(&db, "", Vec::new()).await;
+        assert!(db.group_roots("").await.unwrap().is_empty());
+    }
 }

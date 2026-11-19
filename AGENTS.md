@@ -90,14 +90,14 @@ ekapkgs-update/                     # Main CLI crate
         checks.rs                   #   Check implementations (symlinks, layout, RPATH, shebangs, .pc files, etc.)
         report.rs                   #   Terminal (ANSI), markdown (PR body), and JSON formatters
       review.rs                     # PR review: checkout, build, test, agent review, merge
-      migrate/                      # nixpkgs → ekapkgs paradigm migration
+      migrate/                      # nixpkgs → ekapkgs paradigm migration (arguments.rs, final_attrs.rs, transforms.rs)
       pr_enhancements.rs            # PrEnhancementsConfig (CVE, Repology, rebuilds, Cachix, audit)
       autofix/                        # LLM-assisted automatic fix pipeline
         config.rs                   #   AutofixConfig
         queue.rs                    #   Queue management (SQLite autofix_queue/autofix_attempts)
         prompt.rs                   #   Prompt construction for small LLMs (with RAG examples)
         retriever.rs                #   RAG: embed errors, retrieve similar successful fixes
-        validator.rs                #   Apply changes + nix-build validation
+        validator.rs                #   Apply changes + nix-build validation against the worktree's own entry point
         processor.rs                #   Serial queue processing loop
         dataset.rs                  #   Training dataset export (SFT/DPO JSONL)
       watch/                          # RSS/event-driven passive update mode (multi-repo)
@@ -110,15 +110,16 @@ ekapkgs-update/                     # Main CLI crate
         webhook.rs                  #   GitHub webhook endpoint (axum, --webhook-listen): verify, dedupe, trigger head checks / withdraw closed PRs
       export.rs                     # Export failure context for LLM analysis (JSON/Markdown)
       apply.rs                      # Apply LLM-generated fixes to preserved worktrees
-      retry.rs, worktrees.rs        # Failure recovery and worktree management
+      retry.rs, worktrees.rs        # Failure recovery (copy preserved worktree, apply a patch, rebuild; no cwd change) and worktree management
       reset_failures.rs             # Clear failure backoff of failed updates (filters: repo/attr/session/time/error text)
-      log.rs, inspect.rs            # Per-package failure inspection
-      query.rs, report.rs, status.rs  # Database query/reporting commands
+      log.rs, inspect.rs            # Per-package failure inspection (`--repo`; `log` takes an attr path, or a store path / `.drv`)
+      query.rs, report.rs, status.rs  # Database query/reporting commands (`--repo`; `report` lists still-failing packages per (repo, attr))
+      lint.rs, tests_lint.rs        # `lint`: check .nix files (incl. `format`); exits non-zero on findings or file errors
       prune_maintainers.rs          # Remove deprecated maintainers and teams from .nix files
       cve_scan.rs                   # `cve-scan`: scan tracked packages for known vulnerabilities (OSV.dev)
-    llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL)
+    llm/                            # OpenAI-compatible LLM client (EKAPKGS_LLM_BASE_URL); types.rs = request/response types
     package/                        # PackageMetadata extraction via nix-instantiate
-    vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching
+    vcs_sources/                    # UpstreamSource enum, SemverStrategy, Release matching (tests.rs)
       version_order.rs              #   compare_version_components: the one version order (numeric, prereleases below release, dates)
       http_status.rs                #   HttpStatusError: typed non-success status from release endpoints (404/410 = not found)
     github/app.rs                   # GitHub App: RS256 JWT (openssl), installation tokens (cached), bot identity
@@ -127,17 +128,19 @@ ekapkgs-update/                     # Main CLI crate
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab: custom instances, nested groups, fetchFromGitLab `api/v4/projects/<encoded>` URLs; SourceHut: GraphQL `user { repository(name:) }`, needs SOURCEHUT_TOKEN)
     github/existing_prs.rs          # Pre-PR scan of the repo's open PRs by the PR author (`--pr-author`) for the same package
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
-    rewrite/                        # Nix file rewriting (regex + rnix AST validation)
+    rewrite/                        # Nix file rewriting (regex + rnix AST validation): attributes, rev_update, rev_fixup, patches,
+                                    #   maintainers, teams, variants, fetch_pypi, error.rs; table tests in tests_*.rs
     hash_discovery.rs               # Extract correct hash from nix-build stderr
-    nix/                            # Nix eval helpers, `iets eval-jobs` (run_eval.rs: --impure, --select/--apply, exit status; nix_eval_jobs.rs: its nix-eval-jobs-format JSON), eval cache
+    nix/                            # Nix eval helpers, `iets eval-jobs` (run_eval.rs: --impure, --select/--apply, exit status; nix_eval_jobs.rs: its nix-eval-jobs-format JSON), eval_cache.rs, flake.rs (flake packages), rebuild_count.rs
     git/                            # Git worktree/branch/PR operations
     cve/                            # OSV.dev CVE analysis: PR-body diff (24h cache) + package scans
+      osv.rs, cache.rs, ecosystem.rs, types.rs  #   OSV client/CVSS v3 scoring, 24h cache, ecosystem mapping, shared types
       cvss4.rs                      #   CVSS v4.0 scoring (port of the FIRST reference calculator: MacroVector lookup + interpolation)
       scan.rs                       #   Package → OSV query (GIT repo URL / PyPI), querybatch, record fetch, alias merge, severity
       store.rs                      #   osv_vulnerabilities cache, package_vulnerabilities, per-package scan state, due targets
-    repology/                       # Repology cross-distro version check (72h cache)
-    cachix/                         # Binary cache pushing
-    directory_diff/                 # Compare build outputs for PR body
+    repology/                       # Repology cross-distro version check (72h cache; api.rs, cache.rs, types.rs)
+    cachix/                         # Binary cache pushing (push.rs, types.rs)
+    directory_diff/                 # Compare build outputs for PR body (compare.rs, format.rs, types.rs)
     variant_strategy.rs             # Semver strategy inference (effective_strategy, mkManyVariants)
     groups.rs                       # Update groups (pure): parent resolution, roots, dependency order
   tests/
@@ -165,7 +168,7 @@ ekapkgs-update-web/                 # Web dashboard crate (read-only JSON API + 
     error.rs                        # AppError → JSON 404/500
     params.rs                       # Query-parameter helpers (repo labels, pages, ratios)
     assets.rs                       # App shell (index.html), embedded static files, ETag/Cache-Control
-    queries/                        # Raw sqlx SELECTs with local row structs; live.rs = WS fingerprint
+    queries/                        # Raw sqlx SELECTs with local row structs (analytics, failures, packages, sessions, stats, watch); live.rs = WS fingerprint
     routes/                         # mod.rs (page paths → shell, /api, /ws, /static; gzip CompressionLayer), api.rs, ws.rs; tests.rs
   static/                           # css/styles.css, js/app.js (WebSocket → Elm ports); compiled into the binary
 ```
@@ -229,7 +232,7 @@ Requests carry the current version from the index or checker, which can be stale
 
 With an explicit target version (always the case in `run`/`watch`), the workflow stops after MetadataExtraction with `AlreadyAtVersion` when the evaluated version has already reached it (`version_at_least`). This happens in branch mode when several attributes share one file (`arro3-core`/`-io`/`-compute`): the first update bumps the file, and the rest find it done. The updater records those as an up-to-date observation (`record_no_update`) and returns `Skipped`, not a failure.
 
-Every phase is wrapped with `PhaseTracker::run` / `start` (`commands/update/instrumentation.rs`). The standalone `update` command uses `PhaseTracker::disabled()`. A phase failure is classified into an `UpdateError` (`UpdateError::classify`), and `tracker.last_failure()` gives the caller the structured cause.
+Every phase is wrapped with `PhaseTracker::run` / `start` (`commands/update/instrumentation.rs`). The standalone `update` command uses `PhaseTracker::disabled()`. A phase failure is classified into an `UpdateError` (`UpdateError::classify`), and `tracker.last_failure()` gives the caller the structured cause. The final `nixfmt` step is tracked under `PrCreation` (an `InfrastructureError` with component `nixfmt`). Network classification only treats a status code as HTTP when it appears in an HTTP context (`http_status_code`: `HTTP 404`, `status: 404`, `404 Not Found`), so a bare ` 404` in a build log is not a network error.
 
 ## Architecture: The `watch` Command (Passive Mode)
 
@@ -287,6 +290,9 @@ Config: [[repos]] (name, upstream, entrypoint, select, eval_entrypoint, fork, pa
 
 **NixOS deployment**: Third systemd service (`ekapkgs-update-watch.service`) alongside the main daemon and web portal. Same user/group, shared database (`/var/lib/ekapkgs-update/updates.db` via the generated config file), `Restart=always`. `watch.repos` option configures multi-repo mode (`select`, `evalEntrypoint`). Module notes:
 
+- `web.database` defaults to `settings.database` (then the state directory's `updates.db`), so the dashboard reads the database the services write.
+- `cachix.cacheName` is passed to watch as `--cachix-cache` too. Watch accepts the same PR-enhancement flags as `run` (`--skip-repology`, `--analyze-rebuilds`, `--max-rebuilds`, `--skip-cachix`, `--cachix-cache`, `--audit`, `--no-security`, `--skip-cve`), collected in `WatchConfig.pr_enhancements`; the directory diff stays off in watch.
+
 - `run.enable` (default true) / `run.startAt`: the batch `run` service is a one-shot; give it a timer or disable it when watch covers the same repos. `packagesFile` is only required when it is enabled.
 - `extraPackages`: added to the run/watch services' `PATH` (e.g. `pkgs.claude-code` for `--claude-fix`; `environment.systemPackages` is not visible to services).
 - `git.userName`/`git.userEmail`/`git.githubTokenCredentialHelper`: a generated git config (`GIT_CONFIG_SYSTEM`) with the commit identity and a credential helper that answers github.com HTTPS auth with `GITHUB_TOKEN` from `environmentFile`.
@@ -303,7 +309,7 @@ This is intentional, not a bug:
 4. Write the correct hash back
 5. Build again to verify
 
-Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash, composerDepsHash. Each has an `update_*_if_needed` function in `hash_workflows.rs`; the dependency hashes share `discover_dependency_hash`, which writes the old hash back when no hash can be discovered (the fake hash is never left in a file; `fod_refresh` does the same). The discovered hash is the `got:` of the mismatch whose `specified:` is the fake hash (`hash_discovery::extract_hash_for`), and dependency builds run with `--keep-going`: another stale FOD failing first must not lend its hash. A dependency attribute not bound literally (`inherit (data) cargoHash;`) is replaced by value where it appears exactly once among the package's `.nix`/`.json` files.
+Applies to: source hash, cargoHash, vendorHash, npmDepsHash, nugetDepsHash (only when `nugetDeps` is a hash: a deps file or derivation is skipped with a warning, `package::nuget_deps_hash`), composerDepsHash. Each has an `update_*_if_needed` function in `hash_workflows.rs`; the dependency hashes share `discover_dependency_hash`, which writes the old hash back when no hash can be discovered (the fake hash is never left in a file; `fod_refresh` does the same). The discovered hash is the `got:` of the mismatch whose `specified:` is the fake hash (`hash_discovery::extract_hash_for`), and dependency builds run with `--keep-going`: another stale FOD failing first must not lend its hash. A dependency attribute not bound literally (`inherit (data) cargoHash;`) is replaced by value where it appears exactly once among the package's `.nix`/`.json` files.
 
 A version the `.nix` file doesn't bind is looked for in a JSON data file next to it (`"version": "<old>"` exactly once, beads-rust's `hashes.json`); the source hash is then replaced by value in that file.
 
@@ -316,7 +322,7 @@ A version bump whose `src` hash comes back unchanged is an error: the fetcher do
 Packages often fetch more than `src`: docker fetches `moby-src` (`tag = "docker-v${version}"`), opencv a `contribSrc`, mission-center two `fetchCargoVendor`s under custom names. No annotation is needed for these:
 
 1. Before any edit, `ClosureSnapshot::capture` instantiates the package and records its `.drv` closure (`nix-store --query --requisites`).
-2. After the version bump, FODs (`nix derivation show`, `outputs.out.hash`) whose `.drv` is not in the snapshot have stale hashes, unless the hash is one this update already discovered (`confirmed`: the `src` hash, the `update_*_if_needed` results).
+2. After the version bump, FODs (`nix derivation show`, `outputs.out.hash`; base16 hashes and `r:` recursive algos are normalised to SRI, `sri_hash`) whose `.drv` is not in the snapshot have stale hashes, unless the hash is one this update already discovered (`confirmed`: the `src` hash, the `update_*_if_needed` results).
 3. Each one's hash is located **by value** (SRI, nix32 or base16; exactly one string literal among the `.nix`/`.json` files of the package directory, or exactly one on a line keyed by the build machine's system; a FOD carrying the fake hash itself is located by a single `lib.fakeHash`/`lib.fakeSha256`/`lib.fakeSri`, which unfinished packages leave in), replaced with the fake hash, the FOD's new `.drv` is realised, and the `got:` hash written back. FODs depending on another changed FOD go after it (`next_stale_fod`); `FodScope::Sources` (end of SourceHashUpdate) only takes FODs without changed FOD inputs, `FodScope::All` (end of DependencyHashUpdate) the rest.
 
 The main `src` hash is also found by value when it isn't bound by `hash`/`sha256`/`outputHash`/`src-hash` (docker's `cliHash`); not finding it is an error.
@@ -350,8 +356,8 @@ passthru = {
 Packages that must be updated together (corepkgs' `aws-c-*` and `aws-crt-cpp`) declare `passthru.ekapkgs-update.parent = "<attr path>";`. Members of a group are proposed as one PR, with one commit per member.
 
 - **Resolution** (`groups::resolve_parent`): a parent is looked up relative to the child's scope first (`a.b.c` with parent `p` → `a.b.p`, `a.p`, `p`; quoted segments are kept by `split_attr_path`). A parent that matches no evaluated attr path still groups its children as a label (with a warning). `resolve_roots` follows chains to the root; a cycle's root is its shortest, then lexically smallest, member. Every member and the root map to the root.
-- **Storage** (migration `20261119_update_groups.sql`): `updates.group_parent` (resolved parent) and `updates.group_root`, replaced per repo by `replace_groups`. Watch writes them at every index build from all evaluated derivations (`INDEX_APPLY_EXPR`'s `parent`, `declared_parent`), unless the evaluation looks incomplete. `run` merges the stored declarations with the ones it evaluated (backed-off packages are not evaluated) in `RunGroups::finish`.
-- **Dispatch** (`grouping::group_jobs`): requests whose package has a `group_root` become one `GroupRequest` per root. It contains every member whose `latest_upstream_version` (from the database) is newer than its `current_version`, not just the triggering ones, so a regenerated PR keeps the members it proposed before. `verify` lists every tracked member and the root. Watch holds group members until the poll sweep is done (singles stream immediately); `run` holds requests for packages that declare a parent, were grouped before or are named as a parent, and groups them at the end. A root evaluated before its children on a first run is dispatched alone.
+- **Storage** (migration `20261119_update_groups.sql`): `updates.group_parent` (resolved parent) and `updates.group_root`, replaced per repo by `replace_groups`. Watch writes them at every index build from all evaluated derivations (`INDEX_APPLY_EXPR`'s `parent`, `declared_parent`), unless the evaluation looks incomplete. `run` merges the stored declarations with the ones it evaluated (backed-off packages are not evaluated) in `RunGroups::finish`; when the checker's eval stream failed (`RunGroups::note_incomplete`), the stored groups are kept as they are.
+- **Dispatch** (`grouping::group_jobs`): requests whose package has a `group_root` become one `GroupRequest` per root. It contains every member whose `latest_upstream_version` (from the database) is newer than its `current_version` (except members still backing off from a failure at that same version, unless they triggered the job; `GroupMember::pending_update`), not just the triggering ones, so a regenerated PR keeps the members it proposed before. `verify` lists every tracked member and the root. Watch holds group members until the poll sweep is done (singles stream immediately); `run` holds requests for packages that declare a parent, were grouped before or are named as a parent, and groups them at the end. A root evaluated before its children on a first run is dispatched alone.
 - **Executor** (`perform_group_update`, worktree mode only): one worktree (`group-<root>`). Members are updated in dependency order (`nix-instantiate` + `nix-store --query --requisites`, `groups::dependency_order`, alphabetical fallback) with tests off, each committed as `<attr>: <old> -> <new>` (a Claude fix of a member's own build is part of its commit). Then every `verify` attr is built (a root that doesn't evaluate is skipped), then their `passthru.tests`. One Claude fix is allowed for the verification, committed as `<root>: fix build with updated dependencies`. Phases of the verification and PR are recorded under the root's attr path.
 - **All-or-nothing**: if any member or the verification fails, nothing is proposed. The member that failed records its own error. The others record `group <root> failed: <attr> (<phase>)` (an `InfrastructureError` with component `group`) and back off.
 - **PR**: stable branch `update/group/<root>` (`git::group_branch_name`), rebuilt from the current base and force-pushed (`force_push_branch`). An open PR from that branch is found (`github::find_open_pull_request`) and its title/body replaced (`update_pull_request`); otherwise a new PR is opened (draft if tests failed; an existing PR's draft state is not changed). The directory diff is not run for groups (it compares against `HEAD~1`).
@@ -402,7 +408,7 @@ Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system string
 
 ### Config File Values as CLI Defaults (`main.rs`, `cli.rs`)
 
-`main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments), and `[github] pr_author` (`--pr-author` on `run`/`update`/`watch`). `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
+`main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments), `[github] pr_author` (`--pr-author` on `run`/`update`/`watch`), `[autofix] max_attempts` and `[watch] poll_interval`/`index_refresh_hours`. `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
 
 ### GitHub App and Webhooks (`github/app.rs`, `github/auth.rs`, `commands/watch/webhook.rs`)
 
@@ -427,7 +433,7 @@ When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can
 
 ### Database State and Backoff (`database/updates.rs`)
 
-`updates` is keyed by `(repo_name, attr_path)`. `repo_name = ''` is used by `run` and legacy watch; multi-repo watch uses the config name (`default` is reserved — the dashboard labels `''` with it; rejected by `ConfigFile::validate` and a NixOS module assertion; names are limited to `[A-Za-z0-9][A-Za-z0-9_-]*` so the `+` separator stays unambiguous). All `updates` methods take `repo_name` first. `autofix_queue` / `autofix_attempts` are repo-scoped the same way (via `FailureArtifacts.repo_name`; preserved failures live under `failed/<session>/[<repo>+]<attr>/`; older `<repo>-<attr>` dirs are still found via `manifest.json`).
+`updates` is keyed by `(repo_name, attr_path)`. `repo_name = ''` is used by `run` and legacy watch; multi-repo watch uses the config name (`default` is reserved — the dashboard labels `''` with it; rejected by `ConfigFile::validate` and a NixOS module assertion; names are limited to `[A-Za-z0-9][A-Za-z0-9_-]*` so the `+` separator stays unambiguous). All `updates` methods take `repo_name` first. `autofix_queue` / `autofix_attempts` are repo-scoped the same way (via `FailureArtifacts.repo_name`; `autofix status/history/enqueue` take `--repo`, and validation builds the worktree's copy of the repo's entry point, `[[repos]]` `eval_entrypoint`/`entrypoint` or the `--file` path relative to its repo; preserved failures live under `failed/<session>/[<repo>+]<attr>/`; older `<repo>-<attr>` dirs are still found via `manifest.json`).
 
 `status` values:
 
@@ -659,7 +665,7 @@ API integrations (via reqwest):
 3. **Branch mode is serial** — Branch mode never runs two updates at once (`updater_concurrency`). The mutex alone is not enough: builds and Claude fixes run outside it, and snapshot-based staging and revert would claim another update's files. All git operations also go through `Arc<Mutex<()>>`. Do not bypass either guard. A branch-mode update also holds the checkout lock (gotcha 7) for its whole duration, since it edits the shared tree.
 4. **Extra nix-build args** — Set once via `OnceLock` in `commands/update/build.rs`. Second call is a no-op.
 5. **Database pool** — `Database` is `Clone` (shared pool). Safe to pass across async tasks.
-6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only single-shot CLI commands (`retry`, `apply`) change the cwd.
+6. **Never `set_current_dir` in run/watch code** — the cwd is process-wide and updates run concurrently. Pass the directory to each subprocess (`Command::current_dir`) instead. `build_and_get_outputs(work_dir, …)` runs `nix-build` in `work_dir` and writes its `result*` out-links to a private temporary directory, so concurrent builds never share them. Only the single-shot `apply` command changes the cwd (`retry` passes its directory to subprocesses).
 7. **Checkout lock** — `git::checkout_lock(repo_dir)` (a per-checkout tokio mutex, not reentrant) serializes everything that moves or reads a checkout's `HEAD`: `sync::sync_repo` (takes it; `sync_repo_locked` when the caller holds it), index builds (`refresh::index_repo_locked`, held with the sync before it), `git worktree add` in `create_worktree`, and whole branch-mode updates. Sync runs at startup, at re-index, from the head watcher and before a repo's first update of a poll cycle, so it can overlap running updates; never move a checkout's `HEAD` without the lock.
 8. **Worktree paths** — `perform_update` resolves the repo root with `git rev-parse --show-toplevel` and maps both the entry point and the package file into the worktree relative to it. Files outside the repository (e.g. `meta.position` in the Nix store) are skipped, never edited.
 9. **Package attribute expressions** — select packages as `let pkgs = import <entry> { }; in pkgs.<attr>`, never `with import <entry> { }; <attr>`. Attr paths can be quoted (`"389-ds-base"`), which is not an expression under `with`, and bare names under `with` lose to builtins such as `map` or `toString`.

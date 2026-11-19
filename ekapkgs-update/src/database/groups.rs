@@ -7,9 +7,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 
-use super::{Database, version_at_least};
+use super::{Database, parse_rfc3339, version_at_least};
 
 /// A member of an update group, as stored in `updates`.
 #[derive(Debug, Clone)]
@@ -17,15 +18,26 @@ pub struct GroupMember {
     pub attr_path: String,
     pub current_version: Option<String>,
     pub latest_upstream_version: Option<String>,
+    /// The version whose update last failed (`updates.failed_version`).
+    pub failed_version: Option<String>,
+    /// End of the failure backoff (`updates.next_attempt`).
+    pub next_attempt: Option<DateTime<Utc>>,
 }
 
 impl GroupMember {
     /// `(current, latest)` when the latest known upstream release is newer
-    /// than the tree's version.
-    pub fn pending_update(&self) -> Option<(&str, &str)> {
+    /// than the tree's version and not blocked at `now`.
+    ///
+    /// A member whose update to that same version failed and is still in
+    /// backoff is left out: otherwise one broken member would fail its group
+    /// (and back off every other member) on every attempt, forever. Callers
+    /// add the requests that triggered the job regardless.
+    pub fn pending_update(&self, now: DateTime<Utc>) -> Option<(&str, &str)> {
         let current = self.current_version.as_deref()?;
         let latest = self.latest_upstream_version.as_deref()?;
-        (!version_at_least(current, latest)).then_some((current, latest))
+        let blocked = self.failed_version.as_deref() == Some(latest)
+            && self.next_attempt.is_some_and(|next| next > now);
+        (!blocked && !version_at_least(current, latest)).then_some((current, latest))
     }
 }
 
@@ -109,8 +121,8 @@ impl Database {
     /// ordered by attr path.
     pub async fn group_members(&self, repo_name: &str, root: &str) -> Result<Vec<GroupMember>> {
         let rows = sqlx::query(
-            "SELECT attr_path, current_version, latest_upstream_version \
-             FROM updates WHERE repo_name = ? AND group_root = ? ORDER BY attr_path",
+            "SELECT attr_path, current_version, latest_upstream_version, failed_version, \
+             next_attempt FROM updates WHERE repo_name = ? AND group_root = ? ORDER BY attr_path",
         )
         .bind(repo_name)
         .bind(root)
@@ -123,8 +135,45 @@ impl Database {
                     attr_path: row.try_get("attr_path")?,
                     current_version: row.try_get("current_version")?,
                     latest_upstream_version: row.try_get("latest_upstream_version")?,
+                    failed_version: row.try_get("failed_version")?,
+                    next_attempt: parse_rfc3339(row.try_get("next_attempt")?),
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+
+    use super::*;
+
+    #[test]
+    fn pending_update_skips_members_backed_off_for_the_same_version() {
+        let now = Utc::now();
+        let member =
+            |latest: &str, failed: Option<&str>, next: Option<DateTime<Utc>>| GroupMember {
+                attr_path: "aws-c-io".to_owned(),
+                current_version: Some("1.0".to_owned()),
+                latest_upstream_version: Some(latest.to_owned()),
+                failed_version: failed.map(str::to_owned),
+                next_attempt: next,
+            };
+        let later = Some(now + Duration::days(2));
+        let earlier = Some(now - Duration::hours(1));
+        for (m, expected) in [
+            (member("1.1", None, None), Some(("1.0", "1.1"))),
+            // Failed on 1.1, still in backoff: left out.
+            (member("1.1", Some("1.1"), later), None),
+            // Backoff over: retried.
+            (member("1.1", Some("1.1"), earlier), Some(("1.0", "1.1"))),
+            // A newer release than the one that failed.
+            (member("1.2", Some("1.1"), later), Some(("1.0", "1.2"))),
+            // Up to date.
+            (member("1.0", None, None), None),
+        ] {
+            assert_eq!(m.pending_update(now), expected, "{m:?}");
+        }
     }
 }

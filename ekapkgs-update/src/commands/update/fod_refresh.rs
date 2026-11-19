@@ -540,6 +540,9 @@ fn parse_fods(json: &str) -> anyhow::Result<Vec<Fod>> {
         .iter()
         .filter_map(|(drv, info)| {
             let hash = info.pointer("/outputs/out/hash")?.as_str()?;
+            let algo = info
+                .pointer("/outputs/out/hashAlgo")
+                .and_then(serde_json::Value::as_str);
             let inputs = info
                 .pointer("/inputs/drvs")
                 .or_else(|| info.get("inputDrvs"))
@@ -553,7 +556,7 @@ fn parse_fods(json: &str) -> anyhow::Result<Vec<Fod>> {
                 .unwrap_or_default();
             Some(Fod {
                 drv: store_basename(drv).to_owned(),
-                hash: hash.to_owned(),
+                hash: sri_hash(hash, algo),
                 inputs,
                 download: plain_download(info),
             })
@@ -561,6 +564,56 @@ fn parse_fods(json: &str) -> anyhow::Result<Vec<Fod>> {
         .collect();
     fods.sort_by(|a, b| a.drv.cmp(&b.drv));
     Ok(fods)
+}
+
+/// A FOD's `outputs.out.hash` as SRI. Newer Nix emits SRI; older Nix and
+/// Lix emit base16 with a separate `hashAlgo` (`sha256`, or `r:sha256` for
+/// recursive/NAR hashing), which would never match the SRI hashes in files
+/// and from `got:` lines.
+fn sri_hash(hash: &str, algo: Option<&str>) -> String {
+    let Some(algo) = algo else {
+        return hash.to_owned();
+    };
+    let algo = algo.strip_prefix("r:").unwrap_or(algo);
+    let digest_len = match algo {
+        "sha1" => 20,
+        "sha256" => 32,
+        "sha512" => 64,
+        _ => return hash.to_owned(),
+    };
+    if hash.len() != digest_len * 2 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return hash.to_owned();
+    }
+    let bytes: Option<Vec<u8>> = (0..hash.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hash[i..i + 2], 16).ok())
+        .collect();
+    bytes.map_or_else(
+        || hash.to_owned(),
+        |bytes| format!("{algo}-{}", base64_encode(&bytes)),
+    )
+}
+
+/// Encode standard (padded) base64.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The URL of a FOD that is a plain download: a flat hash and a `url`/`urls`
@@ -853,6 +906,45 @@ mod tests {
     }
 
     #[test]
+    fn base16_hashes_become_sri() {
+        // sha256 of the empty string.
+        let empty_hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let empty_sri = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+        for (hash, algo, expected) in [
+            (empty_hex, Some("sha256"), empty_sri),
+            (empty_hex, Some("r:sha256"), empty_sri),
+            (empty_sri, Some("sha256"), empty_sri),
+            (empty_sri, None, empty_sri),
+            (empty_hex, None, empty_hex),
+            (
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                Some("sha1"),
+                "sha1-2jmj7l5rSw0yVb/vlWAYkK/YBwk=",
+            ),
+            (
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+                 47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+                Some("sha512"),
+                "sha512-z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg==",
+            ),
+            ("abc", Some("sha256"), "abc"),
+        ] {
+            assert_eq!(sri_hash(hash, algo), expected, "{hash} {algo:?}");
+        }
+
+        let json = format!(
+            r#"{{"/nix/store/a-old.drv": {{
+                "outputs": {{"out": {{"hash": "{empty_hex}", "hashAlgo": "r:sha256"}}}},
+                "inputDrvs": {{}}
+            }}}}"#
+        );
+        assert_eq!(
+            parse_fods(&json).unwrap(),
+            vec![fod("a-old.drv", empty_sri, &[])]
+        );
+    }
+
+    #[test]
     fn plain_downloads() {
         let json = r#"{"derivations": {
             "a-librusty_v8-150.4.0.drv": {
@@ -873,7 +965,10 @@ mod tests {
                 "env": {"url": "https://example.org/d", "postFetch": "chmod +x $out"}
             },
             "e-old.drv": {
-                "outputs": {"out": {"hash": "sha256-e", "hashAlgo": "sha256"}},
+                "outputs": {"out": {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "hashAlgo": "sha256"
+                }},
                 "env": {"url": "https://example.org/e"}
             }
         }}"#;

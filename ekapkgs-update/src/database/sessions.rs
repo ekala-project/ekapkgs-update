@@ -560,13 +560,18 @@ impl Database {
     }
 
     /// Get all phases for a specific attribute path (any repo)
-    pub async fn get_phases_by_attr(&self, attr_path: &str) -> anyhow::Result<Vec<PhaseRecord>> {
+    pub async fn get_phases_by_attr(
+        &self,
+        repo_name: Option<&str>,
+        attr_path: &str,
+    ) -> anyhow::Result<Vec<PhaseRecord>> {
         let rows = sqlx::query(&format!(
             "SELECT {PHASE_COLUMNS} FROM update_phases
-             WHERE attr_path = ?
+             WHERE attr_path = ?1 AND (?2 IS NULL OR repo_name = ?2)
              ORDER BY started_at DESC, id DESC"
         ))
         .bind(attr_path)
+        .bind(repo_name)
         .fetch_all(&self.pool)
         .await?;
 
@@ -635,6 +640,7 @@ impl Database {
     /// Query phases with flexible filtering
     pub async fn query_phases(
         &self,
+        repo_name: Option<&str>,
         error_type: Option<&str>,
         phase: Option<&str>,
         status: Option<&str>,
@@ -644,6 +650,9 @@ impl Database {
     ) -> anyhow::Result<Vec<PhaseRecord>> {
         let mut query = format!("SELECT {PHASE_COLUMNS} FROM update_phases WHERE 1=1");
 
+        if repo_name.is_some() {
+            query.push_str(" AND repo_name = ?");
+        }
         if error_type.is_some() {
             query.push_str(" AND error_type = ?");
         }
@@ -669,6 +678,9 @@ impl Database {
         let mut sqlx_query = sqlx::query(&query);
 
         // Bind parameters in order
+        if let Some(repo) = repo_name {
+            sqlx_query = sqlx_query.bind(repo);
+        }
         if let Some(et) = error_type {
             sqlx_query = sqlx_query.bind(et);
         }
@@ -737,7 +749,7 @@ mod tests {
         assert!(s.completed_at.is_some());
 
         // Dangling running phases are closed out on finalize.
-        let phases = db.get_phases_by_attr("hello").await.unwrap();
+        let phases = db.get_phases_by_attr(None, "hello").await.unwrap();
         assert_eq!(phases.len(), 1);
         assert_eq!(phases[0].id, phase);
         assert_eq!(phases[0].repo_name, "r");
@@ -813,7 +825,7 @@ mod tests {
         if current_host().is_some() && pid_alive(1) == Some(true) {
             assert_eq!(closed, 1);
             assert_eq!(status(stale).await, SessionStatus::Cancelled);
-            let phases = db.get_phases_by_attr("hello").await.unwrap();
+            let phases = db.get_phases_by_attr(None, "hello").await.unwrap();
             assert_eq!(phases[0].status, "skipped");
         }
         assert_eq!(status(live).await, SessionStatus::Running);
@@ -841,7 +853,7 @@ mod tests {
             .await
             .unwrap();
 
-        let phases = db.get_phases_by_attr("hello").await.unwrap();
+        let phases = db.get_phases_by_attr(None, "hello").await.unwrap();
         assert_eq!(phases[0].status, "failed");
         assert_eq!(phases[0].error_type.as_deref(), Some("BuildError"));
         assert_eq!(phases[0].artifacts_path.as_deref(), Some("/tmp/artifacts"));

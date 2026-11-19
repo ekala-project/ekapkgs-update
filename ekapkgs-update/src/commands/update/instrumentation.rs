@@ -233,7 +233,7 @@ mod tests {
             .await;
         assert!(err.is_err());
 
-        let phases = db.get_phases_by_attr("hello").await.unwrap();
+        let phases = db.get_phases_by_attr(None, "hello").await.unwrap();
         let statuses: Vec<(&str, &str)> = phases
             .iter()
             .rev()
