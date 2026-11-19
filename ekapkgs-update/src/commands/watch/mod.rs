@@ -346,6 +346,7 @@ impl WatchConfig {
             head_check,
             self.webhook,
             session_config,
+            crate::commands::run::shutdown_signal(),
         )
         .await
     }

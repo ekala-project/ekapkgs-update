@@ -18,8 +18,8 @@ use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
 use super::preservation::preserve_failure;
 use super::types::{GroupRequest, UpdateRequest, UpdateResult};
 use super::updater::{
-    Attempt, get_file_location, get_repo_dir_from_entry_point, log_unfixed, record_agent_fix,
-    relative_to_repo,
+    Attempt, SetupFailure, entry_point_in_repo, get_file_location, get_repo_dir_from_entry_point,
+    log_unfixed, record_agent_fix, relative_to_repo,
 };
 use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::commands::update::errors::UpdateError;
@@ -88,14 +88,6 @@ pub(super) async fn perform_group_update(
             .collect();
     }
 
-    let skip_all = |reason: String| -> Vec<MemberOutput> {
-        group
-            .members
-            .iter()
-            .map(|req| (Ok(UpdateResult::Skipped(reason.clone())), label(req)))
-            .collect()
-    };
-
     let attempts: Vec<Attempt<'_>> = group
         .members
         .iter()
@@ -107,27 +99,14 @@ pub(super) async fn perform_group_update(
     let repo_dir = match get_repo_dir_from_entry_point(opts.eval_entry_point).await {
         Ok(dir) => dir,
         Err(e) => {
-            warn!("group {}: cannot determine repository: {e:#}", group.root);
-            return skip_all(format!("Repository directory determination failed: {e}"));
+            let failure =
+                SetupFailure::Transient(format!("Repository directory determination failed: {e}"));
+            return setup_failed(&attempts, &failure).await;
         },
     };
-    let Some(relative_entry_point) = relative_to_repo(Path::new(opts.eval_entry_point), &repo_dir)
-    else {
-        // Lasting: every member records the failure (and backs off) instead
-        // of being re-dispatched on every poll.
-        let error = anyhow::anyhow!(
-            "Entry point {} is outside repository {}",
-            opts.eval_entry_point,
-            repo_dir.display()
-        );
-        let mut outputs = Vec::with_capacity(attempts.len());
-        for (attempt, req) in attempts.iter().zip(&group.members) {
-            let result = attempt
-                .fail_setup(UpdatePhase::MetadataExtraction, "entry_point", &error)
-                .await;
-            outputs.push((Ok(result), label(req)));
-        }
-        return outputs;
+    let relative_entry_point = match entry_point_in_repo(opts.eval_entry_point, &repo_dir) {
+        Ok(relative) => relative,
+        Err(failure) => return setup_failed(&attempts, &failure).await,
     };
     let worktree_key = super::preservation::repo_scoped_name(
         group.lead().repo(),
@@ -136,8 +115,8 @@ pub(super) async fn perform_group_update(
     let worktree_path = match create_worktree(&repo_dir, &worktree_key).await {
         Ok(path) => std::fs::canonicalize(&path).unwrap_or(path),
         Err(e) => {
-            warn!("group {}: failed to create worktree: {e:#}", group.root);
-            return skip_all(format!("Worktree creation failed: {e}"));
+            let failure = SetupFailure::Transient(format!("Worktree creation failed: {e}"));
+            return setup_failed(&attempts, &failure).await;
         },
     };
     let worktree_entry = worktree_path.join(&relative_entry_point);
@@ -378,6 +357,17 @@ pub(super) async fn perform_group_update(
 
     cleanup(&repo_dir, &worktree_path, &group.root).await;
     collect(group, results)
+}
+
+/// A group that could not be set up: every member reports the failure
+/// (lasting ones are recorded and back off, transient ones are skipped).
+async fn setup_failed(attempts: &[Attempt<'_>], failure: &SetupFailure) -> Vec<MemberOutput> {
+    let mut outputs = Vec::with_capacity(attempts.len());
+    for attempt in attempts {
+        let result = attempt.setup_failed(failure).await;
+        outputs.push((Ok(result), attempt.req.attr_path.clone()));
+    }
+    outputs
 }
 
 fn updated_result(req: &UpdateRequest) -> UpdateResult {
@@ -1081,5 +1071,53 @@ mod tests {
             group_title("aws-crt-cpp", &[&a, &b]),
             "aws-crt-cpp group: update 2 packages"
         );
+    }
+
+    /// An entry point outside the repository fails every member (recorded,
+    /// backing off); a worktree that cannot be created skips them all.
+    #[tokio::test]
+    async fn group_setup_failure_reaches_every_member() {
+        use crate::database::{SessionMode, UpdateStatus};
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let db = Database::from(pool);
+        let session = db.create_session(SessionMode::Watch, None).await.unwrap();
+        let members = [req("aws-c-io", "1", "2"), req("aws-crt-cpp", "1", "2")];
+        let attempts: Vec<Attempt<'_>> = members
+            .iter()
+            .map(|m| Attempt::new(&db, &session, m))
+            .collect();
+
+        let transient = SetupFailure::Transient("Worktree creation failed: locked".to_owned());
+        let outputs = setup_failed(&attempts, &transient).await;
+        assert_eq!(outputs.len(), 2);
+        assert!(
+            outputs
+                .iter()
+                .all(|(r, _)| matches!(r, Ok(UpdateResult::Skipped(_))))
+        );
+        for m in &members {
+            assert!(
+                db.get_update_record("", &m.attr_path)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let lasting = entry_point_in_repo("/elsewhere/default.nix", Path::new("/repo"))
+            .expect_err("outside the repository");
+        let outputs = setup_failed(&attempts, &lasting).await;
+        assert_eq!(
+            outputs.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>(),
+            ["aws-c-io", "aws-crt-cpp"]
+        );
+        for (result, attr) in &outputs {
+            assert!(matches!(result, Ok(UpdateResult::Failed(_))), "{attr}");
+            let record = db.get_update_record("", attr).await.unwrap().unwrap();
+            assert_eq!(record.status, UpdateStatus::Failed, "{attr}");
+            assert!(record.in_backoff(chrono::Utc::now()), "{attr}");
+        }
     }
 }

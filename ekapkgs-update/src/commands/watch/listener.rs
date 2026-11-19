@@ -25,6 +25,8 @@
 //! 6. Repos are re-synced and re-indexed every `index_refresh_interval`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,7 +44,7 @@ use super::refresh::{self, index_config, index_repo_locked};
 use super::webhook::{self, WebhookState};
 use super::{ResolvedRepo, sync};
 use crate::commands::run::{
-    UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs, shutdown_signal,
+    UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs,
 };
 use crate::database::{
     Database, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
@@ -81,7 +83,28 @@ async fn stopped(stop: &mut Stop) {
     }
 }
 
-/// Run the watch event loop until SIGINT or SIGTERM.
+/// Polls one upstream source and records its observations. The watch loop
+/// uses [`source_poller`]; tests inject their own.
+type Poller = Arc<dyn Fn(UpstreamIndexEntry) -> PollFuture + Send + Sync>;
+type PollFuture = Pin<Box<dyn Future<Output = SourceOutcome> + Send>>;
+
+/// The poller of one cycle: [`poll_one_source`], sharing the cycle's API
+/// gate (rate limit state) and observation time.
+fn source_poller(db: &Database, repos: &[ResolvedRepo]) -> Poller {
+    let db = db.clone();
+    let configured: Arc<HashSet<String>> = Arc::new(repos.iter().map(|r| r.name.clone()).collect());
+    let gate = Arc::new(ApiGate::default());
+    let now = Utc::now();
+    Arc::new(move |source_row| {
+        let db = db.clone();
+        let configured = Arc::clone(&configured);
+        let gate = Arc::clone(&gate);
+        Box::pin(async move { poll_one_source(&db, &source_row, &configured, &gate, now).await })
+    })
+}
+
+/// Run the watch event loop until `shutdown` resolves (the caller passes
+/// [`crate::commands::run::shutdown_signal`]: SIGINT or SIGTERM).
 ///
 /// A signal during a poll cycle stops dispatching, aborts the cycle's updater
 /// service (and the updates in flight) and closes its session as
@@ -96,13 +119,14 @@ pub async fn run_watch_loop(
     head_check_interval: Option<Duration>,
     webhook: Option<super::WebhookListen>,
     session_config: serde_json::Value,
+    shutdown: impl Future<Output = &'static str> + Send + 'static,
 ) -> anyhow::Result<()> {
     let poll_interval = poll_interval.max(MIN_INTERVAL);
     let index_refresh_interval = index_refresh_interval.max(MIN_INTERVAL);
 
     let (stop_tx, mut stop) = watch::channel(false);
     tokio::spawn(async move {
-        let signal = shutdown_signal().await;
+        let signal = shutdown.await;
         info!("Received {}, shutting down watch service...", signal);
         let _ = stop_tx.send(true);
     });
@@ -166,6 +190,7 @@ pub async fn run_watch_loop(
                 run_poll_cycle(
                     &sources,
                     poll_interval,
+                    source_poller(&db, &repos),
                     &repos,
                     &db,
                     &updater_config,
@@ -820,6 +845,7 @@ async fn due_sources(
 async fn run_poll_cycle(
     sources: &[UpstreamIndexEntry],
     poll_interval: Duration,
+    poller: Poller,
     repos: &[ResolvedRepo],
     db: &Database,
     updater_config: &UpdaterServiceConfig,
@@ -845,6 +871,7 @@ async fn run_poll_cycle(
     let result = poll_cycle(
         &due,
         sources.len(),
+        poller,
         repos,
         db,
         updater_config,
@@ -897,6 +924,7 @@ async fn run_poll_cycle(
 async fn poll_cycle(
     due: &[UpstreamIndexEntry],
     total: usize,
+    poller: Poller,
     repos: &[ResolvedRepo],
     db: &Database,
     updater_config: &UpdaterServiceConfig,
@@ -912,23 +940,17 @@ async fn poll_cycle(
         total,
         total - due.len()
     );
-    let now = Utc::now();
-    let configured: Arc<HashSet<String>> = Arc::new(repos.iter().map(|r| r.name.clone()).collect());
     let semaphore = Arc::new(Semaphore::new(POLL_CONCURRENCY));
-    let gate = Arc::new(ApiGate::default());
 
     let mut tasks = JoinSet::new();
     for source_row in due {
-        let source_row = source_row.clone();
-        let db = db.clone();
-        let configured = Arc::clone(&configured);
+        let poll = poller(source_row.clone());
         let semaphore = Arc::clone(&semaphore);
-        let gate = Arc::clone(&gate);
         tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 return SourceOutcome::default();
             };
-            poll_one_source(&db, &source_row, &configured, &gate, now).await
+            poll.await
         });
     }
 
@@ -949,15 +971,18 @@ async fn poll_cycle(
     let mut observed_repos: HashSet<String> = HashSet::new();
     let mut skipped = 0;
     loop {
+        // A signal wins over polls that finished at the same time: nothing
+        // is dispatched after it.
         let joined = tokio::select! {
+            biased;
+            () = stopped(&mut stop) => {
+                tasks.abort_all();
+                dispatcher.cancel(stats).await;
+                anyhow::bail!("interrupted by a shutdown signal");
+            },
             joined = tasks.join_next() => match joined {
                 Some(joined) => joined,
                 None => break,
-            },
-            () = stopped(&mut stop) => {
-                tasks.abort_all();
-                dispatcher.cancel().await;
-                anyhow::bail!("interrupted by a shutdown signal");
             },
         };
         let outcome = match joined {
@@ -1192,11 +1217,12 @@ impl<'a> Dispatcher<'a> {
             stats.session_id = Some(session_id.clone());
             drop(tx);
             let joined = tokio::select! {
-                joined = &mut handle => joined,
+                biased;
                 () = stopped(stop) => {
                     stop_service(self.db, &session_id, handle).await;
                     anyhow::bail!("interrupted by a shutdown signal (session {session_id} cancelled)");
                 },
+                joined = &mut handle => joined,
             };
             let outcome = joined.unwrap_or_else(|e| {
                 warn!("Updater service panicked: {}", e);
@@ -1221,14 +1247,16 @@ impl<'a> Dispatcher<'a> {
 
     /// Stop on a shutdown signal: nothing more is dispatched, the updater
     /// service (and its updates in flight) is aborted and its session closed
-    /// as `cancelled`.
-    async fn cancel(self) {
+    /// as `cancelled`. The cycle keeps what was dispatched and the session.
+    async fn cancel(self, stats: &mut WatchCycleStats) {
+        stats.dispatched = self.dispatched;
         if let Some(RunningService {
             session_id,
             tx,
             handle,
         }) = self.service
         {
+            stats.session_id = Some(session_id.clone());
             drop(tx);
             stop_service(self.db, &session_id, handle).await;
         }
@@ -1567,5 +1595,224 @@ mod tests {
         assert_eq!(best_for_package(&releases, &entry, "1.4.0"), "1.4.2");
         // Nothing newer compatible: stays at current.
         assert_eq!(best_for_package(&releases, &entry, "1.4.2"), "1.4.2");
+    }
+
+    // ── Shutdown during a poll cycle ──────────────────────────────
+
+    async fn setup_db() -> Database {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        Database::from(pool)
+    }
+
+    fn test_repo() -> ResolvedRepo {
+        ResolvedRepo {
+            name: "r".into(),
+            enumerate_entry_point: "/nonexistent/default.nix".into(),
+            select: None,
+            eval_entry_point: "/nonexistent/default.nix".into(),
+            repo_dir: std::path::PathBuf::from("/nonexistent"),
+            pr_config: None,
+            fork: "origin".into(),
+            upstream_url: None,
+            managed: false,
+        }
+    }
+
+    /// Dry run: dispatched updates are reported without nix or git.
+    fn dry_run_config() -> UpdaterServiceConfig {
+        UpdaterServiceConfig {
+            session_id: String::new(),
+            eval_entry_point: Arc::from("/nonexistent/default.nix"),
+            pr_config: None,
+            fork: Arc::from("origin"),
+            run_passthru_tests: false,
+            dry_run: true,
+            concurrency: 1,
+            pr_enhancements: crate::commands::pr_enhancements::PrEnhancementsConfig::default(),
+            interactive: false,
+            preserve_failures: false,
+            commit_strategy: crate::cli::CommitStrategy::Worktrees,
+            claude_fix: false,
+            claude_fix_max_turns: 0,
+            claude_fix_timeout: 0,
+        }
+    }
+
+    /// One source per attr (`o/<attr>`), never polled before (all due).
+    fn sources(attrs: &[&str]) -> Vec<UpstreamIndexEntry> {
+        attrs
+            .iter()
+            .map(|attr| UpstreamIndexEntry {
+                upstream_key: format!("o/{attr}"),
+                ..obs("r", attr, "1.0", "1.1", Decision::Dispatch).entry
+            })
+            .collect()
+    }
+
+    /// A poller whose sources all yield a new release to dispatch; `late`
+    /// only answers once the shutdown signal arrived.
+    fn dispatching_poller(stop: &Stop, late: &'static str) -> Poller {
+        let stop = stop.clone();
+        Arc::new(move |row: UpstreamIndexEntry| {
+            let mut stop = stop.clone();
+            Box::pin(async move {
+                if row.attr_path == late {
+                    stopped(&mut stop).await;
+                }
+                SourceOutcome {
+                    observations: vec![Observation {
+                        entry: row,
+                        current: "1.0".into(),
+                        latest: "1.1".into(),
+                        decision: Decision::Dispatch,
+                    }],
+                    ..SourceOutcome::default()
+                }
+            })
+        })
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct CycleRow {
+        status: String,
+        error: Option<String>,
+        dispatched: i64,
+        session_id: Option<String>,
+    }
+
+    async fn only_cycle(db: &Database) -> CycleRow {
+        sqlx::query_as("SELECT status, error, dispatched, session_id FROM watch_cycles")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
+    /// Sessions' `(packages_attempted, packages_skipped)`.
+    async fn session_counts(db: &Database) -> Vec<(i64, i64)> {
+        sqlx::query_as("SELECT packages_attempted, packages_skipped FROM update_sessions")
+            .fetch_all(db.pool())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_poll_cancels_session_and_stops_dispatch() {
+        let db = setup_db().await;
+        let repos = vec![test_repo()];
+        let config = dry_run_config();
+        let (stop_tx, stop) = watch::channel(false);
+        let mut reported = DryRunReported::new();
+        let due = sources(&["early", "late"]);
+        let session_config = serde_json::json!({});
+
+        let cycle = run_poll_cycle(
+            &due,
+            MIN,
+            dispatching_poller(&stop, "late"),
+            &repos,
+            &db,
+            &config,
+            &session_config,
+            &mut reported,
+            &stop,
+        );
+        // Signal once the first update has been dispatched and reported.
+        let signal = async {
+            let wait = async {
+                while session_counts(&db).await != [(1, 1)] {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), wait)
+                .await
+                .expect("first update dispatched");
+            stop_tx.send(true).unwrap();
+        };
+        tokio::join!(cycle, signal);
+
+        // The source answering after the signal was not dispatched.
+        assert_eq!(
+            reported,
+            DryRunReported::from([("r".into(), "early".into(), "1.1".into())])
+        );
+        let row = only_cycle(&db).await;
+        assert_eq!(row.status, "failed");
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("interrupted by a shutdown signal")),
+            "{row:?}"
+        );
+        assert_eq!(row.dispatched, 1);
+        let session_id = row.session_id.expect("cycle links its session");
+        let session = db.get_session(&session_id).await.unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert!(session.completed_at.is_some());
+        // Counters of the work done before the signal are kept.
+        assert_eq!(session_counts(&db).await, [(1, 1)]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_any_dispatch_opens_no_session() {
+        let db = setup_db().await;
+        let repos = vec![test_repo()];
+        let config = dry_run_config();
+        let (stop_tx, stop) = watch::channel(false);
+        let mut reported = DryRunReported::new();
+        stop_tx.send(true).unwrap();
+
+        run_poll_cycle(
+            &sources(&["a", "b"]),
+            MIN,
+            dispatching_poller(&stop, ""),
+            &repos,
+            &db,
+            &config,
+            &serde_json::json!({}),
+            &mut reported,
+            &stop,
+        )
+        .await;
+
+        assert!(reported.is_empty());
+        assert!(session_counts(&db).await.is_empty());
+        let row = only_cycle(&db).await;
+        assert_eq!(row.status, "failed");
+        assert_eq!((row.dispatched, row.session_id), (0, None));
+    }
+
+    #[tokio::test]
+    async fn uninterrupted_poll_completes_session() {
+        let db = setup_db().await;
+        let repos = vec![test_repo()];
+        let config = dry_run_config();
+        let (_stop_tx, stop) = watch::channel(false);
+        let mut reported = DryRunReported::new();
+
+        run_poll_cycle(
+            &sources(&["a", "b"]),
+            MIN,
+            dispatching_poller(&stop, ""),
+            &repos,
+            &db,
+            &config,
+            &serde_json::json!({}),
+            &mut reported,
+            &stop,
+        )
+        .await;
+
+        assert_eq!(reported.len(), 2);
+        let row = only_cycle(&db).await;
+        assert_eq!((row.status.as_str(), row.error), ("completed", None));
+        assert_eq!(row.dispatched, 2);
+        let session = db
+            .get_session(&row.session_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, SessionStatus::Completed);
+        assert_eq!(session_counts(&db).await, [(2, 2)]);
     }
 }

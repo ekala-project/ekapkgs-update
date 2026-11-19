@@ -63,6 +63,52 @@ pub(crate) fn relative_to_repo(path: &Path, repo_dir: &Path) -> Option<PathBuf> 
     canonical.strip_prefix(repo_dir).ok().map(Path::to_path_buf)
 }
 
+/// Why an update could not be set up, before the update workflow ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SetupFailure {
+    /// The package or configuration is at fault and stays so (its file or
+    /// the entry point is outside the repository, its file cannot be
+    /// located): recorded as a failed update (`failed`, failure backoff), so
+    /// `watch` does not re-dispatch it on every poll.
+    Lasting {
+        component: &'static str,
+        message: String,
+    },
+    /// The repository is (briefly) unusable: its root cannot be determined
+    /// or a worktree cannot be created. Nothing was attempted and the package
+    /// is not at fault, so it is reported as [`UpdateResult::Skipped`] and
+    /// its `updates` row is left untouched (the next poll / run retries).
+    Transient(String),
+}
+
+/// The package file `file_location`, relative to the repository root.
+pub(super) fn package_file_in_repo(
+    file_location: &str,
+    repo_dir: &Path,
+) -> Result<PathBuf, SetupFailure> {
+    relative_to_repo(Path::new(file_location), repo_dir).ok_or_else(|| SetupFailure::Lasting {
+        component: "meta.position",
+        message: format!(
+            "Package file {file_location} is outside repository {}",
+            repo_dir.display()
+        ),
+    })
+}
+
+/// The entry point `eval_entry_point`, relative to the repository root.
+pub(super) fn entry_point_in_repo(
+    eval_entry_point: &str,
+    repo_dir: &Path,
+) -> Result<PathBuf, SetupFailure> {
+    relative_to_repo(Path::new(eval_entry_point), repo_dir).ok_or_else(|| SetupFailure::Lasting {
+        component: "entry_point",
+        message: format!(
+            "Entry point {eval_entry_point} is outside repository {}",
+            repo_dir.display()
+        ),
+    })
+}
+
 /// Database bookkeeping for one update attempt, shared by worktree and
 /// branch mode: workflow phase rows (via [`PhaseTracker`]), the package's
 /// `updates` row and its failure log.
@@ -251,6 +297,26 @@ impl<'a> Attempt<'a> {
         self.tracker.record_failure(update_error.clone()).await;
         self.record_failure(&update_error, &message).await
     }
+
+    /// Report a [`SetupFailure`]: lasting ones are recorded as failed
+    /// updates (phase `metadata_extraction`), transient ones are skipped.
+    pub(super) async fn setup_failed(&self, failure: &SetupFailure) -> UpdateResult {
+        match failure {
+            SetupFailure::Lasting { component, message } => {
+                warn!("{}: {}", self.req.attr_path, message);
+                self.fail_setup(
+                    UpdatePhase::MetadataExtraction,
+                    component,
+                    &anyhow::anyhow!("{message}"),
+                )
+                .await
+            },
+            SetupFailure::Transient(reason) => {
+                warn!("{}: {}", self.req.attr_path, reason);
+                UpdateResult::Skipped(reason.clone())
+            },
+        }
+    }
 }
 
 /// Finish an `agent_fix` phase according to the Claude fix outcome.
@@ -342,13 +408,9 @@ pub(super) async fn perform_update(
     let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point).await {
         Ok(dir) => dir,
         Err(e) => {
-            warn!(
-                "{}: Failed to determine repository directory: {}",
-                attr_path, e
-            );
-            return Ok(UpdateResult::Skipped(format!(
-                "Repository directory determination failed: {e}"
-            )));
+            let failure =
+                SetupFailure::Transient(format!("Repository directory determination failed: {e}"));
+            return Ok(attempt.setup_failed(&failure).await);
         },
     };
 
@@ -378,42 +440,14 @@ pub(super) async fn perform_update(
 
     // Both the package file and the entry point are addressed relative to the
     // repository root so they can be found inside the worktree, wherever the
-    // entry point lives (e.g. `ci/packages.nix`).
-    let Some(relative_file_location) = relative_to_repo(Path::new(&file_location), &repo_dir)
-    else {
-        warn!(
-            "{}: package file {} is outside the repository {}; not editing it",
-            attr_path,
-            file_location,
-            repo_dir.display()
-        );
-        // Lasting (the package is defined outside the repository): record a
-        // failure, so the failure backoff stops `watch` re-dispatching it
-        // every poll.
-        let error = anyhow::anyhow!(
-            "Package file {file_location} is outside repository {}",
-            repo_dir.display()
-        );
-        return Ok(attempt
-            .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &error)
-            .await);
-    };
-    let Some(relative_entry_point) = relative_to_repo(Path::new(eval_entry_point), &repo_dir)
-    else {
-        warn!(
-            "{}: entry point {} is outside the repository {}",
-            attr_path,
-            eval_entry_point,
-            repo_dir.display()
-        );
-        // A configuration error that lasts: recorded like the one above.
-        let error = anyhow::anyhow!(
-            "Entry point {eval_entry_point} is outside repository {}",
-            repo_dir.display()
-        );
-        return Ok(attempt
-            .fail_setup(UpdatePhase::MetadataExtraction, "entry_point", &error)
-            .await);
+    // entry point lives (e.g. `ci/packages.nix`). A package defined outside
+    // the repository is never edited.
+    let located = package_file_in_repo(&file_location, &repo_dir).and_then(|file| {
+        entry_point_in_repo(eval_entry_point, &repo_dir).map(|entry| (file, entry))
+    });
+    let (relative_file_location, relative_entry_point) = match located {
+        Ok(located) => located,
+        Err(failure) => return Ok(attempt.setup_failed(&failure).await),
     };
 
     // Create a worktree for this update (repo-qualified so the same attr
@@ -422,10 +456,8 @@ pub(super) async fn perform_update(
     let worktree_path = match create_worktree(&repo_dir, &worktree_key).await {
         Ok(path) => path,
         Err(e) => {
-            warn!("{}: Failed to create worktree: {}", attr_path, e);
-            return Ok(UpdateResult::Skipped(format!(
-                "Worktree creation failed: {e}"
-            )));
+            let failure = SetupFailure::Transient(format!("Worktree creation failed: {e}"));
+            return Ok(attempt.setup_failed(&failure).await);
         },
     };
 
@@ -1916,6 +1948,88 @@ mod tests {
         assert_eq!(record.current_version.as_deref(), Some("1.3"));
         assert_eq!(record.failure_count, 0);
         assert_eq!(record.failed_version, None);
+    }
+
+    #[test]
+    fn setup_checks_classify_paths_outside_the_repository() {
+        let repo = Path::new("/var/lib/ekapkgs-update/repos/corepkgs");
+        let inside = "/var/lib/ekapkgs-update/repos/corepkgs/pkgs/hello/default.nix";
+        let outside = "/nix/store/abc-source/pkgs/hello/default.nix";
+        let lasting = |component, message: &str| {
+            Err(SetupFailure::Lasting {
+                component,
+                message: message.to_owned(),
+            })
+        };
+        type Located = Result<PathBuf, SetupFailure>;
+        let cases: Vec<(&str, Located, Located)> = vec![
+            (
+                inside,
+                Ok(PathBuf::from("pkgs/hello/default.nix")),
+                Ok(PathBuf::from("pkgs/hello/default.nix")),
+            ),
+            (
+                outside,
+                lasting(
+                    "meta.position",
+                    "Package file /nix/store/abc-source/pkgs/hello/default.nix is outside \
+                     repository /var/lib/ekapkgs-update/repos/corepkgs",
+                ),
+                lasting(
+                    "entry_point",
+                    "Entry point /nix/store/abc-source/pkgs/hello/default.nix is outside \
+                     repository /var/lib/ekapkgs-update/repos/corepkgs",
+                ),
+            ),
+        ];
+        for (path, package, entry) in cases {
+            assert_eq!(package_file_in_repo(path, repo), package, "{path}");
+            assert_eq!(entry_point_in_repo(path, repo), entry, "{path}");
+        }
+    }
+
+    /// A package (or entry point) outside the repository is a lasting setup
+    /// failure: recorded as failed with failure backoff, so watch stops
+    /// re-dispatching it. A worktree that cannot be created is transient:
+    /// skipped, the `updates` row left as it was.
+    #[tokio::test]
+    async fn lasting_setup_failure_is_recorded_transient_is_skipped() {
+        let db = setup_db().await;
+        let session = db.create_session(SessionMode::Watch, None).await.unwrap();
+        db.record_update_available("", "hello", "1.2", "1.3")
+            .await
+            .unwrap();
+        let req = request();
+        let attempt = Attempt::new(&db, &session, &req);
+
+        let transient = SetupFailure::Transient("Worktree creation failed: locked".to_owned());
+        let result = attempt.setup_failed(&transient).await;
+        assert!(
+            matches!(&result, UpdateResult::Skipped(r) if r == "Worktree creation failed: locked"),
+            "{result:?}"
+        );
+        let record = db.get_update_record("", "hello").await.unwrap().unwrap();
+        assert_eq!(record.status, UpdateStatus::Outdated);
+        assert_eq!(record.failure_count, 0);
+        assert!(!record.in_backoff(chrono::Utc::now()));
+
+        let lasting = package_file_in_repo("/nix/store/x/default.nix", Path::new("/repo"))
+            .expect_err("outside the repository");
+        let result = attempt.setup_failed(&lasting).await;
+        assert!(matches!(result, UpdateResult::Failed(_)), "{result:?}");
+        let record = db.get_update_record("", "hello").await.unwrap().unwrap();
+        assert_eq!(record.status, UpdateStatus::Failed);
+        assert_eq!(record.failed_version.as_deref(), Some("1.3"));
+        assert_eq!(record.failure_count, 1);
+        assert!(record.in_backoff(chrono::Utc::now()));
+        assert!(
+            record
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("outside repository /repo")),
+            "{:?}",
+            record.last_error
+        );
     }
 
     #[test]

@@ -373,83 +373,20 @@ impl RunConfig {
             claude_fix_max_turns,
             claude_fix_timeout,
         };
-        let mut updater_handle =
+        let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
-        let mut checker_handle = checker_handle;
-        let mut grouper_handle = grouper_handle;
-
-        // Wait for all services, or stop on SIGINT / SIGTERM: dispatch and
-        // the updates in flight are aborted and the session is closed as
-        // `cancelled` (instead of staying `running` forever).
-        let finished = tokio::select! {
-            results = async {
-                tokio::join!(&mut checker_handle, &mut grouper_handle, &mut updater_handle)
-            } => Ok(results),
-            signal = shutdown_signal() => Err(signal),
-        };
-        let (checker_result, grouper_result, updater_result) = match finished {
-            Ok(results) => results,
-            Err(signal) => {
-                tracing::warn!("Received {}, stopping the run", signal);
-                checker_handle.abort();
-                grouper_handle.abort();
-                updater_handle.abort();
-                // Aborting the updater drops its tasks (and their worktrees'
-                // processes); wait for that before closing the session, but
-                // not forever: a task blocked outside an await point (the
-                // `--interactive` prompt) only stops when it yields.
-                let stopped = async {
-                    let _ = tokio::join!(checker_handle, grouper_handle, updater_handle);
-                };
-                if tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!("Some update tasks did not stop within 10s");
-                }
-                if let Err(e) = db
-                    .close_session(&session_id, crate::database::SessionStatus::Cancelled)
-                    .await
-                {
-                    tracing::warn!("Failed to close interrupted session: {}", e);
-                }
-                anyhow::bail!("run interrupted by {signal} (session {session_id} cancelled)");
-            },
-        };
-        if let Err(e) = grouper_result {
-            tracing::warn!("Update grouping task failed: {}", e);
-        }
-
-        // A failed (panicked) service still closes the session.
-        let checker_counts = checker_result
-            .map_err(|e| tracing::warn!("Release checker task failed: {}", e))
-            .ok();
-        let stats = updater_result
-            .map_err(|e| tracing::warn!("Updater task failed: {}", e))
-            .ok();
-        let failed_count = stats.map_or(0, |s| s.failed);
-        let session_status = if checker_counts.is_none() || stats.is_none() || failed_count > 0 {
-            crate::database::SessionStatus::Failed
-        } else {
-            crate::database::SessionStatus::Completed
-        };
-
-        // Finalize session (outcome counters were maintained live)
-        let finalized = match checker_counts {
-            Some((checked, skipped, _)) => {
-                db.finalize_session(&session_id, session_status, checked, skipped)
-                    .await
-            },
-            None => db.close_session(&session_id, session_status).await,
-        };
-        if let Err(e) = finalized {
-            tracing::warn!("Failed to finalize session: {}", e);
-        }
-        let (Some((checked_count, skipped_count, error_count)), Some(stats)) =
-            (checker_counts, stats)
-        else {
-            anyhow::bail!("run failed: a service task panicked (session {session_id})");
-        };
+        // Wait for all services, or stop on SIGINT / SIGTERM.
+        let (checker_counts, stats) = supervise_services(
+            &db,
+            &session_id,
+            checker_handle,
+            grouper_handle,
+            updater_handle,
+            shutdown_signal(),
+        )
+        .await?;
+        let (checked_count, skipped_count, error_count) = checker_counts;
+        let failed_count = stats.failed;
         let updated_count = stats.updated;
         let packages_attempted = stats.attempted();
 
@@ -537,6 +474,94 @@ impl RunConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Packages evaluated, skipped by backoff and failed to evaluate (checker).
+type CheckerCounts = (usize, usize, usize);
+
+/// How long a shutdown waits for aborted services to stop.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait for the services of a run and close its session.
+///
+/// When `shutdown` resolves first (SIGINT / SIGTERM, see [`shutdown_signal`]),
+/// dispatch and the updates in flight are aborted and the session is closed
+/// as `cancelled` (instead of staying `running` forever). A panicked service
+/// closes it as `failed`. Otherwise it is finalized as `completed`, or
+/// `failed` when an update failed. Outcome counters were maintained live and
+/// are kept either way.
+///
+/// # Errors
+/// On a shutdown signal or a panicked checker / updater.
+async fn supervise_services(
+    db: &Database,
+    session_id: &str,
+    mut checker_handle: tokio::task::JoinHandle<CheckerCounts>,
+    mut grouper_handle: tokio::task::JoinHandle<()>,
+    mut updater_handle: tokio::task::JoinHandle<UpdaterStats>,
+    shutdown: impl std::future::Future<Output = &'static str>,
+) -> anyhow::Result<(CheckerCounts, UpdaterStats)> {
+    use crate::database::SessionStatus;
+
+    let finished = tokio::select! {
+        results = async {
+            tokio::join!(&mut checker_handle, &mut grouper_handle, &mut updater_handle)
+        } => Ok(results),
+        signal = shutdown => Err(signal),
+    };
+    let (checker_result, grouper_result, updater_result) = match finished {
+        Ok(results) => results,
+        Err(signal) => {
+            tracing::warn!("Received {}, stopping the run", signal);
+            checker_handle.abort();
+            grouper_handle.abort();
+            updater_handle.abort();
+            // Aborting the updater drops its tasks (and their worktrees'
+            // processes); wait for that before closing the session, but
+            // not forever: a task blocked outside an await point (the
+            // `--interactive` prompt) only stops when it yields.
+            let stopped = async {
+                let _ = tokio::join!(checker_handle, grouper_handle, updater_handle);
+            };
+            if tokio::time::timeout(SHUTDOWN_GRACE, stopped).await.is_err() {
+                tracing::warn!("Some update tasks did not stop within {:?}", SHUTDOWN_GRACE);
+            }
+            if let Err(e) = db.close_session(session_id, SessionStatus::Cancelled).await {
+                tracing::warn!("Failed to close interrupted session: {}", e);
+            }
+            anyhow::bail!("run interrupted by {signal} (session {session_id} cancelled)");
+        },
+    };
+    if let Err(e) = grouper_result {
+        tracing::warn!("Update grouping task failed: {}", e);
+    }
+
+    // A failed (panicked) service still closes the session.
+    let checker_counts = checker_result
+        .map_err(|e| tracing::warn!("Release checker task failed: {}", e))
+        .ok();
+    let stats = updater_result
+        .map_err(|e| tracing::warn!("Updater task failed: {}", e))
+        .ok();
+    let session_status = match (checker_counts, stats) {
+        (Some(_), Some(stats)) if stats.failed == 0 => SessionStatus::Completed,
+        _ => SessionStatus::Failed,
+    };
+
+    let finalized = match checker_counts {
+        Some((checked, skipped, _)) => {
+            db.finalize_session(session_id, session_status, checked, skipped)
+                .await
+        },
+        None => db.close_session(session_id, session_status).await,
+    };
+    if let Err(e) = finalized {
+        tracing::warn!("Failed to finalize session: {}", e);
+    }
+    match (checker_counts, stats) {
+        (Some(counts), Some(stats)) => Ok((counts, stats)),
+        _ => anyhow::bail!("run failed: a service task panicked (session {session_id})"),
     }
 }
 
@@ -1008,6 +1033,127 @@ mod tests {
                 assert_eq!(stats.count(r), SessionCounter::Skipped);
             }
             assert_eq!(stats.updated, 0);
+        }
+    }
+
+    async fn setup_db() -> Database {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        Database::from(pool)
+    }
+
+    /// `(status, packages_evaluated, packages_attempted, completed)` of a session.
+    async fn session_row(db: &Database, id: &str) -> (String, usize, usize, bool) {
+        let session = db.get_session(id).await.unwrap().unwrap();
+        (
+            session.status.as_str().to_owned(),
+            session.packages_evaluated,
+            session.packages_attempted,
+            session.completed_at.is_some(),
+        )
+    }
+
+    fn pending<T: Send + 'static>() -> tokio::task::JoinHandle<T> {
+        tokio::spawn(std::future::pending())
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_run_session_and_aborts_services() {
+        let db = setup_db().await;
+        let session = db.create_session(SessionMode::Run, None).await.unwrap();
+        db.increment_session_counter(&session, SessionCounter::Attempted)
+            .await
+            .unwrap();
+        let updater = pending::<UpdaterStats>();
+        let updater_abort = updater.abort_handle();
+
+        let err = supervise_services(
+            &db,
+            &session,
+            pending(),
+            pending(),
+            updater,
+            std::future::ready("SIGTERM"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{err}").contains("interrupted by SIGTERM"), "{err}");
+        assert!(updater_abort.is_finished(), "updater aborted");
+        assert_eq!(
+            session_row(&db, &session).await,
+            ("cancelled".to_owned(), 0, 1, true),
+            "cancelled, counters kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_service_fails_run_session() {
+        for checker_panics in [true, false] {
+            let db = setup_db().await;
+            let session = db.create_session(SessionMode::Run, None).await.unwrap();
+            let checker = tokio::spawn(async move {
+                assert!(!checker_panics, "checker panic");
+                (5, 1, 0)
+            });
+            let updater = tokio::spawn(async move {
+                assert!(checker_panics, "updater panic");
+                UpdaterStats::default()
+            });
+
+            let err = supervise_services(
+                &db,
+                &session,
+                checker,
+                tokio::spawn(async {}),
+                updater,
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(format!("{err}").contains("panicked"), "{err}");
+            let evaluated = if checker_panics { 0 } else { 5 };
+            assert_eq!(
+                session_row(&db, &session).await,
+                ("failed".to_owned(), evaluated, 0, true),
+                "checker panics: {checker_panics}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_services_finalize_run_session() {
+        let cases = [
+            (UpdaterStats::default(), "completed"),
+            (
+                UpdaterStats {
+                    failed: 1,
+                    ..UpdaterStats::default()
+                },
+                "failed",
+            ),
+        ];
+        for (stats, status) in cases {
+            let db = setup_db().await;
+            let session = db.create_session(SessionMode::Run, None).await.unwrap();
+
+            let (counts, returned) = supervise_services(
+                &db,
+                &session,
+                tokio::spawn(async { (7, 2, 0) }),
+                tokio::spawn(async {}),
+                tokio::spawn(async move { stats }),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!((counts, returned), ((7, 2, 0), stats));
+            assert_eq!(
+                session_row(&db, &session).await,
+                (status.to_owned(), 7, 0, true)
+            );
         }
     }
 }
