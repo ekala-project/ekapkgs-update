@@ -204,7 +204,15 @@ pub(super) async fn perform_group_update(
             failure.error.phase(),
             failure.error.summary()
         );
-        let preserved = preserve(opts, group, &failure, &worktree_path, &worktree_entry).await;
+        let preserved = preserve(
+            opts,
+            group,
+            &failure,
+            &repo_dir,
+            &worktree_path,
+            &worktree_entry,
+        )
+        .await;
         for (index, attempt) in attempts.iter().enumerate() {
             if results[index].is_some() {
                 continue;
@@ -347,10 +355,14 @@ pub(super) async fn perform_group_update(
             );
         }
     } else {
+        // Nothing is proposed without a PR (see `perform_update`): the
+        // members stay `outdated`.
         for u in &updated {
-            let attempt = &attempts[u.index];
-            attempt.record_success(rebuild_count).await;
-            results[u.index] = Some(updated_result(attempt.req));
+            let req = attempts[u.index].req;
+            results[u.index] = Some(super::updater::not_proposed_without_pr_config(
+                &req.attr_path,
+                &req.new_version,
+            ));
         }
     }
 
@@ -388,11 +400,14 @@ async fn cleanup(repo_dir: &Path, worktree_path: &Path, root: &str) {
 
 /// Preserve the failed group worktree under the member that failed (or the
 /// first member when a non-member, such as the root, failed verification).
-/// Returns whether the worktree was preserved (and must be kept).
+/// Returns whether the worktree was preserved: moved into the artifacts
+/// (nothing left to clean up), or copied with the original kept because the
+/// copy's git metadata still points at it.
 async fn preserve(
     opts: &GroupUpdateOptions<'_>,
     group: &GroupRequest,
     failure: &GroupFailure,
+    repo_dir: &Path,
     worktree_path: &Path,
     worktree_entry: &Path,
 ) -> bool {
@@ -413,6 +428,7 @@ async fn preserve(
         attr.repo(),
         &attr.attr_path,
         failure.error.phase(),
+        repo_dir,
         worktree_path,
         worktree_entry,
         &failure.error,

@@ -1,5 +1,6 @@
 //! Configuration structures for run mode operations
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -230,6 +231,14 @@ impl RunConfig {
         let db = Database::new(&expanded_db_path).await?;
         info!("Database initialized at: {}", expanded_db_path);
 
+        // Close `run` sessions left `running` by a process that is gone
+        // (killed, OOM, crash) so they don't stay running on the dashboard.
+        match db.recover_stale_run_sessions().await {
+            Ok(0) => {},
+            Ok(n) => info!("Closed {} stale run session(s) of exited processes", n),
+            Err(e) => tracing::warn!("Failed to close stale run sessions: {:#}", e),
+        }
+
         // Create session for tracking this run
         let session_id = db.create_session(SessionMode::Run, config_json).await?;
         info!("Created session: {}", session_id);
@@ -267,13 +276,25 @@ impl RunConfig {
             .filter(|p| !p.as_os_str().is_empty())
             .map(std::path::Path::to_path_buf);
         let pr_config = if let Some(remote_name) = upstream {
-            crate::git::PrConfig::from_remote_in(entry_dir.as_deref(), &remote_name)
-                .await
-                .ok()
+            crate::git::PrConfig::from_remote_in(entry_dir.as_deref(), &remote_name).await
         } else {
-            crate::git::PrConfig::from_git_upstream_in(entry_dir.as_deref())
-                .await
-                .ok()
+            crate::git::PrConfig::from_git_upstream_in(entry_dir.as_deref()).await
+        };
+        let pr_config = match pr_config {
+            Ok(config) => Some(config),
+            Err(e) => {
+                // Worktree updates without a PR are built and then dropped
+                // (reported as skipped, packages left `outdated`).
+                if !is_branch_mode && !dry_run {
+                    tracing::warn!(
+                        "No PR configuration ({:#}): updates will be built but not proposed, \
+                         and their packages stay outdated. Pass --upstream <remote> or set \
+                         an upstream tracking branch to create PRs.",
+                        e
+                    );
+                }
+                None
+            },
         };
 
         // Checker → grouper → updater. Requests for update-group members are
@@ -352,37 +373,85 @@ impl RunConfig {
             claude_fix_max_turns,
             claude_fix_timeout,
         };
-        let updater_handle =
+        let mut updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
+        let mut checker_handle = checker_handle;
+        let mut grouper_handle = grouper_handle;
 
-        // Wait for both services to complete
-        let (checker_result, grouper_result, updater_result) =
-            tokio::join!(checker_handle, grouper_handle, updater_handle);
+        // Wait for all services, or stop on SIGINT / SIGTERM: dispatch and
+        // the updates in flight are aborted and the session is closed as
+        // `cancelled` (instead of staying `running` forever).
+        let finished = tokio::select! {
+            results = async {
+                tokio::join!(&mut checker_handle, &mut grouper_handle, &mut updater_handle)
+            } => Ok(results),
+            signal = shutdown_signal() => Err(signal),
+        };
+        let (checker_result, grouper_result, updater_result) = match finished {
+            Ok(results) => results,
+            Err(signal) => {
+                tracing::warn!("Received {}, stopping the run", signal);
+                checker_handle.abort();
+                grouper_handle.abort();
+                updater_handle.abort();
+                // Aborting the updater drops its tasks (and their worktrees'
+                // processes); wait for that before closing the session, but
+                // not forever: a task blocked outside an await point (the
+                // `--interactive` prompt) only stops when it yields.
+                let stopped = async {
+                    let _ = tokio::join!(checker_handle, grouper_handle, updater_handle);
+                };
+                if tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Some update tasks did not stop within 10s");
+                }
+                if let Err(e) = db
+                    .close_session(&session_id, crate::database::SessionStatus::Cancelled)
+                    .await
+                {
+                    tracing::warn!("Failed to close interrupted session: {}", e);
+                }
+                anyhow::bail!("run interrupted by {signal} (session {session_id} cancelled)");
+            },
+        };
         if let Err(e) = grouper_result {
             tracing::warn!("Update grouping task failed: {}", e);
         }
 
-        // Unwrap task results
-        let (checked_count, skipped_count, error_count) = checker_result?;
-        let stats = updater_result?;
-        let updated_count = stats.updated + stats.dry_run;
-        let failed_count = stats.failed;
-        let packages_attempted = stats.attempted();
-
-        // Update session status based on results
-        let session_status = if failed_count > 0 {
+        // A failed (panicked) service still closes the session.
+        let checker_counts = checker_result
+            .map_err(|e| tracing::warn!("Release checker task failed: {}", e))
+            .ok();
+        let stats = updater_result
+            .map_err(|e| tracing::warn!("Updater task failed: {}", e))
+            .ok();
+        let failed_count = stats.map_or(0, |s| s.failed);
+        let session_status = if checker_counts.is_none() || stats.is_none() || failed_count > 0 {
             crate::database::SessionStatus::Failed
         } else {
             crate::database::SessionStatus::Completed
         };
 
         // Finalize session (outcome counters were maintained live)
-        if let Err(e) = db
-            .finalize_session(&session_id, session_status, checked_count, skipped_count)
-            .await
-        {
+        let finalized = match checker_counts {
+            Some((checked, skipped, _)) => {
+                db.finalize_session(&session_id, session_status, checked, skipped)
+                    .await
+            },
+            None => db.close_session(&session_id, session_status).await,
+        };
+        if let Err(e) = finalized {
             tracing::warn!("Failed to finalize session: {}", e);
         }
+        let (Some((checked_count, skipped_count, error_count)), Some(stats)) =
+            (checker_counts, stats)
+        else {
+            anyhow::bail!("run failed: a service task panicked (session {session_id})");
+        };
+        let updated_count = stats.updated;
+        let packages_attempted = stats.attempted();
 
         // Refresh known vulnerabilities of the packages this run checked
         // (versions may have changed). Failures never fail the run.
@@ -391,8 +460,15 @@ impl RunConfig {
                 repo: Some(String::new()),
                 ..crate::cve::scan::ScanOptions::default()
             };
-            if let Err(e) = crate::cve::scan::scan_due(db.pool(), &options).await {
-                tracing::warn!("CVE scan failed: {:#}", e);
+            tokio::select! {
+                result = crate::cve::scan::scan_due(db.pool(), &options) => {
+                    if let Err(e) = result {
+                        tracing::warn!("CVE scan failed: {:#}", e);
+                    }
+                },
+                signal = shutdown_signal() => {
+                    tracing::warn!("Received {}, skipping the CVE scan", signal);
+                },
             }
         }
 
@@ -417,16 +493,22 @@ impl RunConfig {
         info!("    Attempted:             {:>6}", packages_attempted);
         info!("    Succeeded:             {:>6}", updated_count);
         info!("    Failed:                {:>6}", failed_count);
+        // Counted as skipped in the session, like the updater's skips.
+        if stats.dry_run > 0 {
+            info!("    Dry-run (not run):     {:>6}", stats.dry_run);
+        }
         if stats.skipped > 0 {
             info!("    Skipped (updater):     {:>6}", stats.skipped);
         }
         info!("");
 
-        if packages_attempted > 0 {
-            let success_rate = (updated_count as f64 / packages_attempted as f64) * 100.0;
+        // Success rate of the updates that were actually performed.
+        let performed = updated_count + failed_count;
+        if performed > 0 {
+            let success_rate = (updated_count as f64 / performed as f64) * 100.0;
             info!(
                 "  Success rate:            {:>5.1}% ({}/{})",
-                success_rate, updated_count, packages_attempted
+                success_rate, updated_count, performed
             );
             info!("");
         }
@@ -455,6 +537,32 @@ impl RunConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM (systemd stop); returns its name.
+///
+/// A signal whose handler cannot be installed is never reported.
+async fn shutdown_signal() -> &'static str {
+    let ctrl_c = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            },
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => "SIGINT",
+        () = terminate => "SIGTERM",
     }
 }
 
@@ -545,6 +653,28 @@ impl UpdaterStats {
             },
         }
     }
+
+    /// Count a job whose task panicked: every package update it attempted
+    /// (one per group member) failed. Returns the session counters to bump,
+    /// matching the `attempted` increments made when the job started.
+    fn count_panicked(&mut self, attempts: usize) -> Vec<SessionCounter> {
+        self.failed += attempts;
+        vec![SessionCounter::Failed; attempts]
+    }
+}
+
+/// Results of a job run in dry-run mode: one [`UpdateResult::DryRun`] per
+/// package, whatever the commit strategy (nothing is edited or committed).
+fn dry_run_outputs(job: &UpdateJob) -> TaskOutput {
+    job.requests()
+        .iter()
+        .map(|req| {
+            (
+                Ok(super::types::UpdateResult::dry_run(req)),
+                req.attr_path.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Results of one job: one `(result, attr_path)` per attempted package.
@@ -552,25 +682,32 @@ type TaskOutput = Vec<(anyhow::Result<super::types::UpdateResult>, String)>;
 
 /// Account for a finished update task: local stats, live session counter
 /// and logging.
+///
+/// `in_flight` maps running tasks to the number of package updates they
+/// attempt, so a panicked group job is counted once per member.
 async fn finish_task(
     db: &Database,
     session_id: &str,
     stats: &mut UpdaterStats,
-    task_result: Result<TaskOutput, tokio::task::JoinError>,
+    in_flight: &mut HashMap<tokio::task::Id, usize>,
+    task_result: Result<(tokio::task::Id, TaskOutput), tokio::task::JoinError>,
 ) {
     let counters = match task_result {
-        Ok(outputs) => outputs
-            .into_iter()
-            .map(|(result, attr_path)| {
-                let counter = stats.count(&result);
-                super::updater::handle_result(result, &attr_path);
-                counter
-            })
-            .collect(),
+        Ok((id, outputs)) => {
+            in_flight.remove(&id);
+            outputs
+                .into_iter()
+                .map(|(result, attr_path)| {
+                    let counter = stats.count(&result);
+                    super::updater::handle_result(result, &attr_path);
+                    counter
+                })
+                .collect()
+        },
         Err(e) => {
             tracing::warn!("Task panicked: {}", e);
-            stats.failed += 1;
-            vec![SessionCounter::Failed]
+            let attempts = in_flight.remove(&e.id()).unwrap_or(1);
+            stats.count_panicked(attempts)
         },
     };
     for counter in counters {
@@ -629,6 +766,7 @@ impl UpdaterServiceConfig {
 
         let mut join_set: JoinSet<TaskOutput> = JoinSet::new();
         let mut stats = UpdaterStats::default();
+        let mut in_flight: HashMap<tokio::task::Id, usize> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -639,8 +777,9 @@ impl UpdaterServiceConfig {
 
                     // Wait if we've reached the concurrency limit
                     while join_set.len() >= concurrency {
-                        if let Some(task_result) = join_set.join_next().await {
-                            finish_task(&db, &session_id, &mut stats, task_result).await;
+                        if let Some(task_result) = join_set.join_next_with_id().await {
+                            finish_task(&db, &session_id, &mut stats, &mut in_flight, task_result)
+                                .await;
                         }
                     }
 
@@ -679,7 +818,13 @@ impl UpdaterServiceConfig {
                     // Spawn the update task
                     let is_branch_mode = commit_strategy == CommitStrategy::Branch;
                     let git_mutex_clone = Arc::clone(&git_mutex);
-                    join_set.spawn(async move {
+                    let attempts = job.attempts();
+                    let handle = join_set.spawn(async move {
+                        // Dry-run reports every update without performing
+                        // it, in branch and worktree mode alike.
+                        if dry_run {
+                            return dry_run_outputs(&job);
+                        }
                         // Branch mode has no group support yet: members are
                         // updated one after another, each committed on its own.
                         let requests = match job {
@@ -736,17 +881,18 @@ impl UpdaterServiceConfig {
                         }
                         outputs
                     });
+                    in_flight.insert(handle.id(), attempts);
                 },
                 // Also drain completed tasks while waiting for new requests
-                Some(task_result) = join_set.join_next(), if !join_set.is_empty() => {
-                    finish_task(&db, &session_id, &mut stats, task_result).await;
+                Some(task_result) = join_set.join_next_with_id(), if !join_set.is_empty() => {
+                    finish_task(&db, &session_id, &mut stats, &mut in_flight, task_result).await;
                 },
             }
         }
 
         // Wait for all remaining tasks to complete
-        while let Some(task_result) = join_set.join_next().await {
-            finish_task(&db, &session_id, &mut stats, task_result).await;
+        while let Some(task_result) = join_set.join_next_with_id().await {
+            finish_task(&db, &session_id, &mut stats, &mut in_flight, task_result).await;
         }
 
         info!("Updater service complete");
@@ -810,5 +956,58 @@ mod tests {
             }
         );
         assert_eq!(stats.attempted(), 5);
+    }
+
+    #[test]
+    fn panicked_group_counts_every_member() {
+        let mut stats = UpdaterStats::default();
+        assert_eq!(
+            stats.count_panicked(3),
+            vec![SessionCounter::Failed; 3],
+            "one failed counter per attempted member"
+        );
+        assert_eq!(stats.failed, 3);
+        assert_eq!(stats.attempted(), 3);
+    }
+
+    fn req(attr: &str) -> super::super::types::UpdateRequest {
+        super::super::types::UpdateRequest {
+            attr_path: attr.to_owned(),
+            drv_path: None,
+            current_version: "1".to_owned(),
+            new_version: "2".to_owned(),
+            repo_name: None,
+            eval_entry_point: None,
+            pr_config: None,
+            fork: None,
+        }
+    }
+
+    #[test]
+    fn dry_run_reports_every_member() {
+        let single = UpdateJob::Single(req("a"));
+        let group = UpdateJob::Group(super::super::types::GroupRequest {
+            root: "r".to_owned(),
+            members: vec![req("a"), req("b")],
+            verify: vec![],
+        });
+        for (job, attrs) in [(single, vec!["a"]), (group, vec!["a", "b"])] {
+            let outputs = dry_run_outputs(&job);
+            assert_eq!(
+                outputs.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>(),
+                attrs
+            );
+            assert!(
+                outputs
+                    .iter()
+                    .all(|(r, _)| matches!(r, Ok(UpdateResult::DryRun { .. })))
+            );
+            // Counted like the session does: skipped, not succeeded.
+            let mut stats = UpdaterStats::default();
+            for (r, _) in &outputs {
+                assert_eq!(stats.count(r), SessionCounter::Skipped);
+            }
+            assert_eq!(stats.updated, 0);
+        }
     }
 }

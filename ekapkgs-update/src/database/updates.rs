@@ -436,6 +436,38 @@ impl Database {
         .await
     }
 
+    /// Another attr path of `repo_name` with the same `pname` and
+    /// `current_version` that already has `target` proposed: an alias of the
+    /// package (`python312Packages.foo` / `python313Packages.foo`) whose
+    /// update covers this one too. Returns its attr path.
+    ///
+    /// Unlike the checker's in-run dedup set, this survives across runs: the
+    /// alias proposed last run is in its success backoff and not checked
+    /// again, so only the database knows the update is already proposed.
+    pub async fn proposed_alias(
+        &self,
+        repo_name: &str,
+        attr_path: &str,
+        pname: &str,
+        current_version: &str,
+        target: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT attr_path FROM updates
+             WHERE repo_name = ? AND attr_path <> ? AND pname = ?
+               AND current_version = ? AND proposed_version = ?
+             ORDER BY attr_path LIMIT 1",
+        )
+        .bind(repo_name)
+        .bind(attr_path)
+        .bind(pname)
+        .bind(current_version)
+        .bind(target)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("look up proposed aliases of {repo_name}:{attr_path}"))
+    }
+
     /// Record that the checker found a newer compatible release and is about
     /// to dispatch an update. Leaves backoff untouched (the attempt sets it).
     pub async fn record_update_available(

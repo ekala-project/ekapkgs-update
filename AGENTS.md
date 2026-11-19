@@ -192,21 +192,23 @@ The grouper (in `RunConfig::execute`) passes requests through as `UpdateJob::Sin
 4. Determines `UpstreamSource` from `src.url` or pname
 5. Resolves the strategy via `variant_strategy::effective_strategy` (explicit → attr-path suffix, pinned = skip → mkManyVariants = Minor → Latest) and registers the package (`upsert_package_info`)
 6. Fetches upstream releases, filters by `SemverStrategy`; records the outcome (`record_no_update` / `record_update_available`)
-7. Deduplicates by (pname, version) to avoid updating aliased packages twice; records `passthru.ekapkgs-update.parent` (`RunGroups::note_declaration`)
+7. Deduplicates by (pname, version) to avoid updating aliased packages twice: within a run via a shared set, across runs via `Database::proposed_alias` (an alias already proposing the same target, now in its success backoff and not checked, still occupies the slot; so does a package skipped as already proposed); records `passthru.ekapkgs-update.parent` (`RunGroups::note_declaration`)
 8. Sends `UpdateRequest` on channel
 
 Progress (`packages_evaluated`, `packages_backoff`) is written to the session every 250 packages.
+
+**Session lifecycle:** `RunConfig::execute` always closes its session. A panicked checker/updater task still finalizes it (`failed`; `close_session` keeps the last progress when the checker totals are lost) and `run` exits with an error. SIGINT/SIGTERM (`shutdown_signal`) aborts the checker, grouper and updater (in-flight updates are dropped) and closes the session as `cancelled`; the end-of-run CVE scan is skipped on a signal too. Sessions record their owner (`owner_host`, `owner_pid`; migration `20261120_session_owner.sql`). Before creating its session, `run` cancels `run` sessions still `running` whose owner is gone (`recover_stale_run_sessions` / `is_stale_run_session`: same host and the PID no longer exists or is our own; sessions without an owner only after 24h without a heartbeat). Sessions of another host or a live PID are never touched, so concurrent runs on one database are safe. Watch keeps closing every interrupted watch session at startup (`recover_interrupted_watch_state`).
 
 **OOM guard:** Checker concurrency is capped at `max(4, concurrency * 2)` via a `Semaphore`. Each task can spawn nix-instantiate processes, so unbounded concurrency exhausts memory.
 
 ### Updater Service (`commands/run/config.rs`)
 
-1. Receives `UpdateJob`s from the channel (a group job runs `group_update::perform_group_update` in worktree mode, and counts one attempt per member)
+1. Receives `UpdateJob`s from the channel (a group job runs `group_update::perform_group_update` in worktree mode, and counts one attempt per member; a panicked job counts one failure per member). With `--dry-run` every job is reported as `DryRun` before any mode-specific work, in branch and worktree mode alike (`dry_run_outputs`)
 2. Maintains a `JoinSet` bounded by concurrency (default: `max(1, cpus / 4)`)
 3. **Worktree mode** (default): calls `perform_update` — isolated git worktree per package (named `<repo>+<attr>` in multi-repo watch, via `preservation::repo_scoped_name`), supports concurrency and PRs
 4. **Branch mode**: calls `perform_direct_update`. It always runs one update at a time (`updater_concurrency`, with a warning if `--concurrent-updates` asked for more), serializes git operations via `Arc<Mutex<()>>`, and has no PR support
-5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup or branch-mode working-tree snapshot failed, or rebuild limit; the `updates` row is left untouched so the next poll/run retries; or the tree already has the target version, see below) or `Failed` (recorded via `record_failed_update`, sets failure backoff)
-6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`
+5. Each attempt gets a `PhaseTracker` (phases → `update_phases`) and ends as `UpdateResult::Updated`, `DryRun`, `Skipped` (not attempted, e.g. worktree setup or branch-mode working-tree snapshot failed, or rebuild limit; the `updates` row is left untouched so the next poll/run retries; or the tree already has the target version, see below) or `Failed` (recorded via `record_failed_update`, sets failure backoff). A worktree update that built but has no PR (no PR configuration, or declined in `--interactive`) is also `Skipped` (`not_proposed_without_pr_config`): nothing durable is left once the worktree is removed, so it is not recorded as `proposed` and the package stays `outdated`. `run` warns at startup when PR configuration detection fails in worktree mode.
+6. Session counters (`packages_attempted/succeeded/failed/skipped`) are incremented live; `run_service` returns `UpdaterStats`. `DryRun` counts as skipped in the session and is listed separately (not as succeeded) in the run summary
 
 ### Update Workflow (`commands/update/mod.rs`)
 
@@ -219,7 +221,7 @@ The 9-phase workflow for each package:
 5. **DependencyHashUpdate** — Refresh other changed FODs, update dep hashes (cargoHash, vendorHash, npmDepsHash, etc.; their FODs are deferred to this step), then refresh FODs built from them (skipped with `--src-only`)
 6. **Build** — Build with patch recovery (detect and remove obsolete patches)
 7. **Testing** — Run passthru.tests (if configured)
-8. **AgentFix** — *(run/watch with `--claude-fix`, on failure)* Claude Code fix attempt
+8. **AgentFix** — *(run/watch with `--claude-fix`, on failure)* Claude Code fix attempt (`claude` runs in its own process group with `kill_on_drop`; on timeout the whole group is killed and reaped)
 9. **PrCreation** — Commit + push + create PR via GitHub REST API
 
 Requests carry the current version from the index or checker, which can be stale (a proposal merged since). The updater evaluates the package's version together with its `meta.position` (`get_package_location`) and replaces the request's `current_version` with it (`PackageLocation::corrected_request`), so titles, commits and records name the version the update actually starts from.
@@ -423,9 +425,9 @@ When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can
 - `pending`: indexed, not yet compared
 - `up_to_date`
 - `outdated`: newer compatible release, not proposed
-- `proposed`: built and proposed (with PRs requested: only once the PR exists — a push/PR failure is recorded via `record_failed_update` with phase `pr_creation`); becomes `up_to_date` when `current_version` catches up
+- `proposed`: built and proposed (worktree mode: only once the PR exists — a push/PR failure is recorded via `record_failed_update` with phase `pr_creation`, and an update without a PR is not recorded at all; branch mode: once committed); becomes `up_to_date` when `current_version` catches up
 
-Before pushing, `create_pr_for_update` scans the repository's open PRs by the PR author (`github::existing_prs::scan`: search API with `author:`, then an exact title match `<attr>: <old> -> <new>`), so PRs from other branches, forks or deployments are found and contributors' PRs never count. The author is `--pr-author` / `[github] pr_author`, else the configured GitHub App's bot (`<slug>[bot]`), else the login of the token's user (`GET /user`, looked up once). An open PR proposing the same or a newer version is reused (no push, no new PR); older ones are listed as `Supersedes #N` in the new PR's body. A failed scan or an unknown author is logged and the PR is opened as before. The standalone `update --create-pr` runs the same scan. Group PRs are not scanned.
+Update branches (`git::update_branch_name`, `update/<attr>/<version>`) are created with `checkout -B` and force-pushed, and `cleanup_worktree` deletes the local `update/*` branch checked out in a removed worktree, so retrying a version whose push or PR failed works. Before pushing, `create_pr_for_update` looks for an open PR from the branch (`github::find_open_pull_request`) and reuses it without pushing over it. It then scans the repository's open PRs by the PR author (`github::existing_prs::scan`: search API with `author:`, then an exact title match `<attr>: <old> -> <new>`), so PRs from other branches, forks or deployments are found and contributors' PRs never count. The author is `--pr-author` / `[github] pr_author`, else the configured GitHub App's bot (`<slug>[bot]`), else the login of the token's user (`GET /user`, looked up once). An open PR proposing the same or a newer version is reused (no push, no new PR); older ones are listed as `Supersedes #N` in the new PR's body. A failed scan or an unknown author is logged and the PR is opened as before. The standalone `update --create-pr` runs the same scan. Group PRs are not scanned.
 - `failed`
 - `upstream_error`
 
@@ -556,7 +558,7 @@ Output formats:
 - **JSON** (`--format json`) — Complete `LlmContext` struct serialized with serde
 - **Markdown** (`--format markdown`) — Sections with fenced code blocks, suitable for pasting into LLM conversations
 
-Requires `--preserve-failures` to have been set during the `run` that produced the failure.
+Requires `--preserve-failures` to have been set during the `run` that produced the failure. `preserve_failure` moves the failed worktree into `failed/<session>/…/worktree` with `git worktree move`, so it stays a working git worktree (autofix and `apply` run `git diff`/`checkout` in it) and the original location is not leaked. If git cannot move it (submodules, another filesystem), it is copied and the original kept, because the copy's `.git` file still points at it.
 
 ## Important Types
 

@@ -90,12 +90,21 @@ fn package_dir_name(repo_name: &str, attr_path: &str) -> String {
     repo_scoped_name(repo_name, &attr_path.replace(['.', '/'], "_"))
 }
 
-/// Preserve a failed update's context for later inspection
+/// Preserve a failed update's context for later inspection.
+///
+/// The worktree itself ends up in `<artifacts>/worktree`: it is moved there
+/// with `git worktree move` (the original location is gone afterwards, and
+/// the preserved copy stays a working git worktree, which `autofix` and
+/// `apply` rely on). If the move fails (submodules, another filesystem), it
+/// is copied instead and the original must be kept, since the copy's `.git`
+/// file still points at its git metadata. Either way the caller must not
+/// remove the worktree after a successful preservation.
 pub async fn preserve_failure(
     session_id: &str,
     repo_name: &str,
     attr_path: &str,
     phase: UpdatePhase,
+    repo_dir: &Path,
     worktree_path: &Path,
     entry_point: &Path,
     error: &UpdateError,
@@ -110,11 +119,6 @@ pub async fn preserve_failure(
         attr_path,
         base_path.display()
     );
-
-    // Copy worktree (entire directory)
-    let preserved_worktree = base_path.join("worktree");
-    copy_dir_all(worktree_path, &preserved_worktree).await?;
-    debug!("{}: Worktree copied", attr_path);
 
     // Save build log if available
     let build_log_path = if let Some(log) = build_log {
@@ -158,6 +162,10 @@ pub async fn preserve_failure(
     .await?;
     debug!("{}: Error context saved", attr_path);
 
+    // Move (or copy) the worktree last: the steps above read it in place.
+    let preserved_worktree = base_path.join("worktree");
+    relocate_worktree(attr_path, repo_dir, worktree_path, &preserved_worktree).await?;
+
     // Create artifacts manifest
     let artifacts = FailureArtifacts {
         session_id: session_id.to_owned(),
@@ -181,6 +189,50 @@ pub async fn preserve_failure(
     info!("{}: Successfully preserved failure artifacts", attr_path);
 
     Ok(artifacts)
+}
+
+/// Move the worktree at `src` to `dst` with `git worktree move`, falling
+/// back to a copy (keeping `src`) when git cannot move it.
+async fn relocate_worktree(
+    attr_path: &str,
+    repo_dir: &Path,
+    src: &Path,
+    dst: &Path,
+) -> anyhow::Result<()> {
+    // Left over from an earlier preservation of the same attempt.
+    if fs::symlink_metadata(dst).await.is_ok() {
+        fs::remove_dir_all(dst).await?;
+    }
+    let moved = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["worktree", "move"])
+        .arg(src)
+        .arg(dst)
+        .output()
+        .await;
+    match moved {
+        Ok(output) if output.status.success() => {
+            debug!("{}: Worktree moved to {}", attr_path, dst.display());
+            return Ok(());
+        },
+        Ok(output) => debug!(
+            "{}: git worktree move failed, copying instead: {}",
+            attr_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(e) => debug!(
+            "{}: git worktree move failed, copying instead: {}",
+            attr_path, e
+        ),
+    }
+    copy_dir_all(src, dst).await?;
+    debug!(
+        "{}: Worktree copied (original kept at {})",
+        attr_path,
+        src.display()
+    );
+    Ok(())
 }
 
 /// Recursively copy a directory and all its contents
@@ -419,6 +471,55 @@ pub fn find_preserved<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The preserved worktree replaces the original (no leak) and stays a
+    /// working git worktree with the failed update's changes.
+    #[tokio::test]
+    async fn relocate_moves_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("pkg.nix"), "v1").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let worktree = root.join("wt");
+        git(
+            &repo,
+            &["worktree", "add", "-q", worktree.to_str().unwrap(), "HEAD"],
+        );
+        std::fs::write(worktree.join("pkg.nix"), "v2").unwrap();
+
+        let preserved = root.join("failed/s/foo/worktree");
+        std::fs::create_dir_all(preserved.parent().unwrap()).unwrap();
+        relocate_worktree("foo", &repo, &worktree, &preserved)
+            .await
+            .unwrap();
+
+        assert!(!worktree.exists());
+        assert_eq!(
+            git(&preserved, &["diff", "--name-only", "HEAD"]),
+            "pkg.nix\n"
+        );
+    }
 
     fn artifact(repo: &str, attr: &str, session: &str) -> FailureArtifacts {
         FailureArtifacts {
