@@ -12,6 +12,7 @@ mod directory_diff;
 mod git;
 mod github;
 mod gitlab;
+mod groups;
 mod hash_discovery;
 mod init;
 mod llm;

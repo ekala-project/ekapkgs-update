@@ -19,11 +19,8 @@
 //!    the cycle, so update worktrees (created from `HEAD`) start from the
 //!    current upstream branch. The cycle ends when every update has finished.
 //! 5. Repos are re-synced and re-indexed every `index_refresh_interval`.
-//! 6. After each poll cycle, packages whose CVE scan is due (daily, or after
-//!    a version change) are scanned against OSV.dev (`cve::scan`), unless
-//!    `--skip-cve`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,7 +35,9 @@ use super::feeds::{
 };
 use super::index::IndexTarget;
 use super::{ResolvedRepo, index, sync};
-use crate::commands::run::{UpdateRequest, UpdaterServiceConfig, UpdaterStats};
+use crate::commands::run::{
+    UpdateJob, UpdateRequest, UpdaterServiceConfig, UpdaterStats, group_jobs,
+};
 use crate::database::{
     Database, IndexOutcome, RepoIndexState, SessionMode, SessionStatus, SourceHealth, SourcePoll,
     SourcePollState, UpdateRecord, UpstreamIndexEntry, WatchCycleKind, WatchCycleStats,
@@ -99,9 +98,6 @@ pub async fn run_watch_loop(
                     &mut dry_run_reported,
                 )
                 .await;
-                if !updater_config.pr_enhancements.skip_cve_check {
-                    scan_vulnerabilities(&db).await;
-                }
             },
             _ = index_ticker.tick() => {
                 info!("Refreshing repositories and upstream indexes...");
@@ -116,15 +112,6 @@ pub async fn run_watch_loop(
     }
 
     Ok(())
-}
-
-/// Scan the packages whose CVE scan is due (daily, or after a version
-/// change). Cheap when nothing is due; failures are logged.
-async fn scan_vulnerabilities(db: &Database) {
-    let options = crate::cve::scan::ScanOptions::default();
-    if let Err(e) = crate::cve::scan::scan_due(db.pool(), &options).await {
-        warn!("CVE scan failed: {:#}", e);
-    }
 }
 
 /// Load the source list, keeping `previous` if the database read fails.
@@ -744,7 +731,9 @@ async fn poll_cycle(
     }
 
     // Updates start as soon as a polled source yields one, so building
-    // overlaps with the rest of the sweep instead of waiting for it.
+    // overlaps with the rest of the sweep instead of waiting for it. Members
+    // of update groups are held until the sweep is done and then dispatched
+    // per group (with the group's other outdated members).
     let mut dispatcher = Dispatcher::new(
         repos,
         db,
@@ -791,7 +780,8 @@ async fn poll_cycle(
 }
 
 /// Feeds a poll cycle's dispatched updates to an updater service that is
-/// started (with its session) on the first dispatch.
+/// started (with its session) on the first dispatch. Requests for members of
+/// update groups are held and sent as group jobs by [`Dispatcher::finish`].
 struct Dispatcher<'a> {
     repos: &'a [ResolvedRepo],
     db: &'a Database,
@@ -803,13 +793,17 @@ struct Dispatcher<'a> {
     synced: HashSet<String>,
     service: Option<RunningService>,
     dispatched: usize,
+    /// Group roots (attr → root) per repo, loaded on the repo's first dispatch.
+    roots: HashMap<String, BTreeMap<String, String>>,
+    /// Requests for group members, per repo, dispatched after the sweep.
+    held: BTreeMap<String, Vec<UpdateRequest>>,
     /// Set when the session could not be created; nothing more is dispatched.
     error: Option<anyhow::Error>,
 }
 
 struct RunningService {
     session_id: String,
-    tx: mpsc::UnboundedSender<UpdateRequest>,
+    tx: mpsc::UnboundedSender<UpdateJob>,
     handle: tokio::task::JoinHandle<UpdaterStats>,
 }
 
@@ -832,6 +826,8 @@ impl<'a> Dispatcher<'a> {
             synced: HashSet::new(),
             service: None,
             dispatched: 0,
+            roots: HashMap::new(),
+            held: BTreeMap::new(),
             error: None,
         }
     }
@@ -880,6 +876,29 @@ impl<'a> Dispatcher<'a> {
             pr_config: repo.pr_config.clone(),
             fork: Some(repo.fork.clone()),
         };
+
+        if !self.roots.contains_key(&repo.name) {
+            let roots = self.db.group_roots(&repo.name).await.unwrap_or_else(|e| {
+                warn!("[{}] Failed to load update groups: {:#}", repo.label(), e);
+                BTreeMap::new()
+            });
+            self.roots.insert(repo.name.clone(), roots);
+        }
+        if self.roots[&repo.name].contains_key(&request.attr_path) {
+            self.held
+                .entry(repo.name.clone())
+                .or_default()
+                .push(request);
+            return;
+        }
+        self.send(UpdateJob::Single(request)).await;
+    }
+
+    /// Send a job, starting the updater service (and session) first if needed.
+    async fn send(&mut self, job: UpdateJob) {
+        if self.error.is_some() {
+            return;
+        }
         let service = match self.service.as_mut() {
             Some(service) => service,
             None => match self.start().await {
@@ -891,8 +910,9 @@ impl<'a> Dispatcher<'a> {
                 },
             },
         };
-        if service.tx.send(request).is_ok() {
-            self.dispatched += 1;
+        let attempts = job.attempts();
+        if service.tx.send(job).is_ok() {
+            self.dispatched += attempts;
         } else {
             self.error = Some(anyhow::anyhow!("updater channel closed"));
         }
@@ -923,11 +943,17 @@ impl<'a> Dispatcher<'a> {
     /// Close the channel, wait for the dispatched updates and finalize the
     /// session.
     async fn finish(
-        self,
+        mut self,
         stats: &mut WatchCycleStats,
         packages_observed: usize,
         backoff: usize,
     ) -> anyhow::Result<()> {
+        for (repo, requests) in std::mem::take(&mut self.held) {
+            let roots = self.roots.remove(&repo).unwrap_or_default();
+            for job in group_jobs(self.db, &repo, requests, &roots).await {
+                self.send(job).await;
+            }
+        }
         stats.dispatched = self.dispatched;
         if let Some(RunningService {
             session_id,

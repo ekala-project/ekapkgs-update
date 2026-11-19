@@ -5,6 +5,7 @@ use futures::{StreamExt, pin_mut};
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, info, warn};
 
+use super::grouping::RunGroups;
 use super::types::UpdateRequest;
 use crate::database::{Database, PackageInfo};
 use crate::nix;
@@ -31,6 +32,7 @@ pub async fn release_checker_service_with_limits(
     eval_file: String,
     db: Database,
     tx: mpsc::UnboundedSender<UpdateRequest>,
+    groups: Arc<RunGroups>,
     skip_unstable: bool,
     skip_repology: bool,
     max_checker_concurrency: Option<usize>,
@@ -71,6 +73,7 @@ pub async fn release_checker_service_with_limits(
         match result {
             Ok(NixEvalItem::Drv(drv)) => {
                 let attr_path = &drv.attr;
+                groups.note_known(attr_path);
 
                 // Check backoff period
                 match db.should_check_update(RUN_REPO, attr_path).await {
@@ -112,6 +115,7 @@ pub async fn release_checker_service_with_limits(
                 let repology_client_clone = repology_client.clone();
                 let semaphore_clone = semaphore.clone();
                 let queued_clone = Arc::clone(&queued_updates);
+                let groups_clone = Arc::clone(&groups);
 
                 // Spawn task to check this package
                 tokio::spawn(async move {
@@ -132,6 +136,7 @@ pub async fn release_checker_service_with_limits(
                         &repology_client_clone,
                         skip_repology,
                         &queued_clone,
+                        &groups_clone,
                     )
                     .await
                     {
@@ -173,6 +178,7 @@ async fn check_for_update(
     repology_client: &crate::repology::RepologyClient,
     skip_repology: bool,
     queued_updates: &Mutex<HashSet<(String, String)>>,
+    groups: &RunGroups,
 ) -> anyhow::Result<()> {
     // Extract package metadata
     let metadata = match PackageMetadata::from_attr_path(eval_entry_point, attr_path).await {
@@ -185,6 +191,14 @@ async fn check_for_update(
 
     let current_version = &metadata.version;
     debug!("{}: Current version: {}", attr_path, current_version);
+
+    // Update-group declaration (resolved once the checker finished).
+    let parent = crate::package::PackageQuery::new(eval_entry_point, attr_path)
+        .get_attr("passthru.ekapkgs-update.parent or null")
+        .await
+        .map(|s| s.trim().trim_matches('"').to_owned())
+        .filter(|s| !s.is_empty() && s != "null");
+    groups.note_declaration(attr_path, parent);
 
     // Skip packages with passthru.ekapkgs-update.skip = true
     if metadata.skip == Some(true) {

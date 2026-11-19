@@ -11,6 +11,8 @@ use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::database::{Database, SessionCounter, SessionMode};
 use crate::git::PrConfig;
 
+use super::types::UpdateJob;
+
 /// Number of updates the updater service may run at once for `commit_strategy`.
 ///
 /// Branch mode always runs one update at a time, whatever was requested.
@@ -274,8 +276,29 @@ impl RunConfig {
                 .ok()
         };
 
-        // Create channel for communication between services
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Checker → grouper → updater. Requests for update-group members are
+        // held back by the grouper until the checker finished (see
+        // `grouping::RunGroups`); the rest pass straight through.
+        let (tx, mut checker_rx) = mpsc::unbounded_channel::<super::types::UpdateRequest>();
+        let (job_tx, rx) = mpsc::unbounded_channel::<UpdateJob>();
+        let groups = Arc::new(super::grouping::RunGroups::load(&db, "").await);
+        let grouper_groups = Arc::clone(&groups);
+        let db_grouper = db.clone();
+        let grouper_handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(req) = checker_rx.recv().await {
+                if grouper_groups.should_hold(&req.attr_path) {
+                    held.push(req);
+                } else if job_tx.send(UpdateJob::Single(req)).is_err() {
+                    break;
+                }
+            }
+            for job in grouper_groups.finish(&db_grouper, "", held).await {
+                if job_tx.send(job).is_err() {
+                    break;
+                }
+            }
+        });
 
         // Clone data for services
         let db_checker = db.clone();
@@ -302,6 +325,7 @@ impl RunConfig {
                 eval_file_checker,
                 db_checker,
                 tx,
+                groups,
                 skip_unstable,
                 skip_repology,
                 Some(max_checkers),
@@ -332,7 +356,11 @@ impl RunConfig {
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
 
         // Wait for both services to complete
-        let (checker_result, updater_result) = tokio::join!(checker_handle, updater_handle);
+        let (checker_result, grouper_result, updater_result) =
+            tokio::join!(checker_handle, grouper_handle, updater_handle);
+        if let Err(e) = grouper_result {
+            tracing::warn!("Update grouping task failed: {}", e);
+        }
 
         // Unwrap task results
         let (checked_count, skipped_count, error_count) = checker_result?;
@@ -519,7 +547,8 @@ impl UpdaterStats {
     }
 }
 
-type TaskOutput = (anyhow::Result<super::types::UpdateResult>, String);
+/// Results of one job: one `(result, attr_path)` per attempted package.
+type TaskOutput = Vec<(anyhow::Result<super::types::UpdateResult>, String)>;
 
 /// Account for a finished update task: local stats, live session counter
 /// and logging.
@@ -529,20 +558,25 @@ async fn finish_task(
     stats: &mut UpdaterStats,
     task_result: Result<TaskOutput, tokio::task::JoinError>,
 ) {
-    let counter = match task_result {
-        Ok((result, attr_path)) => {
-            let counter = stats.count(&result);
-            super::updater::handle_result(result, &attr_path);
-            counter
-        },
+    let counters = match task_result {
+        Ok(outputs) => outputs
+            .into_iter()
+            .map(|(result, attr_path)| {
+                let counter = stats.count(&result);
+                super::updater::handle_result(result, &attr_path);
+                counter
+            })
+            .collect(),
         Err(e) => {
             tracing::warn!("Task panicked: {}", e);
             stats.failed += 1;
-            SessionCounter::Failed
+            vec![SessionCounter::Failed]
         },
     };
-    if let Err(e) = db.increment_session_counter(session_id, counter).await {
-        tracing::warn!("Failed to update session counters: {}", e);
+    for counter in counters {
+        if let Err(e) = db.increment_session_counter(session_id, counter).await {
+            tracing::warn!("Failed to update session counters: {}", e);
+        }
     }
 }
 
@@ -553,7 +587,7 @@ impl UpdaterServiceConfig {
     /// updated live as requests start and finish.
     pub async fn run_service(
         self,
-        mut rx: mpsc::UnboundedReceiver<super::types::UpdateRequest>,
+        mut rx: mpsc::UnboundedReceiver<super::types::UpdateJob>,
         db: Database,
     ) -> UpdaterStats {
         use tokio::task::JoinSet;
@@ -601,7 +635,7 @@ impl UpdaterServiceConfig {
                 // Receive update requests from release checker
                 update_req = rx.recv() => {
                     // `None`: channel closed - no more updates coming
-                    let Some(req) = update_req else { break };
+                    let Some(job) = update_req else { break };
 
                     // Wait if we've reached the concurrency limit
                     while join_set.len() >= concurrency {
@@ -610,28 +644,34 @@ impl UpdaterServiceConfig {
                         }
                     }
 
-                    if let Err(e) = db
-                        .increment_session_counter(&session_id, SessionCounter::Attempted)
-                        .await
-                    {
-                        warn!("Failed to update session counters: {}", e);
+                    for _ in 0..job.attempts() {
+                        if let Err(e) = db
+                            .increment_session_counter(&session_id, SessionCounter::Attempted)
+                            .await
+                        {
+                            warn!("Failed to update session counters: {}", e);
+                        }
                     }
 
                     // Clone data needed for the async task
                     let db_clone = db.clone();
                     let session_id_clone = session_id.clone();
                     let pr_enhancements_clone = pr_enhancements.clone();
-                    let attr_path_clone = req.attr_path.clone();
                     let claude_fix_clone = claude_fix_config.clone();
 
                     // Use per-request overrides when present (multi-repo routing),
-                    // falling back to the global config.
-                    let effective_entry_point: Arc<str> = match req.eval_entry_point.as_deref() {
+                    // falling back to the global config. A group is routed by
+                    // its first member (all members share a repo).
+                    let lead = match &job {
+                        UpdateJob::Single(req) => req,
+                        UpdateJob::Group(group) => group.lead(),
+                    };
+                    let effective_entry_point: Arc<str> = match lead.eval_entry_point.as_deref() {
                         Some(ep) => Arc::from(ep),
                         None => Arc::clone(&eval_entry_point),
                     };
-                    let effective_pr_config = req.pr_config.clone().or_else(|| pr_config.clone());
-                    let effective_fork: Arc<str> = match req.fork.as_deref() {
+                    let effective_pr_config = lead.pr_config.clone().or_else(|| pr_config.clone());
+                    let effective_fork: Arc<str> = match lead.fork.as_deref() {
                         Some(f) => Arc::from(f),
                         None => Arc::clone(&fork),
                     };
@@ -640,35 +680,61 @@ impl UpdaterServiceConfig {
                     let is_branch_mode = commit_strategy == CommitStrategy::Branch;
                     let git_mutex_clone = Arc::clone(&git_mutex);
                     join_set.spawn(async move {
-                        let result = if is_branch_mode {
-                            super::updater::perform_direct_update(
-                                &db_clone,
-                                &session_id_clone,
-                                &effective_entry_point,
-                                &req,
-                                run_passthru_tests,
-                                git_mutex_clone,
-                                claude_fix_clone.as_deref(),
-                            )
-                            .await
-                        } else {
-                            super::updater::perform_update(
-                                &db_clone,
-                                &session_id_clone,
-                                &effective_entry_point,
-                                &req,
-                                effective_pr_config.as_ref(),
-                                &effective_fork,
-                                run_passthru_tests,
-                                dry_run,
-                                &pr_enhancements_clone,
-                                interactive,
-                                preserve_failures,
-                                claude_fix_clone.as_deref(),
-                            )
-                            .await
+                        // Branch mode has no group support yet: members are
+                        // updated one after another, each committed on its own.
+                        let requests = match job {
+                            UpdateJob::Group(group) if !is_branch_mode => {
+                                let opts = super::group_update::GroupUpdateOptions {
+                                    db: &db_clone,
+                                    session_id: &session_id_clone,
+                                    eval_entry_point: &effective_entry_point,
+                                    pr_config: effective_pr_config.as_ref(),
+                                    fork: &effective_fork,
+                                    run_passthru_tests,
+                                    dry_run,
+                                    pr_enhancements: &pr_enhancements_clone,
+                                    preserve_failures,
+                                    claude_fix: claude_fix_clone.as_deref(),
+                                };
+                                return super::group_update::perform_group_update(&opts, &group)
+                                    .await;
+                            },
+                            UpdateJob::Group(group) => group.members,
+                            UpdateJob::Single(req) => vec![req],
                         };
-                        (result, attr_path_clone)
+                        let mut outputs = Vec::with_capacity(requests.len());
+                        for req in requests {
+                            let result = if is_branch_mode {
+                                super::updater::perform_direct_update(
+                                    &db_clone,
+                                    &session_id_clone,
+                                    &effective_entry_point,
+                                    &req,
+                                    run_passthru_tests,
+                                    Arc::clone(&git_mutex_clone),
+                                    claude_fix_clone.as_deref(),
+                                )
+                                .await
+                            } else {
+                                super::updater::perform_update(
+                                    &db_clone,
+                                    &session_id_clone,
+                                    &effective_entry_point,
+                                    &req,
+                                    effective_pr_config.as_ref(),
+                                    &effective_fork,
+                                    run_passthru_tests,
+                                    dry_run,
+                                    &pr_enhancements_clone,
+                                    interactive,
+                                    preserve_failures,
+                                    claude_fix_clone.as_deref(),
+                                )
+                                .await
+                            };
+                            outputs.push((result, req.attr_path));
+                        }
+                        outputs
                     });
                 },
                 // Also drain completed tasks while waiting for new requests
