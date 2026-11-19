@@ -338,8 +338,6 @@ pub(super) async fn perform_update(
         });
     }
 
-    let attempt = Attempt::new(db, session_id, req);
-
     // Derive the repository root from the eval entry point
     let repo_dir = match get_repo_dir_from_entry_point(eval_entry_point).await {
         Ok(dir) => dir,
@@ -355,15 +353,26 @@ pub(super) async fn perform_update(
     };
 
     // Get file location from meta.position (in the main repository)
-    let file_location = match get_file_location(eval_entry_point, attr_path).await {
+    let location = match get_package_location(eval_entry_point, attr_path).await {
         Ok(loc) => loc,
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
-            return Ok(attempt
+            return Ok(Attempt::new(db, session_id, req)
                 .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
                 .await);
         },
     };
+    let corrected;
+    let req = match location.corrected_request(req) {
+        Some(c) => {
+            corrected = c;
+            &corrected
+        },
+        None => req,
+    };
+    let current_version = &req.current_version;
+    let attempt = Attempt::new(db, session_id, req);
+    let file_location = location.file;
 
     debug!("{}: File location: {}", attr_path, file_location);
 
@@ -945,20 +954,40 @@ pub(super) async fn perform_direct_update(
     claude_fix: Option<&ClaudeFixConfig>,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
-    let current_version = &req.current_version;
     let new_version = &req.new_version;
-    let attempt = Attempt::new(db, session_id, req);
+
+    // The update edits the shared working tree in place: nothing may sync
+    // or index the checkout until it is committed or reverted.
+    let checkout_lock = get_repo_dir_from_entry_point(eval_entry_point)
+        .await
+        .ok()
+        .map(|dir| crate::git::checkout_lock(&dir));
+    let _checkout = match &checkout_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
 
     // Get file location from meta.position
-    let file_location = match get_file_location(eval_entry_point, attr_path).await {
+    let location = match get_package_location(eval_entry_point, attr_path).await {
         Ok(loc) => loc,
         Err(e) => {
             warn!("{}: Failed to get file location: {}", attr_path, e);
-            return Ok(attempt
+            return Ok(Attempt::new(db, session_id, req)
                 .fail_setup(UpdatePhase::MetadataExtraction, "meta.position", &e)
                 .await);
         },
     };
+    let corrected;
+    let req = match location.corrected_request(req) {
+        Some(c) => {
+            corrected = c;
+            &corrected
+        },
+        None => req,
+    };
+    let current_version = &req.current_version;
+    let attempt = Attempt::new(db, session_id, req);
+    let file_location = location.file;
 
     debug!("{}: File location: {}", attr_path, file_location);
 
@@ -1117,22 +1146,72 @@ pub(super) async fn get_file_location(
     eval_entry_point: &str,
     attr_path: &str,
 ) -> anyhow::Result<String> {
+    Ok(get_package_location(eval_entry_point, attr_path)
+        .await?
+        .file)
+}
+
+/// The package's file (`meta.position`) and the version its tree evaluates to.
+async fn get_package_location(
+    eval_entry_point: &str,
+    attr_path: &str,
+) -> anyhow::Result<PackageLocation> {
     let normalized_entry = normalize_entry_point(eval_entry_point);
-    let position_expr =
-        format!("let pkgs = import {normalized_entry} {{ }}; in pkgs.{attr_path}.meta.position");
+    // One evaluation for both: the package file and the version the tree
+    // has now (which may be newer than the indexed one, e.g. after a merge).
+    let expr = format!(
+        "let pkgs = import {normalized_entry} {{ }}; p = pkgs.{attr_path}; \
+         v = builtins.tryEval (toString (p.version or \"\")); \
+         in p.meta.position + \"\\n\" + (if v.success then v.value else \"\")"
+    );
+    PackageLocation::parse(&eval_nix_expr(&expr).await?)
+}
 
-    let position = eval_nix_expr(&position_expr).await?;
+/// Where a package is defined and the version its tree evaluates to.
+#[derive(Debug, PartialEq, Eq)]
+struct PackageLocation {
+    /// File from `meta.position` (without the line number).
+    file: String,
+    /// The evaluated `version`, when it has one.
+    version: Option<String>,
+}
 
-    if position.is_empty() {
-        anyhow::bail!("Empty position returned from meta.position");
+impl PackageLocation {
+    /// Parse `"<file>:<line>\n<version>"`.
+    fn parse(output: &str) -> anyhow::Result<Self> {
+        let (position, version) = output.split_once('\n').unwrap_or((output, ""));
+        let position = position.trim();
+        if position.is_empty() {
+            anyhow::bail!("Empty position returned from meta.position");
+        }
+        let (file, _line) = position
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
+        let version = version.trim();
+        Ok(Self {
+            file: file.to_owned(),
+            version: (!version.is_empty()).then(|| version.to_owned()),
+        })
     }
 
-    // Parse position string (format: "file:line")
-    let (file_path, _line_str) = position
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected position format: {position}"))?;
-
-    Ok(file_path.to_owned())
+    /// The request with its `current_version` replaced by the tree's, when
+    /// they differ. Requests carry the version from the index (or checker),
+    /// which can be stale: after a proposal was merged, the next update starts
+    /// from the merged version, and titles, commits and records must say so.
+    fn corrected_request(&self, req: &UpdateRequest) -> Option<UpdateRequest> {
+        let version = self.version.as_ref()?;
+        if *version == req.current_version {
+            return None;
+        }
+        info!(
+            "{}: tree is at {} (requested update from {})",
+            req.attr_path, version, req.current_version
+        );
+        Some(UpdateRequest {
+            current_version: version.clone(),
+            ..req.clone()
+        })
+    }
 }
 
 /// `## Rebuild Impact` PR body section (with its leading blank lines).
@@ -1626,6 +1705,50 @@ mod tests {
             pr_config: None,
             fork: None,
         }
+    }
+
+    #[test]
+    fn package_location_parsing() {
+        // (eval output, expected file, expected version)
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "/r/pkgs/grpc/default.nix:12\n1.85.3",
+                "/r/pkgs/grpc/default.nix",
+                Some("1.85.3"),
+            ),
+            // No version: the trailing newline is trimmed away by eval_nix_expr.
+            ("/r/pkgs/foo/default.nix:3", "/r/pkgs/foo/default.nix", None),
+            (
+                "/r/pkgs/foo/default.nix:3\n",
+                "/r/pkgs/foo/default.nix",
+                None,
+            ),
+            ("/r/a:b/default.nix:7\n2", "/r/a:b/default.nix", Some("2")),
+        ];
+        for &(output, file, version) in cases {
+            let loc = PackageLocation::parse(output).unwrap();
+            assert_eq!(loc.file, file, "{output:?}");
+            assert_eq!(loc.version.as_deref(), version, "{output:?}");
+        }
+        for bad in ["", "\n1.0", "no-line-number\n1.0"] {
+            assert!(PackageLocation::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn stale_current_version_is_corrected() {
+        let req = request();
+        let at = |version: Option<&str>| PackageLocation {
+            file: "/r/default.nix".to_owned(),
+            version: version.map(str::to_owned),
+        };
+        assert!(at(None).corrected_request(&req).is_none());
+        assert!(at(Some("1.2")).corrected_request(&req).is_none());
+        // The proposal 1.2 -> 1.2.5 was merged since the index was built.
+        let corrected = at(Some("1.2.5")).corrected_request(&req).unwrap();
+        assert_eq!(corrected.current_version, "1.2.5");
+        assert_eq!(corrected.new_version, "1.3");
+        assert_eq!(corrected.attr_path, "hello");
     }
 
     async fn pr_columns(db: &Database) -> (Option<String>, Option<i64>) {

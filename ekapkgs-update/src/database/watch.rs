@@ -104,6 +104,9 @@ pub struct IndexOutcome {
     pub errors: usize,
     /// What the index was built from (see [`RepoIndexState::config`]).
     pub config: Option<String>,
+    /// `HEAD` of the checkout when the build started (see
+    /// [`RepoIndexState::indexed_commit`]).
+    pub commit: Option<String>,
 }
 
 /// A repo's last index build, as recorded in `watched_repos`.
@@ -116,6 +119,8 @@ pub struct RepoIndexState {
     /// Fingerprint of the binary, entry points and select expression the
     /// index was built from.
     pub config: Option<String>,
+    /// Commit of the last successful build; a failed build keeps it.
+    pub indexed_commit: Option<String>,
 }
 
 /// When an upstream source was last polled, and how that went.
@@ -312,6 +317,7 @@ impl Database {
                 index_skipped = ?,
                 index_errors = ?,
                 index_config = ?,
+                indexed_commit = COALESCE(?, indexed_commit),
                 updated_at = ?
             WHERE name = ?
             "#,
@@ -325,6 +331,8 @@ impl Database {
         .bind(to_i64(outcome.skipped))
         .bind(to_i64(outcome.errors))
         .bind(outcome.config.as_deref())
+        // Only a successful build vouches for its commit.
+        .bind(outcome.commit.as_deref().filter(|_| outcome.error.is_none()))
         .bind(&now)
         .bind(name)
         .execute(&self.pool)
@@ -333,12 +341,10 @@ impl Database {
         Ok(())
     }
 
-    /// Record the first completed poll for a repository (baselines recorded).
-    /// Later calls keep the original timestamp.
     /// The repo's last recorded index build (`None` for an unknown repo).
     pub async fn repo_index_state(&self, name: &str) -> Result<Option<RepoIndexState>> {
         let row = sqlx::query(
-            "SELECT index_status, last_indexed_at, indexed_count, index_config \
+            "SELECT index_status, last_indexed_at, indexed_count, index_config, indexed_commit \
              FROM watched_repos WHERE name = ?",
         )
         .bind(name)
@@ -350,9 +356,12 @@ impl Database {
             last_indexed_at: parse_rfc3339(row.get("last_indexed_at")),
             indexed_count: row.get::<Option<i64>, _>("indexed_count").unwrap_or(0),
             config: row.get("index_config"),
+            indexed_commit: row.get("indexed_commit"),
         }))
     }
 
+    /// Record the first completed poll for a repository (baselines recorded).
+    /// Later calls keep the original timestamp.
     pub async fn mark_repo_bootstrapped(&self, name: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -686,6 +695,7 @@ mod tests {
                 skipped: 2,
                 errors: 1,
                 config: None,
+                commit: None,
             },
         )
         .await
@@ -957,6 +967,28 @@ mod tests {
         assert_eq!(state.indexed_count, 7);
         assert_eq!(state.config.as_deref(), Some("cfg"));
         assert!(state.last_indexed_at.is_some());
+        assert_eq!(state.indexed_commit, None);
+
+        // A successful build records its commit; a failed one keeps it.
+        for (commit, error, expected) in [
+            ("aaa", None, "aaa"),
+            ("bbb", Some("iets eval-jobs crashed"), "aaa"),
+            ("ccc", None, "ccc"),
+        ] {
+            db.record_repo_index_result(
+                "core",
+                &IndexOutcome {
+                    indexed: 7,
+                    commit: Some(commit.to_owned()),
+                    error: error.map(str::to_owned),
+                    ..IndexOutcome::default()
+                },
+            )
+            .await
+            .unwrap();
+            let state = db.repo_index_state("core").await.unwrap().unwrap();
+            assert_eq!(state.indexed_commit.as_deref(), Some(expected), "{commit}");
+        }
 
         db.record_source_poll(
             "gitlab",

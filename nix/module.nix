@@ -122,6 +122,7 @@ let
       --config-file ${watchConfigFile} \
       --poll-interval ${toString cfg.watch.pollIntervalMinutes} \
       --index-refresh-hours ${toString cfg.watch.indexRefreshHours} \
+      --head-check-interval ${toString cfg.watch.headCheckMinutes} \
       ${
         lib.optionalString (
           cfg.watch.commitStrategy != null
@@ -548,6 +549,19 @@ in
         description = ''
           How often (in hours) to rebuild the full upstream index via
           `iets eval-jobs`. The index maps upstream sources to Nix attr_paths.
+        '';
+      };
+
+      headCheckMinutes = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        example = 2;
+        description = ''
+          How often (in minutes) to check whether a watched repository's
+          upstream branch moved (`git ls-remote`, no API quota), e.g. because
+          a PR was merged. A repository that moved is synced and re-indexed,
+          so merged updates show up as current without waiting for
+          {option}`indexRefreshHours`. `0` disables the check.
         '';
       };
 

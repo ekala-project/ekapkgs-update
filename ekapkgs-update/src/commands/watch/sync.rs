@@ -21,8 +21,17 @@ use crate::github::parse_github_url;
 /// Fetch and fast-forward a repository checkout, recording the result.
 ///
 /// Unmanaged (legacy single-repo) checkouts are never fetched or merged;
-/// only their current `HEAD` is recorded.
+/// only their current `HEAD` is recorded. Takes the checkout lock
+/// ([`crate::git::checkout_lock`]); callers already holding it use
+/// [`sync_repo_locked`].
 pub async fn sync_repo(repo: &ResolvedRepo, db: &Database) -> RepoSyncStatus {
+    let lock = crate::git::checkout_lock(&repo.repo_dir);
+    let _checkout = lock.lock().await;
+    sync_repo_locked(repo, db).await
+}
+
+/// [`sync_repo`] for a caller that holds the checkout lock.
+pub async fn sync_repo_locked(repo: &ResolvedRepo, db: &Database) -> RepoSyncStatus {
     if !repo.managed {
         record_unmanaged(repo, db).await;
         return RepoSyncStatus::Unmanaged;
@@ -114,12 +123,44 @@ enum Synced {
     Refused(String),
 }
 
+/// The branch a managed checkout follows.
+fn base_branch(repo: &ResolvedRepo) -> &str {
+    repo.pr_config
+        .as_ref()
+        .map_or("master", |c| c.base_branch.as_str())
+}
+
+/// The commit the upstream base branch points at, asked from the remote
+/// (`git ls-remote`, no fetch). `None` for unmanaged checkouts, which follow
+/// no upstream.
+pub async fn remote_head(repo: &ResolvedRepo) -> anyhow::Result<Option<String>> {
+    if !repo.managed {
+        return Ok(None);
+    }
+    let remote = upstream_remote(repo).await;
+    let refname = format!("refs/heads/{}", base_branch(repo));
+    let out = run_git_in(&repo.repo_dir, &["ls-remote", &remote, &refname]).await?;
+    let sha = parse_ls_remote(&out, &refname)
+        .ok_or_else(|| anyhow::anyhow!("{remote} has no {refname}"))?;
+    Ok(Some(sha))
+}
+
+/// The sha `ls-remote` output lists for exactly `refname`.
+fn parse_ls_remote(output: &str, refname: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name.trim() == refname && !sha.is_empty()).then(|| sha.to_owned())
+    })
+}
+
+/// The checkout's `HEAD` commit.
+pub async fn local_head(dir: &Path) -> Option<String> {
+    run_git_in(dir, &["rev-parse", "HEAD"]).await.ok()
+}
+
 async fn fast_forward(repo: &ResolvedRepo) -> anyhow::Result<Synced> {
     let dir = repo.repo_dir.as_path();
-    let base = repo
-        .pr_config
-        .as_ref()
-        .map_or("master", |c| c.base_branch.as_str());
+    let base = base_branch(repo);
 
     let remote = upstream_remote(repo).await;
     fetch_with_retry(repo, &remote).await?;
@@ -350,5 +391,53 @@ mod tests {
         let (sha, subject) = head_commit(&clone).await.unwrap();
         assert_eq!(sha, local_head);
         assert_eq!(subject, "local");
+    }
+
+    #[test]
+    fn ls_remote_parsing() {
+        let out = "abc\trefs/heads/master\ndef\trefs/heads/master-old\n";
+        assert_eq!(
+            parse_ls_remote(out, "refs/heads/master").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            parse_ls_remote(out, "refs/heads/master-old").as_deref(),
+            Some("def")
+        );
+        assert_eq!(parse_ls_remote(out, "refs/heads/main"), None);
+        assert_eq!(parse_ls_remote("", "refs/heads/master"), None);
+    }
+
+    #[tokio::test]
+    async fn remote_head_reads_upstream_without_fetching() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (_tmp, upstream, clone) = setup().await;
+        let repo = resolved(clone.clone());
+        let first = git(&upstream, &["rev-parse", "HEAD"]).await;
+        assert_eq!(
+            remote_head(&repo).await.unwrap().as_deref(),
+            Some(first.as_str())
+        );
+
+        commit(&upstream, "b", "two").await;
+        let second = git(&upstream, &["rev-parse", "HEAD"]).await;
+        assert_eq!(
+            remote_head(&repo).await.unwrap().as_deref(),
+            Some(second.as_str())
+        );
+        // The checkout itself only moves when synced.
+        assert_eq!(local_head(&clone).await.as_deref(), Some(first.as_str()));
+
+        let unmanaged = ResolvedRepo {
+            managed: false,
+            ..resolved(clone)
+        };
+        assert_eq!(remote_head(&unmanaged).await.unwrap(), None);
     }
 }
