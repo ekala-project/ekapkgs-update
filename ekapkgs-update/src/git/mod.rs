@@ -15,10 +15,12 @@
 //! exit status, I/O error, or UTF-8 decode failure) propagates as an error with
 //! contextual information about which command failed.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::{Arc, LazyLock, PoisonError};
 
 use anyhow::Context;
 use tokio::process::Command;
@@ -29,6 +31,24 @@ use crate::github::parse_github_url;
 /// Branches tried (in order) when a remote does not advertise a symbolic HEAD
 /// and `ls-remote --symref` cannot determine the default branch.
 const DEFAULT_BRANCH_FALLBACKS: &[&str] = &["master", "main"];
+
+/// The lock serializing everything that moves or reads a checkout's `HEAD`
+/// and working tree: fast-forward syncs, index builds, creating update
+/// worktrees (from `HEAD`) and branch-mode updates (which edit the tree in
+/// place). Keyed by the canonical repository directory, so every caller
+/// naming the same checkout shares one lock. Not reentrant: take it once.
+pub fn checkout_lock(repo_dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: LazyLock<Locks> = LazyLock::new(Locks::default);
+    let key = std::fs::canonicalize(repo_dir).unwrap_or_else(|_| repo_dir.to_path_buf());
+    Arc::clone(
+        LOCKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_default(),
+    )
+}
 
 /// Run a `git` subcommand and capture both args and cwd in any error context.
 ///
@@ -149,7 +169,10 @@ pub async fn create_worktree(repo_dir: &Path, attr_path: &str) -> anyhow::Result
             .with_context(|| format!("create worktree parent directory {}", parent.display()))?;
     }
 
-    // Create the worktree from the specified repository
+    // Create the worktree from the specified repository. `HEAD` must not
+    // move underneath (a concurrent sync of the checkout).
+    let lock = checkout_lock(repo_dir);
+    let _checkout = lock.lock().await;
     debug!(
         "{}: Creating worktree at {:?} from repository {:?}",
         attr_path, worktree_path, repo_dir

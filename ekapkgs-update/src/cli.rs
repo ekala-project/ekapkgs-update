@@ -597,6 +597,10 @@ pub enum Commands {
         /// Index refresh interval in hours (how often to rebuild the full index)
         #[arg(long, default_value = "24")]
         index_refresh_hours: u64,
+        /// How often, in minutes, to check whether a repo's upstream branch
+        /// moved (e.g. a PR was merged) and re-index it. 0 disables.
+        #[arg(long, default_value = "5", value_name = "MINUTES")]
+        head_check_interval: u64,
         /// Upstream git remote. Inferred if left unset.
         #[arg(long)]
         upstream: Option<String>,
@@ -1207,6 +1211,7 @@ impl Commands {
                 database,
                 poll_interval,
                 index_refresh_hours,
+                head_check_interval,
                 upstream,
                 fork,
                 run_passthru_tests,
@@ -1229,6 +1234,7 @@ impl Commands {
                     database,
                     poll_interval,
                     index_refresh_hours,
+                    head_check_interval,
                     upstream,
                     fork,
                     run_passthru_tests,
