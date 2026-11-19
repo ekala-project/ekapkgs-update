@@ -25,7 +25,28 @@ pub enum ValidationResult {
     EvalFailed { stderr: String },
 }
 
+/// Quote `s` as a Nix string literal (`"…"`), escaping `\`, `"` and `${`.
+pub(crate) fn nix_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Apply LLM-proposed changes to a worktree and validate via build.
+///
+/// `entry_point` is the evaluation entry point *inside the worktree* (an
+/// absolute path, see `processor::worktree_entry_point`), so the fixed tree
+/// is the one evaluated and built, never the main checkout.
 ///
 /// On any failure, the worktree is reverted to its pre-change state via
 /// `git checkout -- .`.
@@ -33,7 +54,7 @@ pub async fn apply_and_validate(
     worktree_path: &Path,
     attr_path: &str,
     changes: &serde_json::Value,
-    eval_entry_point: &str,
+    entry_point: &Path,
 ) -> anyhow::Result<ValidationResult> {
     info!("{}: Applying LLM fix to worktree", attr_path);
 
@@ -52,7 +73,8 @@ pub async fn apply_and_validate(
     let eval_result = Command::new("nix-instantiate")
         .args(["--eval", "--strict", "-E"])
         .arg(format!(
-            "let pkgs = import {eval_entry_point} {{ }}; in pkgs.{attr_path}"
+            "let pkgs = import {} {{ }}; in pkgs.{attr_path}",
+            nix_string_literal(&entry_point.to_string_lossy())
         ))
         .current_dir(worktree_path)
         .output()
@@ -71,7 +93,7 @@ pub async fn apply_and_validate(
     // Full build validation
     let mut build_cmd = Command::new("nix-build");
     build_cmd
-        .arg(eval_entry_point)
+        .arg(entry_point)
         .args(["-A", attr_path])
         .current_dir(worktree_path);
 
@@ -128,5 +150,23 @@ async fn revert_worktree(worktree_path: &Path) {
                 e
             );
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nix_string_literal;
+
+    #[test]
+    fn nix_string_literal_escapes_special_characters() {
+        let cases = [
+            ("/tmp/wt/default.nix", r#""/tmp/wt/default.nix""#),
+            (r#"/a "b"/c"#, r#""/a \"b\"/c""#),
+            (r"/a\b", r#""/a\\b""#),
+            ("/a/${x}/$y", r#""/a/\${x}/$y""#),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(nix_string_literal(input), expected, "{input}");
+        }
     }
 }

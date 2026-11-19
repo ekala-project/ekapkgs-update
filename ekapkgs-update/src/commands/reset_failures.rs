@@ -7,6 +7,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
+use crate::commands::run::preservation::repo_from_label;
 use crate::database::{Database, FailureResetFilter};
 
 /// Options of the `reset-failures` command.
@@ -56,7 +57,8 @@ pub fn parse_time_bound(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>
 impl ResetFailuresOptions {
     fn filter(&self, now: DateTime<Utc>) -> Result<FailureResetFilter> {
         let filter = FailureResetFilter {
-            repo_name: self.repo.clone(),
+            // `default` selects the unnamed scope, as in the other commands.
+            repo_name: self.repo.as_deref().map(|r| repo_from_label(r).to_owned()),
             attr_paths: self.attr_paths.clone(),
             session_ids: self.sessions.clone(),
             since: self
@@ -174,6 +176,16 @@ mod tests {
             ..Default::default()
         };
         assert!(all.filter(now).is_ok());
+        for (label, expected) in [("default", ""), ("corepkgs", "corepkgs")] {
+            let repo = ResetFailuresOptions {
+                repo: Some(label.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                repo.filter(now).unwrap().repo_name.as_deref(),
+                Some(expected)
+            );
+        }
         let since = ResetFailuresOptions {
             since: Some("1d".into()),
             ..Default::default()

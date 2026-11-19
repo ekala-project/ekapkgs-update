@@ -1102,6 +1102,44 @@ async fn update_groups_bundle_outdated_members() {
 
     assert!(matches!(&jobs[1], UpdateJob::Single(r) if r.attr_path == "hello"));
 
+    // aws-c-common's update to 0.10.0 failed and is in backoff: it no longer
+    // rides along (it would fail the group every time), unless it triggers.
+    db.record_failed_update(&ekapkgs_update::database::FailedUpdate {
+        repo_name: "core",
+        attr_path: "aws-c-common",
+        old_version: Some("0.9.0"),
+        new_version: Some("0.10.0"),
+        error_log: "error: builder failed",
+        ..ekapkgs_update::database::FailedUpdate::default()
+    })
+    .await
+    .unwrap();
+    let member_attrs = |jobs: &[UpdateJob]| -> Vec<String> {
+        let UpdateJob::Group(group) = &jobs[0] else {
+            panic!("expected a group job: {jobs:?}");
+        };
+        group.members.iter().map(|m| m.attr_path.clone()).collect()
+    };
+    let jobs = group_jobs(
+        &db,
+        "core",
+        vec![group_request("aws-c-io", "0.14.0", "0.15.0")],
+        &stored,
+    )
+    .await;
+    assert_eq!(member_attrs(&jobs), ["aws-c-io", "aws-crt-cpp"]);
+    let jobs = group_jobs(
+        &db,
+        "core",
+        vec![group_request("aws-c-common", "0.9.0", "0.10.0")],
+        &stored,
+    )
+    .await;
+    assert_eq!(
+        member_attrs(&jobs),
+        ["aws-c-common", "aws-c-io", "aws-crt-cpp"]
+    );
+
     // Dropping the declarations ungroups everything.
     db.replace_groups("core", &BTreeMap::new(), &BTreeMap::new())
         .await

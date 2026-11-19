@@ -10,6 +10,7 @@ use crate::database::{Database, PhaseRecord};
 /// Query update failures with flexible filtering
 pub async fn query(
     database_path: String,
+    repo: Option<String>,
     error_type: Option<String>,
     phase: Option<String>,
     status: Option<String>,
@@ -21,12 +22,17 @@ pub async fn query(
     let expanded_path = shellexpand::tilde(&database_path).to_string();
     let db = Database::new(&expanded_path).await?;
 
+    let repo_name = repo
+        .as_deref()
+        .map(crate::commands::run::preservation::repo_from_label);
+
     // Convert since_days to DateTime
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days as i64));
 
     // Query phase records first
     let results = db
         .query_phases(
+            repo_name,
             error_type.as_deref(),
             phase.as_deref(),
             status.as_deref(),
@@ -52,7 +58,7 @@ pub async fn query(
     let is_failed_query = status.as_deref() == Some("failed") || status.is_none();
     if is_failed_query {
         let failed_logs = db
-            .query_failed_logs(package_pattern.as_deref(), since, limit)
+            .query_failed_logs(repo_name, package_pattern.as_deref(), since, limit, false)
             .await
             .context("Failed to query update logs")?;
 

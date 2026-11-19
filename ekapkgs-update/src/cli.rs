@@ -293,9 +293,14 @@ pub enum Commands {
     },
     /// Show update failure logs for a package
     Log {
-        /// Drv path (e.g., /nix/store/...drv or hash-name.drv) or attr path (e.g.,
-        /// python.pkgs.setuptools)
+        /// Drv path (`/nix/store/…` or `hash-name.drv`) or attr path (e.g.,
+        /// python.pkgs.setuptools); anything else is looked up as an attr
+        /// path first, then as a log key (`<repo>:<attr>@<version>`)
         identifier: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
@@ -304,6 +309,10 @@ pub enum Commands {
     Inspect {
         /// Package attribute path to inspect
         identifier: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
@@ -313,6 +322,10 @@ pub enum Commands {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Filter by error type
         #[arg(long)]
         error_type: Option<String>,
@@ -335,11 +348,16 @@ pub enum Commands {
         #[arg(long)]
         group_by_error: bool,
     },
-    /// Generate a categorized markdown report of failed updates
+    /// Generate a categorized markdown report of packages that are still
+    /// failing (newest failure per package)
     Report {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Filter by package name pattern (SQL LIKE pattern)
         #[arg(long)]
         package: Option<String>,
@@ -365,7 +383,8 @@ pub enum Commands {
         /// Path to SQLite database for tracking updates
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
-        /// Only this watched repo ('' = the run command / legacy watch)
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
         #[arg(long)]
         repo: Option<String>,
         /// Only these attr paths (repeatable)
@@ -421,13 +440,14 @@ pub enum Commands {
         /// several repos.
         #[arg(long)]
         repo: Option<String>,
-        /// Resume from specific phase (if supported)
+        /// Resume from a specific phase. Not implemented yet: retry only
+        /// prepares a copy of the preserved worktree, and this flag errors.
         #[arg(long)]
         from_phase: Option<String>,
-        /// Apply patch file before retrying
+        /// Apply patch file to the copied worktree
         #[arg(long)]
         apply_patch: Option<std::path::PathBuf>,
-        /// Override version to update to
+        /// Override version to update to. Not implemented yet (errors).
         #[arg(long)]
         version: Option<String>,
     },
@@ -568,9 +588,10 @@ pub enum Commands {
     },
     /// Lint a Nix package expression for whitespace formatting compliance.
     ///
-    /// Checks that header attributes (pname, version, extensions, pyproject,
-    /// disabled) are grouped at the top without blank lines, that all other
-    /// attributes are separated by blank lines, and that meta is last.
+    /// Checks that header attributes (pname, version, format, extensions,
+    /// pyproject, disabled) are grouped at the top without blank lines, that
+    /// all other attributes are separated by blank lines, and that meta is
+    /// last. Exits 1 on violations or on files that cannot be read or parsed.
     Lint {
         /// Nix file or directory to lint (directories are searched recursively for .nix files)
         path: String,
@@ -666,6 +687,29 @@ pub enum Commands {
         /// cycles and the PR body section)
         #[arg(long)]
         skip_cve: bool,
+        /// Skip Repology cross-distribution version checking
+        #[arg(long)]
+        skip_repology: bool,
+        /// Analyze and report rebuild counts for each update
+        #[arg(long)]
+        analyze_rebuilds: bool,
+        /// Skip updates that would cause more than N rebuilds
+        #[arg(long)]
+        max_rebuilds: Option<usize>,
+        /// Skip pushing build outputs to Cachix
+        #[arg(long)]
+        skip_cachix: bool,
+        /// Cachix cache name to push successful builds to. Falls back to the
+        /// `CACHIX_CACHE_NAME` environment variable. Requires
+        /// `CACHIX_AUTH_TOKEN` to be set.
+        #[arg(long, value_name = "NAME")]
+        cachix_cache: Option<String>,
+        /// Run package audits after each successful build and include findings in PR body
+        #[arg(long)]
+        audit: bool,
+        /// Disable security checks during audit
+        #[arg(long)]
+        no_security: bool,
     },
 }
 
@@ -704,12 +748,20 @@ pub enum AutofixCommand {
         /// Path to SQLite database
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// Show autofix attempt history
     History {
         /// Path to SQLite database
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Filter by package name pattern
         #[arg(long)]
         package: Option<String>,
@@ -722,6 +774,10 @@ pub enum AutofixCommand {
         /// Path to SQLite database
         #[arg(short, long, default_value = DEFAULT_DATABASE_PATH)]
         database: String,
+        /// Only this repository (a `[[repos]]` name, or `default` for `run` /
+        /// single-repo watch)
+        #[arg(long)]
+        repo: Option<String>,
         /// Specific package to enqueue
         #[arg(long)]
         package: Option<String>,
@@ -788,31 +844,46 @@ fn apply_nix_build_args(builders: Option<String>, max_jobs: Option<usize>, confi
 ///   `~/.cache/ekapkgs-update/updates.db`;
 /// - `file`: config `file` replaces the built-in `default.nix`;
 /// - `select` / `eval_file`: config `select` / `eval_file`;
-/// - `pr_author` (`run` / `update` / `watch`): `[github] pr_author`.
+/// - `pr_author` (`run` / `update` / `watch`): `[github] pr_author`;
+/// - `max_attempts` (`autofix run` / `autofix enqueue`): `[autofix] max_attempts`;
+/// - `poll_interval` / `index_refresh_hours` (`watch`): `[watch]
+///   poll_interval_minutes` / `index_refresh_hours`.
 ///
 /// Without this, settings such as `database` in a NixOS-generated config file
 /// were silently ignored.
 pub fn apply_config_defaults(cmd: clap::Command, config: &ConfigFile) -> clap::Command {
-    let defaults: [(&str, Option<&String>); 5] = [
-        ("database", config.database.as_ref()),
-        ("pr_author", config.github.pr_author.as_ref()),
-        ("file", config.file.as_ref()),
-        ("select", config.select.as_ref()),
-        ("eval_file", config.eval_file.as_ref()),
+    let defaults: [(&str, Option<String>); 8] = [
+        ("database", config.database.clone()),
+        ("pr_author", config.github.pr_author.clone()),
+        ("file", config.file.clone()),
+        ("select", config.select.clone()),
+        ("eval_file", config.eval_file.clone()),
+        (
+            "max_attempts",
+            config.autofix.max_attempts.map(|n| n.to_string()),
+        ),
+        (
+            "poll_interval",
+            config.watch.poll_interval_minutes.map(|n| n.to_string()),
+        ),
+        (
+            "index_refresh_hours",
+            config.watch.index_refresh_hours.map(|n| n.to_string()),
+        ),
     ];
     apply_defaults_recursive(cmd, &defaults)
 }
 
 fn apply_defaults_recursive(
     mut cmd: clap::Command,
-    defaults: &[(&str, Option<&String>)],
+    defaults: &[(&str, Option<String>)],
 ) -> clap::Command {
     for (id, value) in defaults {
         let Some(value) = value else {
             continue;
         };
         if cmd.get_arguments().any(|a| a.get_id() == *id) {
-            let value = (*value).clone();
+            let value = value.clone();
             cmd = cmd.mut_arg(*id, move |arg| arg.default_value(value));
         }
     }
@@ -990,14 +1061,17 @@ impl Commands {
             },
             Commands::Log {
                 identifier,
+                repo,
                 database,
-            } => commands::log::show_log(database, identifier).await,
+            } => commands::log::show_log(database, identifier, repo).await,
             Commands::Inspect {
                 identifier,
+                repo,
                 database,
-            } => commands::inspect::inspect(database, identifier).await,
+            } => commands::inspect::inspect(database, identifier, repo).await,
             Commands::Query {
                 database,
+                repo,
                 error_type,
                 phase,
                 status,
@@ -1008,6 +1082,7 @@ impl Commands {
             } => {
                 commands::query::query(
                     database,
+                    repo,
                     error_type,
                     phase,
                     status,
@@ -1020,10 +1095,11 @@ impl Commands {
             },
             Commands::Report {
                 database,
+                repo,
                 package,
                 since_days,
                 output,
-            } => commands::report::report(database, package, since_days, output).await,
+            } => commands::report::report(database, repo, package, since_days, output).await,
             Commands::Status { database } => commands::status::status(database).await,
             Commands::ResetFailures {
                 database,
@@ -1128,9 +1204,18 @@ impl Commands {
                 } => {
                     apply_nix_build_args(builders, max_jobs, &config_file);
 
+                    let repo_entry_points = config_file
+                        .repos
+                        .iter()
+                        .map(|r| {
+                            let entry = r.eval_entrypoint.as_ref().unwrap_or(&r.entrypoint);
+                            (r.name.clone(), entry.clone())
+                        })
+                        .collect();
                     let autofix_config = commands::autofix::config::AutofixConfig {
                         database_path: database,
                         eval_entry_point: file,
+                        repo_entry_points,
                         max_attempts,
                         limit,
                         dry_run,
@@ -1140,18 +1225,24 @@ impl Commands {
                     };
                     commands::autofix::run(autofix_config).await
                 },
-                AutofixCommand::Status { database } => commands::autofix::status(database).await,
+                AutofixCommand::Status { database, repo } => {
+                    commands::autofix::status(database, repo).await
+                },
                 AutofixCommand::History {
                     database,
+                    repo,
                     package,
                     limit,
-                } => commands::autofix::history(database, package, limit).await,
+                } => commands::autofix::history(database, repo, package, limit).await,
                 AutofixCommand::Enqueue {
                     database,
+                    repo,
                     package,
                     session,
                     max_attempts,
-                } => commands::autofix::enqueue(database, package, session, max_attempts).await,
+                } => {
+                    commands::autofix::enqueue(database, repo, package, session, max_attempts).await
+                },
                 AutofixCommand::ExportDataset {
                     database,
                     format,
@@ -1257,6 +1348,13 @@ impl Commands {
                 claude_fix_max_turns,
                 claude_fix_timeout,
                 skip_cve,
+                skip_repology,
+                analyze_rebuilds,
+                max_rebuilds,
+                skip_cachix,
+                cachix_cache,
+                audit,
+                no_security,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
                 crate::github::existing_prs::set_pr_author(pr_author);
@@ -1279,7 +1377,18 @@ impl Commands {
                     claude_fix_max_turns,
                     claude_fix_timeout,
                 );
-                watch_config.skip_cve = skip_cve;
+                watch_config.pr_enhancements = commands::pr_enhancements::PrEnhancementsConfig {
+                    // Watch has never run the directory diff.
+                    directory_diff: false,
+                    skip_cve_check: skip_cve,
+                    skip_repology,
+                    analyze_rebuilds,
+                    max_rebuilds,
+                    skip_cachix,
+                    cachix_cache: crate::cachix::resolve_cache_name(cachix_cache.as_deref()),
+                    run_audit: audit,
+                    skip_security: no_security,
+                };
                 watch_config.repos = config_file.repos;
                 if let Some(listen) = webhook_listen {
                     let secret = crate::github::auth::webhook_secret(&config_file.github_app)?
@@ -1370,6 +1479,65 @@ mod tests {
             panic!("expected worktrees list");
         };
         assert_eq!(database, "/var/lib/ekapkgs-update/updates.db");
+    }
+
+    #[test]
+    fn autofix_and_watch_settings_become_defaults() {
+        let mut config = config();
+        config.autofix.max_attempts = Some(7);
+        config.watch.poll_interval_minutes = Some(90);
+        config.watch.index_refresh_hours = Some(12);
+
+        let args = parse(&config, &["ekapkgs-update", "watch"]);
+        let Commands::Watch {
+            poll_interval,
+            index_refresh_hours,
+            ..
+        } = args.command
+        else {
+            panic!("expected watch");
+        };
+        assert_eq!((poll_interval, index_refresh_hours), (90, 12));
+
+        let args = parse(
+            &config,
+            &["ekapkgs-update", "watch", "--poll-interval", "30"],
+        );
+        let Commands::Watch { poll_interval, .. } = args.command else {
+            panic!("expected watch");
+        };
+        assert_eq!(poll_interval, 30);
+
+        for (argv, expected) in [
+            (&["ekapkgs-update", "autofix", "run"][..], 7),
+            (&["ekapkgs-update", "autofix", "enqueue"][..], 7),
+            (
+                &["ekapkgs-update", "autofix", "run", "--max-attempts", "2"][..],
+                2,
+            ),
+        ] {
+            let args = parse(&config, argv);
+            let Commands::Autofix {
+                command:
+                    AutofixCommand::Run { max_attempts, .. }
+                    | AutofixCommand::Enqueue { max_attempts, .. },
+            } = args.command
+            else {
+                panic!("expected autofix");
+            };
+            assert_eq!(max_attempts, expected, "{argv:?}");
+        }
+
+        let args = parse(&ConfigFile::default(), &["ekapkgs-update", "watch"]);
+        let Commands::Watch {
+            poll_interval,
+            index_refresh_hours,
+            ..
+        } = args.command
+        else {
+            panic!("expected watch");
+        };
+        assert_eq!((poll_interval, index_refresh_hours), (60, 24));
     }
 
     #[test]

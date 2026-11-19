@@ -19,7 +19,7 @@ pub async fn cve_scan(
     let expanded_path = shellexpand::tilde(&database_path).to_string();
     let db = Database::new(&expanded_path).await?;
     // The dashboard labels the '' repo "default".
-    let repo = repo.map(|r| if r == "default" { String::new() } else { r });
+    let repo = repo.map(|r| crate::commands::run::preservation::repo_from_label(&r).to_owned());
     let options = ScanOptions {
         repo: repo.clone(),
         attrs,

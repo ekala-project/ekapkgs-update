@@ -6,7 +6,7 @@ mod group_update;
 mod grouping;
 pub mod preservation;
 mod types;
-mod updater;
+pub(crate) mod updater;
 
 pub(crate) use claude_fix::warn_if_claude_unavailable;
 pub use config::{

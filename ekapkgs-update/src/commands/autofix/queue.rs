@@ -423,12 +423,19 @@ impl Database {
         Ok(attempts)
     }
 
-    /// Aggregate queue statistics.
-    pub async fn get_autofix_queue_stats(&self) -> Result<AutofixQueueStats> {
-        let rows = sqlx::query("SELECT status, COUNT(*) as cnt FROM autofix_queue GROUP BY status")
-            .fetch_all(self.pool())
-            .await
-            .context("get autofix queue stats")?;
+    /// Aggregate queue statistics, optionally of one repo (`repo_name`).
+    pub async fn get_autofix_queue_stats(
+        &self,
+        repo_name: Option<&str>,
+    ) -> Result<AutofixQueueStats> {
+        let rows = sqlx::query(
+            "SELECT status, COUNT(*) as cnt FROM autofix_queue
+             WHERE (?1 IS NULL OR repo_name = ?1) GROUP BY status",
+        )
+        .bind(repo_name)
+        .fetch_all(self.pool())
+        .await
+        .context("get autofix queue stats")?;
 
         let mut stats = AutofixQueueStats::default();
         for row in rows {
@@ -447,9 +454,11 @@ impl Database {
         Ok(stats)
     }
 
-    /// Get queue items with optional filtering by attr_path pattern.
+    /// Get queue items with optional filtering by repo (`repo_name`) and
+    /// attr_path pattern.
     pub async fn get_autofix_history(
         &self,
+        repo_name: Option<&str>,
         attr_path: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<AutofixQueueItem>> {
@@ -460,8 +469,9 @@ impl Database {
              FROM autofix_queue",
         );
 
+        sql.push_str(" WHERE (?1 IS NULL OR repo_name = ?1)");
         if attr_path.is_some() {
-            sql.push_str(" WHERE attr_path LIKE ?");
+            sql.push_str(" AND attr_path LIKE ?2");
         }
 
         sql.push_str(" ORDER BY updated_at DESC");
@@ -470,7 +480,7 @@ impl Database {
             sql.push_str(&format!(" LIMIT {lim}"));
         }
 
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(&sql).bind(repo_name);
         if let Some(pattern) = attr_path {
             q = q.bind(format!("%{pattern}%"));
         }

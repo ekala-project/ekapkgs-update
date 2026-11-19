@@ -28,7 +28,7 @@ use tracing::info;
 use self::config::AutofixConfig;
 use self::dataset::{DatasetExportConfig, DatasetFormat, QualityFilter};
 use self::processor::process_queue;
-use crate::commands::run::preservation::list_preserved_failures;
+use crate::commands::run::preservation::{list_preserved_failures, matches_repo, repo_from_label};
 use crate::database::Database;
 use crate::llm::LlmClient;
 
@@ -47,7 +47,7 @@ pub async fn run(config: AutofixConfig) -> anyhow::Result<()> {
     }
 
     // Show initial queue state
-    let stats = db.get_autofix_queue_stats().await?;
+    let stats = db.get_autofix_queue_stats(None).await?;
     if stats.queued == 0 {
         println!("Autofix queue is empty. Nothing to process.");
         return Ok(());
@@ -85,12 +85,13 @@ pub async fn run(config: AutofixConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Show autofix queue status.
-pub async fn status(database_path: String) -> anyhow::Result<()> {
+/// Show autofix queue status (of one repo with `repo`, a `--repo` label).
+pub async fn status(database_path: String, repo: Option<String>) -> anyhow::Result<()> {
     let expanded_path = shellexpand::tilde(&database_path).to_string();
     let db = Database::new(&expanded_path).await?;
+    let repo_name = repo.as_deref().map(repo_from_label);
 
-    let stats = db.get_autofix_queue_stats().await?;
+    let stats = db.get_autofix_queue_stats(repo_name).await?;
 
     println!("Autofix Queue Status:");
     println!("  Queued:      {}", stats.queued);
@@ -100,7 +101,7 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
     println!("  Skipped:     {}", stats.skipped);
 
     // Show recent fixes
-    let history = db.get_autofix_history(None, Some(10)).await?;
+    let history = db.get_autofix_history(repo_name, None, Some(10)).await?;
 
     let recent_fixes: Vec<_> = history.iter().filter(|i| i.status == "fixed").collect();
     if !recent_fixes.is_empty() {
@@ -132,6 +133,7 @@ pub async fn status(database_path: String) -> anyhow::Result<()> {
 /// Show autofix attempt history.
 pub async fn history(
     database_path: String,
+    repo: Option<String>,
     package: Option<String>,
     limit: Option<usize>,
 ) -> anyhow::Result<()> {
@@ -139,7 +141,11 @@ pub async fn history(
     let db = Database::new(&expanded_path).await?;
 
     let items = db
-        .get_autofix_history(package.as_deref(), limit.or(Some(20)))
+        .get_autofix_history(
+            repo.as_deref().map(repo_from_label),
+            package.as_deref(),
+            limit.or(Some(20)),
+        )
         .await?;
 
     if items.is_empty() {
@@ -188,6 +194,7 @@ pub async fn history(
 /// Manually enqueue preserved failures.
 pub async fn enqueue(
     database_path: String,
+    repo: Option<String>,
     package: Option<String>,
     session: Option<String>,
     max_attempts: i64,
@@ -205,6 +212,10 @@ pub async fn enqueue(
     let mut enqueued = 0;
 
     for artifact in &artifacts {
+        if !matches_repo(artifact, repo.as_deref()) {
+            continue;
+        }
+
         // Filter by package
         if let Some(ref pkg) = package {
             if !artifact.attr_path.contains(pkg.as_str()) {

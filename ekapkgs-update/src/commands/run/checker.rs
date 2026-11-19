@@ -158,6 +158,7 @@ pub async fn release_checker_service_with_limits(
             },
             Err(e) => {
                 warn!("Stream error: {}", e);
+                groups.note_incomplete();
                 break;
             },
         }

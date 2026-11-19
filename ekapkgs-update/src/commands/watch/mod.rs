@@ -136,8 +136,10 @@ pub struct WatchConfig {
     pub claude_fix_max_turns: u32,
     /// Timeout in seconds for each Claude fix attempt
     pub claude_fix_timeout: u64,
-    /// Skip the CVE scan after poll cycles and the PR body's CVE section.
-    pub skip_cve: bool,
+    /// PR enhancements (CVE section and scan, Repology, rebuild analysis,
+    /// Cachix push, audit). `skip_cve_check` also disables the CVE scan after
+    /// poll cycles. The directory diff is not run by watch.
+    pub pr_enhancements: PrEnhancementsConfig,
     /// Multi-repo configurations (from config file).
     #[serde(skip)]
     pub repos: Vec<RepoConfig>,
@@ -200,7 +202,7 @@ impl WatchConfig {
             claude_fix,
             claude_fix_max_turns,
             claude_fix_timeout,
-            skip_cve: false,
+            pr_enhancements: PrEnhancementsConfig::default(),
             repos: Vec::new(),
             webhook: None,
         }
@@ -314,10 +316,7 @@ impl WatchConfig {
             })
         };
 
-        let pr_enhancements = PrEnhancementsConfig {
-            skip_cve_check: self.skip_cve,
-            ..PrEnhancementsConfig::default()
-        };
+        let pr_enhancements = self.pr_enhancements.clone();
 
         let updater_config = crate::commands::run::UpdaterServiceConfig {
             session_id: String::new(), // Updated per poll cycle

@@ -320,28 +320,21 @@ impl UpdateError {
     pub fn classify(phase: UpdatePhase, attr_path: &str, error: &anyhow::Error) -> Self {
         let details = format!("{error:#}");
         let lower = details.to_ascii_lowercase();
-        let looks_network = [
-            "error sending request",
-            "connection refused",
-            "couldn't resolve host",
-            "could not resolve host",
-            "timed out",
-            "rate limit",
-            "http status",
-            "status code",
-            "unable to download",
-            " 404",
-            " 403",
-            " 429",
-            " 500",
-            " 502",
-            " 503",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle));
-        let status_code = [403u16, 404, 429, 500, 502, 503]
-            .into_iter()
-            .find(|code| lower.contains(&code.to_string()));
+        let status_code = http_status_code(&lower);
+        let looks_network = status_code.is_some()
+            || [
+                "error sending request",
+                "connection refused",
+                "couldn't resolve host",
+                "could not resolve host",
+                "timed out",
+                "rate limit",
+                "http status",
+                "status code",
+                "unable to download",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle));
 
         match phase {
             UpdatePhase::MetadataExtraction | UpdatePhase::SourceDiscovery => {
@@ -410,6 +403,41 @@ impl UpdateError {
             },
         }
     }
+}
+
+/// The HTTP status of a failed request mentioned in `lower` (lowercased
+/// error text), only where it reads as one: `HTTP 404`, `HTTP error 404`,
+/// `status 404`, `status code 404`, `status: 404` or a reason phrase
+/// (`404 Not Found`). A bare number (a version, a line number, a hash
+/// fragment) is not a status.
+fn http_status_code(lower: &str) -> Option<u16> {
+    const CODES: [(u16, &str); 6] = [
+        (403, "forbidden"),
+        (404, "not found"),
+        (429, "too many requests"),
+        (500, "internal server error"),
+        (502, "bad gateway"),
+        (503, "service unavailable"),
+    ];
+    const PREFIXES: [&str; 6] = [
+        "http ",
+        "http error ",
+        "http status ",
+        "status ",
+        "status code ",
+        "status: ",
+    ];
+    CODES.into_iter().find_map(|(code, reason)| {
+        let with_prefix = PREFIXES.iter().any(|prefix| {
+            let needle = format!("{prefix}{code}");
+            lower.match_indices(&needle).any(|(i, m)| {
+                let after = lower[i + m.len()..].chars().next();
+                !after.is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        });
+        let with_reason = lower.contains(&format!("{code} {reason}"));
+        (with_prefix || with_reason).then_some(code)
+    })
 }
 
 /// Best-effort guess at a build failure cause from its log text.
@@ -497,6 +525,31 @@ mod classify_tests {
             let err = UpdateError::classify(phase, "pkg", &anyhow::anyhow!("{message}"));
             assert_eq!(err.error_type_name(), expected, "{phase}: {message}");
             assert_eq!(err.phase(), phase);
+        }
+    }
+
+    #[test]
+    fn http_status_codes_need_an_http_context() {
+        for (message, expected) in [
+            ("unable to download 'https://x': HTTP error 404", Some(404)),
+            ("HTTP 503 from upstream", Some(503)),
+            ("request failed with status code 429", Some(429)),
+            ("status: 502", Some(502)),
+            (
+                "HTTP status client error (403 Forbidden) for url (https://x)",
+                Some(403),
+            ),
+            ("404 Not Found", Some(404)),
+            ("version 1.404.0 not compatible", None),
+            ("error at line 500 of default.nix", None),
+            ("sha256-abc500def", None),
+            ("status 4041", None),
+        ] {
+            assert_eq!(
+                http_status_code(&message.to_ascii_lowercase()),
+                expected,
+                "{message}"
+            );
         }
     }
 

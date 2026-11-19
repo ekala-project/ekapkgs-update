@@ -1,6 +1,7 @@
 //! Report command for generating categorized failure summaries
 //!
-//! Queries the `update_logs` table for failed updates, deduplicates by package,
+//! Queries the `update_logs` table for packages that are still failing (their
+//! `updates` row is `failed`), keeps the newest log per (repo, attr),
 //! categorizes failures by error type, and renders a markdown report.
 
 use std::collections::HashSet;
@@ -51,6 +52,7 @@ fn categorize_error(error_log: &str) -> &'static str {
 /// Generate a categorized failure report
 pub async fn report(
     database_path: String,
+    repo: Option<String>,
     package_pattern: Option<String>,
     since_days: Option<u32>,
     output: Option<PathBuf>,
@@ -60,17 +62,15 @@ pub async fn report(
 
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days as i64));
 
+    let repo_name = repo
+        .as_deref()
+        .map(crate::commands::run::preservation::repo_from_label);
     let logs = db
-        .query_failed_logs(package_pattern.as_deref(), since, None)
+        .query_failed_logs(repo_name, package_pattern.as_deref(), since, None, true)
         .await
         .context("Failed to query failed update logs")?;
 
-    // Deduplicate by attr_path, keeping the most recent (results are ORDER BY timestamp DESC)
-    let mut seen = HashSet::new();
-    let deduped: Vec<_> = logs
-        .into_iter()
-        .filter(|log| seen.insert(log.attr_path.clone()))
-        .collect();
+    let deduped = newest_per_package(logs);
 
     if deduped.is_empty() {
         println!("No failed updates found.");
@@ -91,6 +91,24 @@ pub async fn report(
     Ok(())
 }
 
+/// Keep the newest log of each (repo, attr) package. `logs` must be ordered
+/// newest first (as `query_failed_logs` returns them).
+fn newest_per_package(logs: Vec<UpdateLog>) -> Vec<UpdateLog> {
+    let mut seen = HashSet::new();
+    logs.into_iter()
+        .filter(|log| seen.insert((log.repo_name.clone(), log.attr_path.clone())))
+        .collect()
+}
+
+/// `repo:attr` in multi-repo mode, plain `attr` otherwise.
+fn package_name(log: &UpdateLog) -> String {
+    if log.repo_name.is_empty() {
+        log.attr_path.clone()
+    } else {
+        format!("{}:{}", log.repo_name, log.attr_path)
+    }
+}
+
 /// Render a categorized markdown report from deduplicated failure logs
 fn render_markdown(logs: &[UpdateLog]) -> String {
     // Categorize each log
@@ -108,7 +126,7 @@ fn render_markdown(logs: &[UpdateLog]) -> String {
 
     // Sort entries within each category by attr_path
     for (_, entries) in &mut categories {
-        entries.sort_by(|a, b| a.attr_path.cmp(&b.attr_path));
+        entries.sort_by(|a, b| (&a.attr_path, &a.repo_name).cmp(&(&b.attr_path, &b.repo_name)));
     }
 
     let mut out = String::new();
@@ -125,7 +143,12 @@ fn render_markdown(logs: &[UpdateLog]) -> String {
         for log in entries {
             let old = log.old_version.as_deref().unwrap_or("?");
             let new = log.new_version.as_deref().unwrap_or("?");
-            out.push_str(&format!("| `{}` | {} | {} |\n", log.attr_path, old, new));
+            out.push_str(&format!(
+                "| `{}` | {} | {} |\n",
+                package_name(log),
+                old,
+                new
+            ));
         }
     }
 
@@ -244,5 +267,38 @@ mod tests {
         assert!(md.contains("| `world` | 3.0 | 4.0 |"));
         // Empty categories should not appear
         assert!(!md.contains("Cargo hash"));
+    }
+
+    #[test]
+    fn newest_per_package_keys_by_repo_and_attr() {
+        let log = |repo: &str, attr: &str, new: &str| UpdateLog {
+            drv_path: format!("{repo}:{attr}@{new}"),
+            attr_path: attr.to_owned(),
+            timestamp: "2026-07-08T00:00:00Z".to_owned(),
+            status: "failed".to_owned(),
+            error_log: "Package build failed".to_owned(),
+            old_version: Some("1.0".to_owned()),
+            new_version: Some(new.to_owned()),
+            repo_name: repo.to_owned(),
+            session_id: None,
+            phase: None,
+            error_type: None,
+        };
+        let kept = newest_per_package(vec![
+            log("", "hello", "1.2"),
+            log("corepkgs", "hello", "1.2"),
+            log("", "hello", "1.1"),
+        ]);
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|l| (package_name(l), l.new_version.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("hello".to_owned(), "1.2".to_owned()),
+                ("corepkgs:hello".to_owned(), "1.2".to_owned()),
+            ]
+        );
     }
 }
