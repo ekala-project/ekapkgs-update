@@ -495,6 +495,11 @@ async fn branch_group_update(
             return setup_failed(&attempts, &failure).await;
         },
     };
+    // The group edits and commits on the shared working tree: nothing may
+    // sync or index the checkout until it is committed or undone (as for a
+    // branch-mode single).
+    let checkout_lock = crate::git::checkout_lock(&repo_dir);
+    let _checkout = checkout_lock.lock().await;
     // Like a branch-mode single's snapshot: a repository-level failure.
     let checkpoint = {
         let _lock = git_mutex.lock().await;

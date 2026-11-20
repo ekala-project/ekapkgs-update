@@ -232,7 +232,7 @@ pub async fn release_flagged_prerelease(
 ) -> anyhow::Result<bool> {
     match source {
         UpstreamSource::GitHub { owner, repo } => {
-            let token = std::env::var("GITHUB_TOKEN").ok();
+            let token = crate::github::auth::read_token().await;
             Ok(crate::github::fetch_github_release_by_tag(
                 owner,
                 repo,

@@ -410,7 +410,9 @@ pub(super) async fn perform_update(
         Err(e) => {
             let failure =
                 SetupFailure::Transient(format!("Repository directory determination failed: {e}"));
-            return Ok(attempt.setup_failed(&failure).await);
+            return Ok(Attempt::new(db, session_id, req)
+                .setup_failed(&failure)
+                .await);
         },
     };
 
