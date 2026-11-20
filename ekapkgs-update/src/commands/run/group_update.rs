@@ -25,7 +25,9 @@ use tokio::sync::Mutex;
 
 use super::branch_git::GroupCheckpoint;
 use super::claude_fix::{ClaudeFixConfig, ClaudeFixResult};
-use super::preservation::preserve_failure;
+use super::preservation::{
+    BranchChanges, FailureArtifacts, FailureContext, preserve_branch_failure, preserve_failure,
+};
 use super::types::{GroupRequest, UpdateRequest, UpdateResult};
 use super::updater::{
     Attempt, SetupFailure, entry_point_in_repo, get_file_location, get_repo_dir_from_entry_point,
@@ -525,6 +527,25 @@ async fn branch_group_update(
     if let Some(failure) = failure {
         let undone = {
             let _lock = git_mutex.lock().await;
+            // Before the undo, which drops what is preserved.
+            if opts.preserve_failures {
+                let attr = preserved_member(group, &failure);
+                let ctx = FailureContext {
+                    session_id: opts.session_id,
+                    repo_name: attr.repo(),
+                    attr_path: &attr.attr_path,
+                    eval_entry_point: opts.eval_entry_point,
+                    error: &failure.error,
+                    error_log: &failure.error_log,
+                };
+                preserve_branch_failure(
+                    steps.failed_root(),
+                    opts.db,
+                    &ctx,
+                    BranchChanges::Group(&checkpoint),
+                )
+                .await;
+            }
             checkpoint.undo(&group.root).await
         };
         if let Err(e) = undone {
@@ -601,8 +622,18 @@ async fn cleanup(repo_dir: &Path, worktree_path: &Path, root: &str) {
     }
 }
 
-/// Preserve the failed group worktree under the member that failed (or the
-/// first member when a non-member, such as the root, failed verification).
+/// The member a failed group's artifacts are filed under: the member that
+/// failed, or the first member when a non-member (such as the root) failed
+/// verification.
+fn preserved_member<'g>(group: &'g GroupRequest, failure: &GroupFailure) -> &'g UpdateRequest {
+    group
+        .members
+        .iter()
+        .find(|m| m.attr_path == failure.attr_path)
+        .unwrap_or_else(|| group.lead())
+}
+
+/// Preserve the failed group worktree under [`preserved_member`].
 /// Returns whether the worktree was preserved: moved into the artifacts
 /// (nothing left to clean up), or copied with the original kept because the
 /// copy's git metadata still points at it.
@@ -617,11 +648,7 @@ async fn preserve(
     if !opts.preserve_failures {
         return false;
     }
-    let attr = group
-        .members
-        .iter()
-        .find(|m| m.attr_path == failure.attr_path)
-        .unwrap_or_else(|| group.lead());
+    let attr = preserved_member(group, failure);
     let test_output = match &failure.error {
         UpdateError::TestError { output, .. } => Some(output.clone()),
         _ => None,
@@ -698,6 +725,11 @@ trait GroupSteps {
         tracker: &PhaseTracker,
         workspace: &GroupWorkspace<'_>,
     ) -> Result<Verified, Box<GroupFailure>>;
+
+    /// Where failures are preserved (`--preserve-failures`).
+    fn failed_root(&self) -> anyhow::Result<PathBuf> {
+        FailureArtifacts::failed_root()
+    }
 }
 
 /// The real steps: nix evaluation, the update workflow and `nix-build`.
@@ -1605,6 +1637,8 @@ rec {
         failing_build: Option<&'static str>,
         /// Member already at its target version.
         already: Option<&'static str>,
+        /// Where failures are preserved (`None`: it cannot be determined).
+        failed_root: Option<PathBuf>,
     }
 
     fn build_error(stderr: &str) -> UpdateError {
@@ -1664,6 +1698,12 @@ rec {
                 failed_test: None,
             })
         }
+
+        fn failed_root(&self) -> anyhow::Result<PathBuf> {
+            self.failed_root
+                .clone()
+                .context("no cache directory for preserved failures")
+        }
     }
 
     fn git_out(root: &Path, args: &[&str]) -> String {
@@ -1700,6 +1740,12 @@ rec {
     }
 
     struct BranchGroupRun {
+        /// Keeps the repository alive (preserved worktrees point into it).
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        /// `HEAD` before the group.
+        start: String,
+        session: String,
         outputs: Vec<MemberOutput>,
         /// `(subject, files)` of the commits the group left, oldest first.
         commits: Vec<(String, String)>,
@@ -1711,7 +1757,18 @@ rec {
     /// Run a group of `a` and `b` (root `b`, both `1 -> 2`) on the current
     /// branch with `steps`.
     async fn run_branch_group(steps: FakeSteps) -> BranchGroupRun {
-        let (_dir, root) = group_repo();
+        run_branch_group_with(steps, false, |_| {}).await
+    }
+
+    /// [`run_branch_group`] with `--preserve-failures` set to `preserve`
+    /// and `setup` run on the repository first.
+    async fn run_branch_group_with(
+        steps: FakeSteps,
+        preserve: bool,
+        setup: impl FnOnce(&Path),
+    ) -> BranchGroupRun {
+        let (dir, root) = group_repo();
+        setup(&root);
         let start = git_out(&root, &["rev-parse", "HEAD"]);
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -1731,7 +1788,7 @@ rec {
             run_passthru_tests: false,
             dry_run: false,
             pr_enhancements: &pr_enhancements,
-            preserve_failures: false,
+            preserve_failures: preserve,
             claude_fix: None,
         };
         let group = GroupRequest {
@@ -1767,6 +1824,10 @@ rec {
             })
             .collect();
         BranchGroupRun {
+            _dir: dir,
+            root,
+            start,
+            session,
             outputs,
             commits,
             status,
@@ -1902,6 +1963,195 @@ rec {
                     assert!(log.ends_with(own_log), "{failed}: {attr}: {log}");
                 }
             }
+        }
+    }
+
+    /// `(subject, files)` of the commits in `range`, oldest first.
+    fn commits_in(root: &Path, range: &str) -> Vec<(String, String)> {
+        let log = git_out(
+            root,
+            &["log", "--reverse", "--format=%x00%s", "--name-only", range],
+        );
+        log.split('\0')
+            .filter(|c| !c.is_empty())
+            .map(|c| {
+                let (subject, files) = c.split_once('\n').unwrap_or((c, ""));
+                (subject.to_owned(), files.trim().to_owned())
+            })
+            .collect()
+    }
+
+    /// Paths of the registered worktrees of `root`'s repository.
+    fn worktrees(root: &Path) -> Vec<PathBuf> {
+        git_out(root, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// User work present before the group: untracked `notes.txt` (from
+    /// [`group_repo`]), an edit of the tracked entry point, and an untracked
+    /// file in `b`'s package directory that `b`'s commit sweeps in.
+    fn user_work(root: &Path) {
+        std::fs::write(root.join("default.nix"), "{ user = 1; }").unwrap();
+        std::fs::write(root.join("pkgs/b/user.txt"), "mine").unwrap();
+    }
+
+    /// With `--preserve-failures`, a failed branch-mode group is preserved
+    /// like a worktree-mode one before it is undone: a worktree at the start
+    /// commit with the member commits replayed and the uncommitted edits
+    /// copied (none of the user's work), filed under the failing member (or
+    /// the first one when a non-member failed), with a manifest the
+    /// `export`/`retry`/`worktrees` lookup finds. The checkout is undone as
+    /// without preservation.
+    #[tokio::test]
+    async fn branch_group_failure_is_preserved() {
+        use super::super::preservation::{find_preserved, list_preserved_failures_in};
+
+        // (steps, attr filed under, replayed commits, uncommitted in the
+        // preserved worktree)
+        let cases = [
+            (
+                FakeSteps {
+                    order: vec!["b", "a"],
+                    failing_member: Some("a"),
+                    ..FakeSteps::default()
+                },
+                "a",
+                vec![("b: 1 -> 2", "pkgs/b/default.nix")],
+                "M pkgs/a/default.nix",
+            ),
+            (
+                FakeSteps {
+                    order: vec!["a", "b"],
+                    failing_build: Some("c"),
+                    ..FakeSteps::default()
+                },
+                "a",
+                vec![
+                    ("a: 1 -> 2", "pkgs/a/default.nix"),
+                    ("b: 1 -> 2", "pkgs/b/default.nix"),
+                ],
+                "",
+            ),
+        ];
+        for (mut steps, filed, replayed, uncommitted) in cases {
+            let cache = tempfile::tempdir().unwrap();
+            let failed_root = std::fs::canonicalize(cache.path()).unwrap().join("failed");
+            steps.failed_root = Some(failed_root.clone());
+            let run = run_branch_group_with(steps, true, user_work).await;
+
+            // The checkout is undone; the user's work is kept.
+            assert!(run.commits.is_empty(), "{filed}: {:?}", run.commits);
+            assert_eq!(run.files, ["1", "1", "1"], "{filed}");
+            assert_eq!(
+                std::fs::read_to_string(run.root.join("default.nix")).unwrap(),
+                "{ user = 1; }"
+            );
+            assert!(run.root.join("pkgs/b/user.txt").exists(), "{filed}");
+            assert!(
+                run.status.contains("?? notes.txt"),
+                "{filed}: {}",
+                run.status
+            );
+            for (result, attr) in &run.outputs {
+                assert!(matches!(result, Ok(UpdateResult::Failed(_))), "{attr}");
+            }
+
+            let list = list_preserved_failures_in(&failed_root).await.unwrap();
+            assert_eq!(list.len(), 1, "{filed}");
+            let artifacts = find_preserved(&list, filed, None).unwrap();
+            assert_eq!(artifacts.session_id, run.session);
+            assert_eq!(artifacts.repo_name, "");
+            assert_eq!(artifacts.failed_phase, UpdatePhase::Build);
+            let preserved = &artifacts.worktree_path;
+            assert_eq!(
+                preserved,
+                &failed_root.join(&run.session).join(filed).join("worktree")
+            );
+            assert!(
+                !failed_root
+                    .join(&run.session)
+                    .join(filed)
+                    .join("worktree.staging")
+                    .exists()
+            );
+            assert!(worktrees(&run.root).contains(preserved), "{filed}");
+
+            // The member commits on top of the start commit, then the
+            // uncommitted remainder; none of the user's work.
+            let expected: Vec<(String, String)> = replayed
+                .iter()
+                .map(|(s, f)| ((*s).to_owned(), (*f).to_owned()))
+                .collect();
+            assert_eq!(
+                commits_in(preserved, &format!("{}..HEAD", run.start)),
+                expected,
+                "{filed}"
+            );
+            assert_eq!(
+                git_out(preserved, &["status", "--porcelain=v1"]).trim(),
+                uncommitted,
+                "{filed}"
+            );
+            assert_eq!(
+                git_out(preserved, &["diff", "--name-only", &run.start]),
+                "pkgs/a/default.nix\npkgs/b/default.nix",
+                "{filed}"
+            );
+            for path in ["notes.txt", "pkgs/b/user.txt"] {
+                assert!(!preserved.join(path).exists(), "{filed}: {path}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(preserved.join("default.nix")).unwrap(),
+                "{ }"
+            );
+            let diff = std::fs::read_to_string(&artifacts.diff_path).unwrap();
+            assert_eq!(diff.contains("pkgs/a/default.nix"), !uncommitted.is_empty());
+            let log = std::fs::read_to_string(artifacts.build_log_path.as_ref().unwrap()).unwrap();
+            assert!(log.contains("does not build"), "{filed}: {log}");
+        }
+    }
+
+    /// A preservation that fails (no cache directory, or one that cannot be
+    /// created) is only logged: the group is undone and recorded as without
+    /// `--preserve-failures`, and no worktree is left behind.
+    #[tokio::test]
+    async fn branch_group_preservation_failure_still_undoes() {
+        use crate::database::UpdateStatus;
+
+        let cache = tempfile::tempdir().unwrap();
+        let not_a_dir = cache.path().join("file");
+        std::fs::write(&not_a_dir, "").unwrap();
+        for failed_root in [None, Some(not_a_dir.join("failed"))] {
+            let run = run_branch_group_with(
+                FakeSteps {
+                    order: vec!["b", "a"],
+                    failing_member: Some("a"),
+                    failed_root: failed_root.clone(),
+                    ..FakeSteps::default()
+                },
+                true,
+                |_| {},
+            )
+            .await;
+
+            assert!(run.commits.is_empty(), "{failed_root:?}: {:?}", run.commits);
+            assert_eq!(run.status, "?? notes.txt", "{failed_root:?}");
+            assert_eq!(run.files, ["1", "1", "1"], "{failed_root:?}");
+            assert_eq!(
+                worktrees(&run.root),
+                std::slice::from_ref(&run.root),
+                "{failed_root:?}"
+            );
+            for (result, attr) in &run.outputs {
+                assert!(matches!(result, Ok(UpdateResult::Failed(_))), "{attr}");
+                let record = run.db.get_update_record("", attr).await.unwrap().unwrap();
+                assert_eq!(record.status, UpdateStatus::Failed, "{attr}");
+            }
+            let (error_type, _) = failure_log(&run.db, "a").await;
+            assert_eq!(error_type, "BuildError");
         }
     }
 }

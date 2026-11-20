@@ -303,6 +303,55 @@ impl DirtySnapshot {
     }
 }
 
+impl DirtySnapshot {
+    /// Repository root.
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Copy every path dirtied since the snapshot, as it is now, into
+    /// `dest` (a worktree of the same repository), and delete there the
+    /// ones that are gone. Paths that were dirty before the snapshot are
+    /// left out, like [`Self::revert`] leaves them alone.
+    pub(super) async fn copy_introduced(&self, dest: &Path) -> anyhow::Result<()> {
+        for entry in self.introduced().await? {
+            let src = self.root.join(&entry.path);
+            let dst = dest.join(&entry.path);
+            if let Ok(existing) = tokio::fs::symlink_metadata(&dst).await {
+                if existing.is_dir() {
+                    tokio::fs::remove_dir_all(&dst).await
+                } else {
+                    tokio::fs::remove_file(&dst).await
+                }
+                .with_context(|| format!("remove {}", dst.display()))?;
+            }
+            let meta = match tokio::fs::symlink_metadata(&src).await {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("stat {}", src.display())),
+            };
+            if meta.is_dir() {
+                // A nested repository (status lists it as a directory).
+                warn!("{}: not copying nested repository", entry.path);
+                continue;
+            }
+            if let Some(parent) = dst.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            if meta.file_type().is_symlink() {
+                let target = tokio::fs::read_link(&src).await?;
+                tokio::fs::symlink(target, &dst).await
+            } else {
+                tokio::fs::copy(&src, &dst).await.map(drop)
+            }
+            .with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+        }
+        Ok(())
+    }
+}
+
 /// Where a branch-mode update group started: the commit, branch and dirty
 /// paths before its first member, plus the commits the group created.
 ///
@@ -414,6 +463,92 @@ impl GroupCheckpoint {
             branch,
             created: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Repository root.
+    pub(super) fn root(&self) -> &Path {
+        &self.snapshot.root
+    }
+
+    /// `HEAD` before the group.
+    pub(super) fn start(&self) -> &str {
+        &self.start
+    }
+
+    /// Recreate the group's changes in `dest`, a worktree of the same
+    /// repository checked out at the start commit: each of its commits is
+    /// cherry-picked (same message and author), then every path it dirtied
+    /// and did not commit is copied ([`DirtySnapshot::copy_introduced`]).
+    /// Paths that were dirty before the group (user work a member's commit
+    /// may have swept in from its package directory) are kept at their
+    /// start-commit state. Must be called with the git mutex held, before
+    /// [`Self::undo`].
+    pub(super) async fn replay_into(&self, dest: &Path) -> anyhow::Result<()> {
+        for commit in self.created() {
+            git_stdout(dest, &["cherry-pick", "--no-commit", &commit])
+                .await
+                .with_context(|| format!("replay commit {commit}"))?;
+            let touched = git_stdout(
+                dest,
+                &[
+                    "diff-tree",
+                    "-z",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    &commit,
+                ],
+            )
+            .await?;
+            for path in touched
+                .split('\0')
+                .filter(|p| self.snapshot.baseline.contains_key(*p))
+            {
+                self.restore_start_state(dest, path).await?;
+            }
+            git_stdout(
+                dest,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--no-verify",
+                    "--allow-empty",
+                    "-C",
+                    &commit,
+                ],
+            )
+            .await
+            .with_context(|| format!("commit replayed {commit}"))?;
+        }
+        self.snapshot.copy_introduced(dest).await
+    }
+
+    /// Put `path` back to its state in the start commit in `dest` (index
+    /// and worktree), removing it when the start commit does not have it.
+    async fn restore_start_state(&self, dest: &Path, path: &str) -> anyhow::Result<()> {
+        let object = format!("{}:{path}", self.start);
+        let in_start = git(dest, &["cat-file", "-e", &object])
+            .await?
+            .status
+            .success();
+        if in_start {
+            git_stdout(dest, &["checkout", &self.start, "--", path]).await?;
+        } else {
+            git_stdout(
+                dest,
+                &["rm", "-q", "-f", "--cached", "--ignore-unmatch", "--", path],
+            )
+            .await?;
+            match tokio::fs::remove_file(dest.join(path)).await {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("remove {path}"));
+                },
+                _ => {},
+            }
+        }
+        Ok(())
     }
 
     /// Commits the group created so far, oldest first.

@@ -1007,7 +1007,8 @@ async fn commit_direct_update(
 
 /// Perform a package update directly in the working tree (no worktree isolation).
 /// Used in commit mode where changes are committed directly to the repo.
-/// On failure, reverts every path the update dirtied (see `branch_git`).
+/// On failure, reverts every path the update dirtied (see `branch_git`),
+/// after preserving them when `preserve_failures` is set.
 pub(super) async fn perform_direct_update(
     db: &Database,
     session_id: &str,
@@ -1016,6 +1017,7 @@ pub(super) async fn perform_direct_update(
     run_passthru_tests: bool,
     git_mutex: Arc<Mutex<()>>,
     claude_fix: Option<&ClaudeFixConfig>,
+    preserve_failures: bool,
 ) -> anyhow::Result<UpdateResult> {
     let attr_path = &req.attr_path;
     let new_version = &req.new_version;
@@ -1101,17 +1103,28 @@ pub(super) async fn perform_direct_update(
             if let crate::commands::update::TestResult::Failed(ref stderr) = test_result {
                 warn!("{}: passthru.tests failed after update", attr_path);
 
-                // Revert changes under the mutex
-                {
-                    let _lock = git_mutex.lock().await;
-                    info!("{}: Reverting {}...", attr_path, pkg_dir);
-                    snapshot.revert(attr_path, &pkg_dir).await;
-                }
-
                 // Record as a test failure (distinct from build failure)
                 let error_message =
                     format!("passthru.tests failed after update to {new_version}:\n{stderr}");
                 let failure = attempt.failure(&error_message);
+
+                // Revert changes under the mutex
+                {
+                    let _lock = git_mutex.lock().await;
+                    if preserve_failures {
+                        preserve_direct_failure(
+                            &attempt,
+                            &snapshot,
+                            eval_entry_point,
+                            &failure,
+                            &error_message,
+                        )
+                        .await;
+                    }
+                    info!("{}: Reverting {}...", attr_path, pkg_dir);
+                    snapshot.revert(attr_path, &pkg_dir).await;
+                }
+
                 return Ok(attempt.record_failure(&failure, &error_message).await);
             }
 
@@ -1196,6 +1209,16 @@ pub(super) async fn perform_direct_update(
             // Revert everything this update touched under the mutex
             {
                 let _lock = git_mutex.lock().await;
+                if preserve_failures {
+                    preserve_direct_failure(
+                        &attempt,
+                        &snapshot,
+                        eval_entry_point,
+                        &failure,
+                        &error_message,
+                    )
+                    .await;
+                }
                 info!("{}: Reverting {}...", attr_path, pkg_dir);
                 snapshot.revert(attr_path, &pkg_dir).await;
             }
@@ -1203,6 +1226,33 @@ pub(super) async fn perform_direct_update(
             Ok(attempt.record_failure(&failure, &error_message).await)
         },
     }
+}
+
+/// Preserve the changes of a failed branch-mode update (`--preserve-failures`)
+/// like a worktree-mode failure's, before they are reverted. Must be called
+/// with the git mutex held. Failures are only logged.
+async fn preserve_direct_failure(
+    attempt: &Attempt<'_>,
+    snapshot: &super::branch_git::DirtySnapshot,
+    eval_entry_point: &str,
+    failure: &UpdateError,
+    error_message: &str,
+) {
+    let ctx = super::preservation::FailureContext {
+        session_id: attempt.session_id,
+        repo_name: attempt.req.repo(),
+        attr_path: &attempt.req.attr_path,
+        eval_entry_point,
+        error: failure,
+        error_log: error_message,
+    };
+    super::preservation::preserve_branch_failure(
+        super::preservation::FailureArtifacts::failed_root(),
+        attempt.db,
+        &ctx,
+        super::preservation::BranchChanges::Single(snapshot),
+    )
+    .await;
 }
 
 /// Get the file location for a package from meta.position

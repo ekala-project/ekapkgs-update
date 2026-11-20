@@ -10,8 +10,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::process::Command;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use super::branch_git::{DirtySnapshot, GroupCheckpoint};
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::types::UpdatePhase;
 
@@ -42,20 +43,24 @@ impl FailureArtifacts {
     /// (one watch session can fail the same attr in several repos; see
     /// [`repo_scoped_name`]). Lookups read `manifest.json`, not the directory
     /// name, so older `{repo_name}-{attr_path}` directories are still found.
-    pub fn base_path(
+    ///
+    /// `failed_root` is [`Self::failed_root`] outside of tests.
+    pub fn base_path_in(
+        failed_root: &Path,
         session_id: &str,
         repo_name: &str,
         attr_path: &str,
-    ) -> anyhow::Result<PathBuf> {
+    ) -> PathBuf {
+        failed_root
+            .join(session_id)
+            .join(package_dir_name(repo_name, attr_path))
+    }
+
+    /// `~/.cache/ekapkgs-update/failed`: where failures are preserved.
+    pub fn failed_root() -> anyhow::Result<PathBuf> {
         let base_dirs = directories::ProjectDirs::from("com", "ekapusta", "ekapkgs-update")
             .context("Failed to determine project directories")?;
-        let cache_dir = base_dirs.cache_dir();
-
-        let path = cache_dir
-            .join("failed")
-            .join(session_id)
-            .join(package_dir_name(repo_name, attr_path));
-        Ok(path)
+        Ok(base_dirs.cache_dir().join("failed"))
     }
 
     /// The package's artifact directory (`failed/{session_id}/[{repo}-]{attr}/`),
@@ -111,7 +116,37 @@ pub async fn preserve_failure(
     build_log: Option<String>,
     test_output: Option<String>,
 ) -> anyhow::Result<FailureArtifacts> {
-    let base_path = FailureArtifacts::base_path(session_id, repo_name, attr_path)?;
+    preserve_failure_in(
+        &FailureArtifacts::failed_root()?,
+        session_id,
+        repo_name,
+        attr_path,
+        phase,
+        repo_dir,
+        worktree_path,
+        entry_point,
+        error,
+        build_log,
+        test_output,
+    )
+    .await
+}
+
+/// [`preserve_failure`] under `failed_root` instead of the cache's `failed/`.
+async fn preserve_failure_in(
+    failed_root: &Path,
+    session_id: &str,
+    repo_name: &str,
+    attr_path: &str,
+    phase: UpdatePhase,
+    repo_dir: &Path,
+    worktree_path: &Path,
+    entry_point: &Path,
+    error: &UpdateError,
+    build_log: Option<String>,
+    test_output: Option<String>,
+) -> anyhow::Result<FailureArtifacts> {
+    let base_path = FailureArtifacts::base_path_in(failed_root, session_id, repo_name, attr_path);
     fs::create_dir_all(&base_path).await?;
 
     info!(
@@ -189,6 +224,186 @@ pub async fn preserve_failure(
     info!("{}: Successfully preserved failure artifacts", attr_path);
 
     Ok(artifacts)
+}
+
+/// The changes of a failed branch-mode update, still in the checkout.
+pub(super) enum BranchChanges<'a> {
+    /// A single update: the paths it dirtied (it commits nothing on failure).
+    Single(&'a DirtySnapshot),
+    /// A group: its member commits and the paths it dirtied.
+    Group(&'a GroupCheckpoint),
+}
+
+impl BranchChanges<'_> {
+    fn root(&self) -> &Path {
+        match self {
+            Self::Single(snapshot) => snapshot.root(),
+            Self::Group(checkpoint) => checkpoint.root(),
+        }
+    }
+
+    /// The commit the changes are made against.
+    async fn base(&self) -> anyhow::Result<String> {
+        match self {
+            // Nothing was committed: HEAD has not moved.
+            Self::Single(snapshot) => git_stdout(snapshot.root(), &["rev-parse", "HEAD"]).await,
+            Self::Group(checkpoint) => Ok(checkpoint.start().to_owned()),
+        }
+    }
+
+    /// Recreate the changes in `dest`, a worktree checked out at [`Self::base`].
+    async fn replay_into(&self, dest: &Path) -> anyhow::Result<()> {
+        match self {
+            Self::Single(snapshot) => snapshot.copy_introduced(dest).await,
+            Self::Group(checkpoint) => checkpoint.replay_into(dest).await,
+        }
+    }
+}
+
+/// What to preserve of a failed update.
+pub(super) struct FailureContext<'a> {
+    pub session_id: &'a str,
+    pub repo_name: &'a str,
+    /// Attr path the artifacts are filed under.
+    pub attr_path: &'a str,
+    /// Entry point the update evaluated (in the checkout).
+    pub eval_entry_point: &'a str,
+    pub error: &'a UpdateError,
+    pub error_log: &'a str,
+}
+
+/// Preserve a failed branch-mode update (single or group) like a
+/// worktree-mode one, before it is undone: a detached worktree is created
+/// at the commit the update started from, its changes are recreated there
+/// ([`BranchChanges::replay_into`]: a group's member commits are
+/// cherry-picked, uncommitted paths it dirtied are copied, the user's
+/// pre-existing dirty paths are left out), and that worktree is handed to
+/// [`preserve_failure`], so `export`, `apply`, `retry`, `worktrees` and
+/// `autofix` find the same artifacts as for a worktree-mode failure.
+///
+/// Must be called with the git mutex held, before the checkout is reverted.
+/// Returns the artifacts directory (linked to the failed phase in the
+/// database). Failures are logged and never returned: preservation must not
+/// keep the update from being undone or change its recorded outcome.
+pub(super) async fn preserve_branch_failure(
+    failed_root: anyhow::Result<PathBuf>,
+    db: &crate::database::Database,
+    ctx: &FailureContext<'_>,
+    changes: BranchChanges<'_>,
+) -> Option<PathBuf> {
+    let attr_path = ctx.attr_path;
+    let preserved = async {
+        let failed_root = failed_root?;
+        preserve_branch_failure_in(&failed_root, ctx, &changes).await
+    }
+    .await;
+    match preserved {
+        Ok(artifacts) => {
+            let path = artifacts.package_dir().to_path_buf();
+            if let Err(e) = db
+                .set_failed_phase_artifacts(
+                    ctx.session_id,
+                    ctx.repo_name,
+                    attr_path,
+                    &path.to_string_lossy(),
+                )
+                .await
+            {
+                warn!("{attr_path}: Failed to link failure artifacts: {e:#}");
+            }
+            Some(path)
+        },
+        Err(e) => {
+            warn!("{attr_path}: Failed to preserve failure artifacts: {e:#}");
+            None
+        },
+    }
+}
+
+async fn preserve_branch_failure_in(
+    failed_root: &Path,
+    ctx: &FailureContext<'_>,
+    changes: &BranchChanges<'_>,
+) -> anyhow::Result<FailureArtifacts> {
+    let repo_dir = changes.root();
+    let relative_entry =
+        super::updater::relative_to_repo(Path::new(ctx.eval_entry_point), repo_dir).with_context(
+            || {
+                format!(
+                    "entry point {} is outside repository {}",
+                    ctx.eval_entry_point,
+                    repo_dir.display()
+                )
+            },
+        )?;
+    let base = changes.base().await?;
+    let base_path =
+        FailureArtifacts::base_path_in(failed_root, ctx.session_id, ctx.repo_name, ctx.attr_path);
+    fs::create_dir_all(&base_path).await?;
+
+    // Next to its final place (`<artifacts>/worktree`), so the move is a rename.
+    let staging = base_path.join("worktree.staging");
+    remove_worktree(repo_dir, &staging).await;
+    let mut add = vec!["worktree", "add", "-q", "--detach"];
+    let staging_str = staging.to_string_lossy();
+    add.push(&staging_str);
+    add.push(&base);
+    git_stdout(repo_dir, &add).await?;
+
+    let test_output = match ctx.error {
+        UpdateError::TestError { output, .. } => Some(output.clone()),
+        _ => None,
+    };
+    let preserved = async {
+        changes.replay_into(&staging).await?;
+        preserve_failure_in(
+            failed_root,
+            ctx.session_id,
+            ctx.repo_name,
+            ctx.attr_path,
+            ctx.error.phase(),
+            repo_dir,
+            &staging,
+            &staging.join(&relative_entry),
+            ctx.error,
+            Some(ctx.error_log.to_owned()),
+            test_output,
+        )
+        .await
+    }
+    .await;
+    if preserved.is_err() {
+        remove_worktree(repo_dir, &staging).await;
+    }
+    preserved
+}
+
+/// Remove the worktree at `path` (if any) and forget it in `repo_dir`.
+async fn remove_worktree(repo_dir: &Path, path: &Path) {
+    if fs::symlink_metadata(path).await.is_ok() {
+        if let Err(e) = crate::git::cleanup_worktree(repo_dir, path).await {
+            debug!("Failed to remove worktree {}: {e:#}", path.display());
+        }
+    }
+    let _ = git_stdout(repo_dir, &["worktree", "prune"]).await;
+}
+
+async fn git_stdout(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Move the worktree at `src` to `dst` with `git worktree move`, falling
@@ -285,7 +500,8 @@ async fn extract_package_metadata(
     attr_path: &str,
 ) -> anyhow::Result<serde_json::Value> {
     // Try to run nix-instantiate to get package metadata
-    // This may fail if the package is in a broken state, which is fine
+    // This may fail if the package is in a broken state (or nix is not
+    // available), which is fine
     let output = Command::new("nix-instantiate")
         .args([
             "--eval",
@@ -298,7 +514,16 @@ async fn extract_package_metadata(
             ),
         ])
         .output()
-        .await?;
+        .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "error": "Failed to run nix-instantiate",
+                "stderr": e.to_string()
+            }));
+        },
+    };
 
     if output.status.success() {
         match serde_json::from_slice(&output.stdout) {
@@ -364,17 +589,20 @@ pub async fn cleanup_old_failures(older_than_days: u32) -> anyhow::Result<usize>
 
 /// List all preserved failures
 pub async fn list_preserved_failures() -> anyhow::Result<Vec<FailureArtifacts>> {
-    let base_dirs = directories::ProjectDirs::from("com", "ekapusta", "ekapkgs-update")
-        .context("Failed to determine project directories")?;
-    let failed_dir = base_dirs.cache_dir().join("failed");
+    list_preserved_failures_in(&FailureArtifacts::failed_root()?).await
+}
 
+/// [`list_preserved_failures`] under `failed_dir` instead of the cache's `failed/`.
+pub async fn list_preserved_failures_in(
+    failed_dir: &Path,
+) -> anyhow::Result<Vec<FailureArtifacts>> {
     if !failed_dir.exists() {
         return Ok(Vec::new());
     }
 
     let mut all_artifacts = Vec::new();
 
-    let mut session_entries = fs::read_dir(&failed_dir).await?;
+    let mut session_entries = fs::read_dir(failed_dir).await?;
     while let Some(session_entry) = session_entries.next_entry().await? {
         if !session_entry.file_type().await?.is_dir() {
             continue;
@@ -519,6 +747,88 @@ mod tests {
             git(&preserved, &["diff", "--name-only", "HEAD"]),
             "pkg.nix\n"
         );
+    }
+
+    /// A failed branch-mode single update is preserved in a worktree at
+    /// `HEAD` holding exactly the paths it dirtied (edited, created and
+    /// deleted), not the user's earlier uncommitted work, filed under its
+    /// repo-scoped name with a manifest the lookup finds.
+    #[tokio::test]
+    async fn branch_single_failure_is_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("pkgs/foo")).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("default.nix"), "{ }").unwrap();
+        std::fs::write(repo.join("pkgs/foo/default.nix"), "1").unwrap();
+        std::fs::write(repo.join("pkgs/foo/old.patch"), "patch").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        // The user's work, then the failed update's edits.
+        std::fs::write(repo.join("notes.txt"), "mine").unwrap();
+        std::fs::write(repo.join("default.nix"), "{ user = 1; }").unwrap();
+        let snapshot = DirtySnapshot::take(&repo).await.unwrap();
+        std::fs::write(repo.join("pkgs/foo/default.nix"), "2").unwrap();
+        std::fs::remove_file(repo.join("pkgs/foo/old.patch")).unwrap();
+        std::fs::create_dir_all(repo.join("pkgs/bar")).unwrap();
+        std::fs::write(repo.join("pkgs/bar/default.nix"), "new").unwrap();
+
+        let error = UpdateError::BuildError {
+            phase: UpdatePhase::Build,
+            exit_code: 1,
+            stderr: "boom".to_owned(),
+            suspected_cause: None,
+        };
+        let entry = repo.join("default.nix").to_string_lossy().into_owned();
+        let ctx = FailureContext {
+            session_id: "s1",
+            repo_name: "core",
+            attr_path: "foo",
+            eval_entry_point: &entry,
+            error: &error,
+            error_log: "build log",
+        };
+        let failed_root = root.join("failed");
+        let artifacts =
+            preserve_branch_failure_in(&failed_root, &ctx, &BranchChanges::Single(&snapshot))
+                .await
+                .unwrap();
+
+        let preserved = &artifacts.worktree_path;
+        assert_eq!(preserved, &failed_root.join("s1/core+foo/worktree"));
+        assert_eq!(git(preserved, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(
+                preserved,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            ),
+            " M pkgs/foo/default.nix\n D pkgs/foo/old.patch\n?? pkgs/bar/default.nix\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(preserved.join("default.nix")).unwrap(),
+            "{ }"
+        );
+        // The checkout itself is left to the caller's revert.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("pkgs/foo/default.nix")).unwrap(),
+            "2"
+        );
+
+        let list = list_preserved_failures_in(&failed_root).await.unwrap();
+        let found = find_preserved(&list, "foo", Some("core")).unwrap();
+        assert_eq!(found.worktree_path, *preserved);
+        assert_eq!(found.failed_phase, UpdatePhase::Build);
+        assert_eq!(
+            std::fs::read_to_string(found.build_log_path.as_ref().unwrap()).unwrap(),
+            "build log"
+        );
+        let diff = std::fs::read_to_string(&found.diff_path).unwrap();
+        assert!(diff.contains("pkgs/foo/default.nix"), "{diff}");
+        assert!(!diff.contains("user = 1"), "{diff}");
     }
 
     fn artifact(repo: &str, attr: &str, session: &str) -> FailureArtifacts {
