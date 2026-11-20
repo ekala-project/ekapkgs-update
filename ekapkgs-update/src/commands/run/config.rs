@@ -372,6 +372,8 @@ impl RunConfig {
             claude_fix,
             claude_fix_max_turns,
             claude_fix_timeout,
+            #[cfg(test)]
+            executor: None,
         };
         let updater_handle =
             tokio::spawn(async move { updater_config.run_service(rx, db_updater).await });
@@ -635,6 +637,27 @@ pub struct UpdaterServiceConfig {
 
     /// Timeout in seconds for each Claude fix attempt
     pub claude_fix_timeout: u64,
+
+    /// Runs every job in place of the update workflow (tests only).
+    #[cfg(test)]
+    pub(crate) executor: Option<JobExecutor>,
+}
+
+/// Test seam of [`UpdaterServiceConfig::run_service`]: performs a job (as a
+/// task of the service) instead of the update workflow, so tests can hold an
+/// update in flight.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct JobExecutor(pub(crate) Arc<dyn Fn(UpdateJob) -> JobFuture + Send + Sync>);
+
+#[cfg(test)]
+pub(crate) type JobFuture = std::pin::Pin<Box<dyn std::future::Future<Output = TaskOutput> + Send>>;
+
+#[cfg(test)]
+impl std::fmt::Debug for JobExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JobExecutor")
+    }
 }
 
 /// Outcome counts of an updater service run.
@@ -703,7 +726,7 @@ fn dry_run_outputs(job: &UpdateJob) -> TaskOutput {
 }
 
 /// Results of one job: one `(result, attr_path)` per attempted package.
-type TaskOutput = Vec<(anyhow::Result<super::types::UpdateResult>, String)>;
+pub(crate) type TaskOutput = Vec<(anyhow::Result<super::types::UpdateResult>, String)>;
 
 /// Account for a finished update task: local stats, live session counter
 /// and logging.
@@ -770,6 +793,8 @@ impl UpdaterServiceConfig {
             claude_fix,
             claude_fix_max_turns,
             claude_fix_timeout,
+            #[cfg(test)]
+            executor,
         } = self;
 
         // Build Claude fix config if enabled
@@ -844,11 +869,17 @@ impl UpdaterServiceConfig {
                     let is_branch_mode = commit_strategy == CommitStrategy::Branch;
                     let git_mutex_clone = Arc::clone(&git_mutex);
                     let attempts = job.attempts();
+                    #[cfg(test)]
+                    let executor = executor.clone();
                     let handle = join_set.spawn(async move {
                         // Dry-run reports every update without performing
                         // it, in branch and worktree mode alike.
                         if dry_run {
                             return dry_run_outputs(&job);
+                        }
+                        #[cfg(test)]
+                        if let Some(executor) = executor {
+                            return (executor.0)(job).await;
                         }
                         let req = match job {
                             UpdateJob::Group(group) => {

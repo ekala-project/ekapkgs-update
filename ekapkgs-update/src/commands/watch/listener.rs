@@ -1636,6 +1636,7 @@ mod tests {
             claude_fix: false,
             claude_fix_max_turns: 0,
             claude_fix_timeout: 0,
+            executor: None,
         }
     }
 
@@ -1814,5 +1815,119 @@ mod tests {
             .unwrap();
         assert_eq!(session.status, SessionStatus::Completed);
         assert_eq!(session_counts(&db).await, [(2, 2)]);
+    }
+
+    /// A shutdown signal while the cycle waits for its updates (group jobs,
+    /// sent once the sweep is done) aborts the update in flight and the
+    /// group queued behind it, cancels the session and interrupts the cycle.
+    #[tokio::test]
+    async fn shutdown_while_waiting_for_updates_aborts_them() {
+        use crate::commands::run::JobExecutor;
+        use crate::database::PackageInfo;
+        use tokio::sync::oneshot;
+
+        let db = setup_db().await;
+        // Groups `g` (g1, g2) and `h` (h1), every member outdated.
+        for attr in ["g1", "g2", "h1"] {
+            db.upsert_package_info("r", attr, "1.0", &PackageInfo::default())
+                .await
+                .unwrap();
+            db.record_update_available("r", attr, "1.0", "1.1")
+                .await
+                .unwrap();
+        }
+        let parents: BTreeMap<String, String> = [("g1", "g"), ("g2", "g"), ("h1", "h")]
+            .into_iter()
+            .map(|(c, p)| (c.to_owned(), p.to_owned()))
+            .collect();
+        db.replace_groups("r", &parents, &crate::groups::resolve_roots(&parents))
+            .await
+            .unwrap();
+
+        // Each job reports that it started and waits for its gate; past it,
+        // it would record its members as updated.
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let executor_db = db.clone();
+        let mut config = dry_run_config();
+        config.dry_run = false;
+        config.executor = Some(JobExecutor(Arc::new(move |job: UpdateJob| {
+            let started_tx = started_tx.clone();
+            let db = executor_db.clone();
+            Box::pin(async move {
+                let (gate_tx, gate) = oneshot::channel::<()>();
+                started_tx.send((job.label(), gate_tx)).unwrap();
+                if gate.await.is_ok() {
+                    for req in job.requests() {
+                        db.record_successful_update(
+                            "r",
+                            &req.attr_path,
+                            &req.current_version,
+                            &req.new_version,
+                            None,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                Vec::new()
+            })
+        })));
+
+        let repos = vec![test_repo()];
+        let (stop_tx, stop) = watch::channel(false);
+        let mut reported = DryRunReported::new();
+        let session_config = serde_json::json!({});
+        let due = sources(&["g1", "g2", "h1"]);
+        let cycle = run_poll_cycle(
+            &due,
+            MIN,
+            dispatching_poller(&stop, ""),
+            &repos,
+            &db,
+            &config,
+            &session_config,
+            &mut reported,
+            &stop,
+        );
+        let signal = async {
+            let (label, gate) = tokio::time::timeout(Duration::from_secs(10), started.recv())
+                .await
+                .expect("a group job started")
+                .expect("executor alive");
+            stop_tx.send(true).unwrap();
+            (label, gate)
+        };
+        let ((), (label, gate)) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(cycle, signal)
+        })
+        .await
+        .expect("the cycle stops on the signal");
+
+        // Only the first group started (one update at a time); it was
+        // aborted, so its gate is gone, and the second never started.
+        assert_eq!(label, "group g");
+        assert!(gate.send(()).is_err(), "the update in flight was aborted");
+        assert!(started.try_recv().is_err(), "no other job started");
+
+        let row = only_cycle(&db).await;
+        assert_eq!(row.status, "failed");
+        let session_id = row.session_id.expect("cycle links its session");
+        assert_eq!(
+            row.error.as_deref(),
+            Some(
+                format!("interrupted by a shutdown signal (session {session_id} cancelled)")
+                    .as_str()
+            ),
+        );
+        assert_eq!(row.dispatched, 3);
+        let session = db.get_session(&session_id).await.unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(session_counts(&db).await, [(2, 0)]);
+        for attr in ["g1", "g2", "h1"] {
+            let record = db.get_update_record("r", attr).await.unwrap().unwrap();
+            assert_eq!(record.status, UpdateStatus::Outdated, "{attr}");
+            assert_eq!(record.proposed_version, None, "{attr}");
+        }
     }
 }

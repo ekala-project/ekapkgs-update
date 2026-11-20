@@ -333,6 +333,8 @@ impl WatchConfig {
             claude_fix: self.claude_fix,
             claude_fix_max_turns: self.claude_fix_max_turns,
             claude_fix_timeout: self.claude_fix_timeout,
+            #[cfg(test)]
+            executor: None,
         };
 
         let repos = Arc::new(resolved_repos);
