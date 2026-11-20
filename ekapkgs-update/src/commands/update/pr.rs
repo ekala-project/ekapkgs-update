@@ -93,6 +93,25 @@ pub async fn create_pr_for_update(
     let github_token = crate::github::auth::token_for(&pr_config.owner, &pr_config.repo).await?;
     let git_env = crate::git::github_git_env(None, fork).await?;
 
+    // Our open PR proposing this version (or a newer one) from any branch
+    // already covers the update; the changes stay in the working tree.
+    let existing = crate::github::existing_prs::scan(
+        &pr_config.owner,
+        &pr_config.repo,
+        attr_path,
+        new_version,
+        &github_token,
+    )
+    .await;
+    if let crate::github::existing_prs::ExistingPrs::Covered(pr) = &existing {
+        info!(
+            "Open PR #{} ({}) already covers {} {}; not creating another",
+            pr.number, pr.title, attr_path, new_version
+        );
+        println!("Pull request already open: {}", pr.html_url);
+        return Ok(());
+    }
+
     info!("Creating pull request for {}", attr_path);
 
     // Perform directory diff if requested and eval_entry_point is available
@@ -183,6 +202,7 @@ pub async fn create_pr_for_update(
         new_version,
         components,
         diff_markdown.as_deref(),
+        &existing.superseded_numbers(),
     );
 
     debug!("Creating pull request");
@@ -231,6 +251,7 @@ fn create_pr_body(
     new_version: &str,
     components: &[ComponentUpdate],
     diff_markdown: Option<&str>,
+    superseded: &[i64],
 ) -> String {
     let mut pr_body = format!(
         "## Update {}\n\nUpdates from version {} to {}.",
@@ -260,6 +281,7 @@ fn create_pr_body(
         pr_body.push_str(diff);
     }
 
+    pr_body.push_str(&crate::github::existing_prs::supersedes_section(superseded));
     pr_body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
     pr_body

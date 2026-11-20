@@ -144,6 +144,9 @@ pub struct ConfigFile {
     /// GitHub App credentials (PRs as the app's bot, webhooks).
     pub github_app: GithubAppConfig,
 
+    /// GitHub settings.
+    pub github: GithubConfig,
+
     /// Repositories to watch for updates. When non-empty, each repo carries
     /// its own entry point and PR target. Used by the `watch` command.
     #[serde(default)]
@@ -215,6 +218,17 @@ pub struct GithubAppConfig {
     /// File holding the webhook secret set in the app's settings (needed
     /// for `watch --webhook-listen`).
     pub webhook_secret_file: Option<String>,
+}
+
+/// GitHub settings.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// GitHub login whose open PRs count as ours when scanning a repository
+    /// for an existing update of a package before opening a PR (default for
+    /// `--pr-author`). When unset: the bot of the
+    /// configured GitHub App (`<slug>[bot]`), else the login of `GITHUB_TOKEN`.
+    pub pr_author: Option<String>,
 }
 
 /// Watch (passive/event-driven) mode settings.
