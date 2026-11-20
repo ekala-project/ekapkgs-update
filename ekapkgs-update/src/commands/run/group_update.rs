@@ -1505,6 +1505,93 @@ mod tests {
         );
     }
 
+    /// Derivations for [`commit_order_follows_the_derivation_graph`]: `app`
+    /// depends on `mid` (and through it on `zlib`), `mid` on `zlib`; `beta`
+    /// is unrelated and `broken` does not evaluate. Nothing is ever built.
+    const ORDER_EXPR: &str = r#"
+let
+  mk = name: deps: derivation {
+    inherit name;
+    system = builtins.currentSystem;
+    builder = "/bin/sh";
+    args = [ "-c" "echo ${toString deps} > $out" ];
+  };
+in
+rec {
+  zlib = mk "zlib" [ ];
+  mid = mk "mid" [ zlib ];
+  app = mk "app" [ mid ];
+  beta = mk "beta" [ ];
+  broken = throw "broken does not evaluate";
+}
+"#;
+
+    /// Whether `attr` of `entry` can be instantiated and its closure
+    /// queried here (both steps of [`commit_order`]). In the nix build
+    /// sandbox (no daemon, read-only store) or without nix on `PATH` it
+    /// cannot, and the test is skipped.
+    async fn nix_store_usable(entry: &str, attr: &str) -> bool {
+        let drv = match instantiate(entry, attr).await {
+            Ok(drv) if drv.ends_with(".drv") => drv,
+            Ok(drv) => {
+                eprintln!("skipping: nix-instantiate printed no derivation: {drv:?}");
+                return false;
+            },
+            Err(e) => {
+                eprintln!("skipping: nix-instantiate is not usable here: {e:#}");
+                return false;
+            },
+        };
+        match Command::new("nix-store")
+            .args(["--query", "--requisites", &drv])
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => {
+                eprintln!(
+                    "skipping: nix-store --query is not usable here: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                false
+            },
+            Err(e) => {
+                eprintln!("skipping: nix-store is not usable here: {e}");
+                false
+            },
+        }
+    }
+
+    /// The real nix steps: dependencies (direct or transitive) are committed
+    /// before their dependents; unrelated members and one that does not
+    /// evaluate fall back to alphabetical order.
+    #[tokio::test]
+    async fn commit_order_follows_the_derivation_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("default.nix");
+        std::fs::write(&entry, ORDER_EXPR).unwrap();
+        let entry = entry.to_string_lossy().into_owned();
+        if !nix_store_usable(&entry, "mid").await {
+            return;
+        }
+
+        // (members in any order, expected commit order)
+        let cases: [(&[&str], &[&str]); 4] = [
+            (
+                &["app", "beta", "broken", "mid", "zlib"],
+                &["beta", "broken", "zlib", "mid", "app"],
+            ),
+            (&["zlib", "app"], &["zlib", "app"]),
+            (&["app", "mid"], &["mid", "app"]),
+            (&["broken", "beta", "app"], &["app", "beta", "broken"]),
+        ];
+        for (members, expected) in cases {
+            let members: Vec<String> = members.iter().map(|m| (*m).to_owned()).collect();
+            let order = commit_order(&entry, &members).await;
+            assert_eq!(order, expected, "{members:?}");
+        }
+    }
+
     // ── Branch-mode groups, with the nix steps faked ───────────────
 
     /// Stands in for nix: members are "updated" by writing their new version
