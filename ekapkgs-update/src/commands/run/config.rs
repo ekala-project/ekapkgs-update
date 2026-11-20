@@ -919,6 +919,7 @@ impl UpdaterServiceConfig {
                                 run_passthru_tests,
                                 Arc::clone(&git_mutex_clone),
                                 claude_fix_clone.as_deref(),
+                                preserve_failures,
                             )
                             .await
                         } else {
