@@ -35,7 +35,7 @@ use crate::commands::pr_enhancements::PrEnhancementsConfig;
 use crate::commands::update::errors::UpdateError;
 use crate::commands::update::instrumentation::PhaseTracker;
 use crate::commands::update::types::UpdatePhase;
-use crate::commands::update::{AlreadyAtVersion, TestResult, VersionConfig};
+use crate::commands::update::{AlreadyAtVersion, ComponentUpdate, TestResult, VersionConfig};
 use crate::database::Database;
 use crate::git::{PrConfig, cleanup_worktree, create_worktree};
 use crate::nix::normalize_entry_point;
@@ -72,6 +72,16 @@ struct GroupFailure {
     attr_path: String,
     error: UpdateError,
     error_log: String,
+}
+
+impl GroupFailure {
+    fn of(attr_path: &str, error: UpdateError, error_log: String) -> Box<Self> {
+        Box::new(Self {
+            attr_path: attr_path.to_owned(),
+            error,
+            error_log,
+        })
+    }
 }
 
 /// Update every member of `group` in one worktree and propose it as one PR.
@@ -125,7 +135,7 @@ pub(super) async fn perform_group_update(
         committer: Committer::Worktree,
     };
     let GroupRun { updated, outcome } =
-        run_group(opts, group, &attempts, &mut results, &workspace).await;
+        run_group(&NixSteps, opts, group, &attempts, &mut results, &workspace).await;
 
     // Verified as a whole: every member and the root.
     let (test_result, fixed_by_claude) = match outcome {
@@ -324,6 +334,7 @@ struct GroupRun {
 /// then verify the group. Members already at their target version get their
 /// result in `results`; the rest are left to the caller.
 async fn run_group(
+    steps: &impl GroupSteps,
     opts: &GroupUpdateOptions<'_>,
     group: &GroupRequest,
     attempts: &[Attempt<'_>],
@@ -331,7 +342,7 @@ async fn run_group(
     workspace: &GroupWorkspace<'_>,
 ) -> GroupRun {
     let attrs: Vec<String> = group.members.iter().map(|m| m.attr_path.clone()).collect();
-    let order = commit_order(workspace.entry, &attrs).await;
+    let order = steps.commit_order(workspace.entry, &attrs).await;
     info!(
         "group {}: updating {} member(s) in order: {}",
         group.root,
@@ -343,12 +354,14 @@ async fn run_group(
     for attr in &order {
         let index = attrs.iter().position(|a| a == attr).expect("member");
         let attempt = &attempts[index];
-        match update_member(opts, attempt, workspace).await {
-            Ok(MemberUpdate::Updated(removed_patches)) => updated.push(Updated {
+        match update_member(steps, opts, attempt, workspace).await {
+            Ok(MemberEdit::Updated {
+                removed_patches, ..
+            }) => updated.push(Updated {
                 index,
                 removed_patches,
             }),
-            Ok(MemberUpdate::AlreadyAtVersion(already)) => {
+            Ok(MemberEdit::AlreadyAtVersion(already)) => {
                 results[index] = Some(attempt.already_at_version(&already).await);
             },
             Err(failure) => {
@@ -373,7 +386,8 @@ async fn run_group(
         group.lead().repo(),
         &group.root,
     );
-    let outcome = verify_group(opts, group, &root_tracker, workspace)
+    let outcome = steps
+        .verify(opts, group, &root_tracker, workspace)
         .await
         .map(Some);
     GroupRun { updated, outcome }
@@ -451,6 +465,16 @@ pub(super) async fn perform_branch_group_update(
     group: &GroupRequest,
     git_mutex: &Mutex<()>,
 ) -> Vec<MemberOutput> {
+    branch_group_update(&NixSteps, opts, group, git_mutex).await
+}
+
+/// [`perform_branch_group_update`] with its nix steps passed in.
+async fn branch_group_update(
+    steps: &impl GroupSteps,
+    opts: &GroupUpdateOptions<'_>,
+    group: &GroupRequest,
+    git_mutex: &Mutex<()>,
+) -> Vec<MemberOutput> {
     if opts.dry_run {
         return dry_run_outputs(group);
     }
@@ -491,7 +515,7 @@ pub(super) async fn perform_branch_group_update(
         },
     };
     let GroupRun { updated, outcome } =
-        run_group(opts, group, &attempts, &mut results, &workspace).await;
+        run_group(steps, opts, group, &attempts, &mut results, &workspace).await;
 
     let failure = match outcome {
         Ok(None) => return collect(group, results),
@@ -640,123 +664,194 @@ async fn preserve(
     }
 }
 
-enum MemberUpdate {
-    Updated(Vec<String>),
+/// A member's update in the workspace, before it is committed.
+enum MemberEdit {
+    Updated {
+        removed_patches: Vec<String>,
+        components: Vec<ComponentUpdate>,
+        /// The member's package directory (staged with its commit).
+        pkg_dir: Option<PathBuf>,
+    },
     AlreadyAtVersion(AlreadyAtVersion),
 }
 
-/// Update one member in the group worktree and commit it on its own. A
-/// Claude fix of the member's own build failure is part of its commit.
+/// The steps of a group update that need nix: the commit order, a member's
+/// update and the group's verification. [`NixSteps`] runs them; tests of the
+/// orchestration around them (commits, undo, recording) substitute their own.
+trait GroupSteps {
+    /// The order members are updated and committed in.
+    async fn commit_order(&self, entry: &str, members: &[String]) -> Vec<String>;
+
+    /// Update one member in the workspace (not committed yet).
+    async fn edit_member(
+        &self,
+        opts: &GroupUpdateOptions<'_>,
+        attempt: &Attempt<'_>,
+        workspace: &GroupWorkspace<'_>,
+    ) -> Result<MemberEdit, Box<GroupFailure>>;
+
+    /// Build (and test) the whole group once every member is committed.
+    async fn verify(
+        &self,
+        opts: &GroupUpdateOptions<'_>,
+        group: &GroupRequest,
+        tracker: &PhaseTracker,
+        workspace: &GroupWorkspace<'_>,
+    ) -> Result<Verified, Box<GroupFailure>>;
+}
+
+/// The real steps: nix evaluation, the update workflow and `nix-build`.
+struct NixSteps;
+
+impl GroupSteps for NixSteps {
+    async fn commit_order(&self, entry: &str, members: &[String]) -> Vec<String> {
+        commit_order(entry, members).await
+    }
+
+    /// Run the update workflow for one member in the workspace. A Claude
+    /// fix of the member's own build failure is part of its edit.
+    async fn edit_member(
+        &self,
+        opts: &GroupUpdateOptions<'_>,
+        attempt: &Attempt<'_>,
+        workspace: &GroupWorkspace<'_>,
+    ) -> Result<MemberEdit, Box<GroupFailure>> {
+        let (worktree_path, worktree_entry) = (workspace.path, workspace.entry);
+        let req = attempt.req;
+        let attr_path = &req.attr_path;
+        let fail = |error, error_log| GroupFailure::of(attr_path, error, error_log);
+        let infra = |phase: UpdatePhase, component: &str, details: String| {
+            UpdateError::InfrastructureError {
+                phase,
+                component: component.to_owned(),
+                details,
+            }
+        };
+
+        // Located in the worktree: earlier members' edits are already there.
+        let file_location = match get_file_location(worktree_entry, attr_path).await {
+            Ok(loc) => loc,
+            Err(e) => {
+                let error = infra(
+                    UpdatePhase::MetadataExtraction,
+                    "meta.position",
+                    format!("{e:#}"),
+                );
+                attempt.tracker.record_failure(error.clone()).await;
+                return Err(fail(error, format!("{e:#}")));
+            },
+        };
+        let Some(relative_file) = relative_to_repo(Path::new(&file_location), worktree_path) else {
+            let details = format!("package file {file_location} is outside the repository");
+            return Err(fail(
+                infra(
+                    UpdatePhase::MetadataExtraction,
+                    "meta.position",
+                    details.clone(),
+                ),
+                details,
+            ));
+        };
+        let file_path = worktree_path.join(&relative_file);
+
+        let version_config = VersionConfig::new(SemverStrategy::Latest)
+            .with_explicit_version(Some(req.new_version.clone()));
+        // passthru.tests run once for the whole group, after every member.
+        let result = attempt
+            .update_config(false)
+            .update_from_file_path(
+                worktree_entry.to_owned(),
+                attr_path.clone(),
+                file_path.to_string_lossy().to_string(),
+                version_config,
+            )
+            .await;
+
+        let (removed_patches, components) = match result {
+            Ok(outcome) => (outcome.removed_patches, outcome.components),
+            Err(e) => {
+                if let Some(already) = e.downcast_ref::<AlreadyAtVersion>() {
+                    return Ok(MemberEdit::AlreadyAtVersion(already.clone()));
+                }
+                let message = format!("{e:#}");
+                warn!("{}: Update failed: {}", attr_path, message);
+                let error = attempt.failure(&message);
+                let fixed = match opts.claude_fix {
+                    Some(cfg) if super::claude_fix::should_attempt_claude_fix(&message) => {
+                        let content = tokio::fs::read_to_string(&file_path)
+                            .await
+                            .unwrap_or_default();
+                        let handle = attempt.tracker.start(UpdatePhase::AgentFix).await;
+                        let fix = super::claude_fix::attempt_claude_fix(
+                            worktree_path,
+                            worktree_entry,
+                            attr_path,
+                            &message,
+                            Some(&message),
+                            &relative_file.to_string_lossy(),
+                            &content,
+                            &req.current_version,
+                            &req.new_version,
+                            cfg,
+                        )
+                        .await;
+                        record_agent_fix(handle, &fix).await;
+                        log_unfixed(attr_path, &fix);
+                        matches!(fix, ClaudeFixResult::Fixed)
+                    },
+                    _ => false,
+                };
+                if !fixed {
+                    return Err(fail(error, message));
+                }
+                info!("{}: Claude Code fixed the build", attr_path);
+                (Vec::new(), Vec::new())
+            },
+        };
+
+        Ok(MemberEdit::Updated {
+            removed_patches,
+            components,
+            pkg_dir: file_path.parent().map(Path::to_path_buf),
+        })
+    }
+
+    async fn verify(
+        &self,
+        opts: &GroupUpdateOptions<'_>,
+        group: &GroupRequest,
+        tracker: &PhaseTracker,
+        workspace: &GroupWorkspace<'_>,
+    ) -> Result<Verified, Box<GroupFailure>> {
+        verify_group(opts, group, tracker, workspace).await
+    }
+}
+
+/// Update one member and commit it on its own.
 async fn update_member(
+    steps: &impl GroupSteps,
     opts: &GroupUpdateOptions<'_>,
     attempt: &Attempt<'_>,
     workspace: &GroupWorkspace<'_>,
-) -> Result<MemberUpdate, Box<GroupFailure>> {
-    let (worktree_path, worktree_entry) = (workspace.path, workspace.entry);
+) -> Result<MemberEdit, Box<GroupFailure>> {
+    let edit = steps.edit_member(opts, attempt, workspace).await?;
+    let MemberEdit::Updated {
+        components,
+        pkg_dir,
+        ..
+    } = &edit
+    else {
+        return Ok(edit);
+    };
     let req = attempt.req;
     let attr_path = &req.attr_path;
-    let fail = |error: UpdateError, error_log: String| {
-        Box::new(GroupFailure {
-            attr_path: attr_path.clone(),
-            error,
-            error_log,
-        })
-    };
-    let infra =
-        |phase: UpdatePhase, component: &str, details: String| UpdateError::InfrastructureError {
-            phase,
-            component: component.to_owned(),
-            details,
-        };
-
-    // Located in the worktree: earlier members' edits are already there.
-    let file_location = match get_file_location(worktree_entry, attr_path).await {
-        Ok(loc) => loc,
-        Err(e) => {
-            let error = infra(
-                UpdatePhase::MetadataExtraction,
-                "meta.position",
-                format!("{e:#}"),
-            );
-            attempt.tracker.record_failure(error.clone()).await;
-            return Err(fail(error, format!("{e:#}")));
-        },
-    };
-    let Some(relative_file) = relative_to_repo(Path::new(&file_location), worktree_path) else {
-        let details = format!("package file {file_location} is outside the repository");
-        return Err(fail(
-            infra(
-                UpdatePhase::MetadataExtraction,
-                "meta.position",
-                details.clone(),
-            ),
-            details,
-        ));
-    };
-    let file_path = worktree_path.join(&relative_file);
-
-    let version_config = VersionConfig::new(SemverStrategy::Latest)
-        .with_explicit_version(Some(req.new_version.clone()));
-    // passthru.tests run once for the whole group, after every member.
-    let result = attempt
-        .update_config(false)
-        .update_from_file_path(
-            worktree_entry.to_owned(),
-            attr_path.clone(),
-            file_path.to_string_lossy().to_string(),
-            version_config,
-        )
-        .await;
-
-    let (removed_patches, components) = match result {
-        Ok(outcome) => (outcome.removed_patches, outcome.components),
-        Err(e) => {
-            if let Some(already) = e.downcast_ref::<AlreadyAtVersion>() {
-                return Ok(MemberUpdate::AlreadyAtVersion(already.clone()));
-            }
-            let message = format!("{e:#}");
-            warn!("{}: Update failed: {}", attr_path, message);
-            let error = attempt.failure(&message);
-            let fixed = match opts.claude_fix {
-                Some(cfg) if super::claude_fix::should_attempt_claude_fix(&message) => {
-                    let content = tokio::fs::read_to_string(&file_path)
-                        .await
-                        .unwrap_or_default();
-                    let handle = attempt.tracker.start(UpdatePhase::AgentFix).await;
-                    let fix = super::claude_fix::attempt_claude_fix(
-                        worktree_path,
-                        worktree_entry,
-                        attr_path,
-                        &message,
-                        Some(&message),
-                        &relative_file.to_string_lossy(),
-                        &content,
-                        &req.current_version,
-                        &req.new_version,
-                        cfg,
-                    )
-                    .await;
-                    record_agent_fix(handle, &fix).await;
-                    log_unfixed(attr_path, &fix);
-                    matches!(fix, ClaudeFixResult::Fixed)
-                },
-                _ => false,
-            };
-            if !fixed {
-                return Err(fail(error, message));
-            }
-            info!("{}: Claude Code fixed the build", attr_path);
-            (Vec::new(), Vec::new())
-        },
-    };
-
     let title = crate::git::update_title(attr_path, &req.current_version, &req.new_version);
     let message = format!(
         "{title}{}",
-        crate::commands::update::components_commit_lines(&components)
+        crate::commands::update::components_commit_lines(components)
     );
     match workspace
-        .commit(attr_path, file_path.parent(), &message)
+        .commit(attr_path, pkg_dir.as_deref(), &message)
         .await
     {
         Ok(true) => {},
@@ -768,10 +863,10 @@ async fn update_member(
                 details: format!("{e:#}"),
             };
             attempt.tracker.record_failure(error.clone()).await;
-            return Err(fail(error, format!("{e:#}")));
+            return Err(GroupFailure::of(attr_path, error, format!("{e:#}")));
         },
     }
-    Ok(MemberUpdate::Updated(removed_patches))
+    Ok(edit)
 }
 
 /// Outcome of a successful group verification.
@@ -1408,5 +1503,318 @@ mod tests {
                 .iter()
                 .all(|(r, _)| matches!(r, Ok(UpdateResult::DryRun { .. })))
         );
+    }
+
+    // ── Branch-mode groups, with the nix steps faked ───────────────
+
+    /// Stands in for nix: members are "updated" by writing their new version
+    /// into `pkgs/<attr>/default.nix`, in the order given.
+    #[derive(Default)]
+    struct FakeSteps {
+        order: Vec<&'static str>,
+        /// Member whose update fails (after editing its file).
+        failing_member: Option<&'static str>,
+        /// Verified attr whose build fails.
+        failing_build: Option<&'static str>,
+        /// Member already at its target version.
+        already: Option<&'static str>,
+    }
+
+    fn build_error(stderr: &str) -> UpdateError {
+        UpdateError::BuildError {
+            phase: UpdatePhase::Build,
+            exit_code: 1,
+            stderr: stderr.to_owned(),
+            suspected_cause: None,
+        }
+    }
+
+    impl GroupSteps for FakeSteps {
+        async fn commit_order(&self, _entry: &str, _members: &[String]) -> Vec<String> {
+            self.order.iter().map(|a| (*a).to_owned()).collect()
+        }
+
+        async fn edit_member(
+            &self,
+            _opts: &GroupUpdateOptions<'_>,
+            attempt: &Attempt<'_>,
+            workspace: &GroupWorkspace<'_>,
+        ) -> Result<MemberEdit, Box<GroupFailure>> {
+            let req = attempt.req;
+            if self.already == Some(req.attr_path.as_str()) {
+                return Ok(MemberEdit::AlreadyAtVersion(AlreadyAtVersion {
+                    current: req.new_version.clone(),
+                    target: req.new_version.clone(),
+                }));
+            }
+            let dir = workspace.path.join("pkgs").join(&req.attr_path);
+            std::fs::write(dir.join("default.nix"), &req.new_version).unwrap();
+            if self.failing_member == Some(req.attr_path.as_str()) {
+                let log = format!("{} does not build", req.attr_path);
+                return Err(GroupFailure::of(&req.attr_path, build_error(&log), log));
+            }
+            Ok(MemberEdit::Updated {
+                removed_patches: Vec::new(),
+                components: Vec::new(),
+                pkg_dir: Some(dir),
+            })
+        }
+
+        async fn verify(
+            &self,
+            _opts: &GroupUpdateOptions<'_>,
+            _group: &GroupRequest,
+            _tracker: &PhaseTracker,
+            _workspace: &GroupWorkspace<'_>,
+        ) -> Result<Verified, Box<GroupFailure>> {
+            if let Some(attr) = self.failing_build {
+                let log = format!("{attr} does not build with the group");
+                return Err(GroupFailure::of(attr, build_error(&log), log));
+            }
+            Ok(Verified {
+                tests: TestResult::NotRequested,
+                fixed_by_claude: false,
+                failed_test: None,
+            })
+        }
+    }
+
+    fn git_out(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_owned()
+    }
+
+    /// A repository with `pkgs/{a,b,c}` at version 1 and uncommitted user
+    /// work (`notes.txt`).
+    fn group_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        git_out(&root, &["init", "-q"]);
+        git_out(&root, &["config", "user.email", "test@example.com"]);
+        git_out(&root, &["config", "user.name", "test"]);
+        std::fs::write(root.join("default.nix"), "{ }").unwrap();
+        for attr in ["a", "b", "c"] {
+            std::fs::create_dir_all(root.join("pkgs").join(attr)).unwrap();
+            std::fs::write(root.join("pkgs").join(attr).join("default.nix"), "1").unwrap();
+        }
+        git_out(&root, &["add", "-A"]);
+        git_out(&root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("notes.txt"), "mine").unwrap();
+        (dir, root)
+    }
+
+    struct BranchGroupRun {
+        outputs: Vec<MemberOutput>,
+        /// `(subject, files)` of the commits the group left, oldest first.
+        commits: Vec<(String, String)>,
+        status: String,
+        files: Vec<String>,
+        db: Database,
+    }
+
+    /// Run a group of `a` and `b` (root `b`, both `1 -> 2`) on the current
+    /// branch with `steps`.
+    async fn run_branch_group(steps: FakeSteps) -> BranchGroupRun {
+        let (_dir, root) = group_repo();
+        let start = git_out(&root, &["rev-parse", "HEAD"]);
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let db = Database::from(pool);
+        let session = db
+            .create_session(crate::database::SessionMode::Run, None)
+            .await
+            .unwrap();
+        let entry = root.join("default.nix").to_string_lossy().into_owned();
+        let pr_enhancements = PrEnhancementsConfig::default();
+        let opts = GroupUpdateOptions {
+            db: &db,
+            session_id: &session,
+            eval_entry_point: &entry,
+            pr_config: None,
+            fork: "origin",
+            run_passthru_tests: false,
+            dry_run: false,
+            pr_enhancements: &pr_enhancements,
+            preserve_failures: false,
+            claude_fix: None,
+        };
+        let group = GroupRequest {
+            root: "b".to_owned(),
+            members: vec![req("a", "1", "2"), req("b", "1", "2")],
+            verify: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let outputs = branch_group_update(&steps, &opts, &group, &Mutex::new(())).await;
+
+        let log = git_out(
+            &root,
+            &[
+                "log",
+                "--reverse",
+                "--format=%x00%s",
+                "--name-only",
+                &format!("{start}.."),
+            ],
+        );
+        let commits = log
+            .split('\0')
+            .filter(|c| !c.is_empty())
+            .map(|c| {
+                let (subject, files) = c.split_once('\n').unwrap_or((c, ""));
+                (subject.to_owned(), files.trim().to_owned())
+            })
+            .collect();
+        let status = git_out(&root, &["status", "--porcelain=v1"]);
+        let files = ["a", "b", "c"]
+            .iter()
+            .map(|a| {
+                std::fs::read_to_string(root.join("pkgs").join(a).join("default.nix")).unwrap()
+            })
+            .collect();
+        BranchGroupRun {
+            outputs,
+            commits,
+            status,
+            files,
+            db,
+        }
+    }
+
+    /// `(error_type, error_log)` of a member's failure log.
+    async fn failure_log(db: &Database, attr: &str) -> (String, String) {
+        sqlx::query_as("SELECT error_type, error_log FROM update_logs WHERE attr_path = ?")
+            .bind(attr)
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
+    /// Members are committed one by one in dependency order (not member
+    /// order), touching only their own files, and recorded as proposed.
+    #[tokio::test]
+    async fn branch_group_commits_members_in_order() {
+        use crate::database::UpdateStatus;
+
+        let run = run_branch_group(FakeSteps {
+            order: vec!["b", "a"],
+            ..FakeSteps::default()
+        })
+        .await;
+
+        assert_eq!(
+            run.commits,
+            [
+                ("b: 1 -> 2".to_owned(), "pkgs/b/default.nix".to_owned()),
+                ("a: 1 -> 2".to_owned(), "pkgs/a/default.nix".to_owned()),
+            ]
+        );
+        assert_eq!(run.status, "?? notes.txt");
+        assert_eq!(run.files, ["2", "2", "1"]);
+        assert_eq!(
+            run.outputs
+                .iter()
+                .map(|(_, a)| a.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        for (result, attr) in &run.outputs {
+            assert!(matches!(result, Ok(UpdateResult::Updated { .. })), "{attr}");
+            let record = run.db.get_update_record("", attr).await.unwrap().unwrap();
+            assert_eq!(record.status, UpdateStatus::Proposed, "{attr}");
+            assert_eq!(record.proposed_version.as_deref(), Some("2"), "{attr}");
+        }
+    }
+
+    /// A member already at its target is recorded as observed and not
+    /// committed; the rest of the group goes ahead.
+    #[tokio::test]
+    async fn branch_group_skips_member_already_at_version() {
+        use crate::database::UpdateStatus;
+
+        let run = run_branch_group(FakeSteps {
+            order: vec!["a", "b"],
+            already: Some("a"),
+            ..FakeSteps::default()
+        })
+        .await;
+
+        assert_eq!(
+            run.commits,
+            [("b: 1 -> 2".to_owned(), "pkgs/b/default.nix".to_owned())]
+        );
+        let a = run.db.get_update_record("", "a").await.unwrap().unwrap();
+        assert_eq!(a.status, UpdateStatus::UpToDate);
+        let b = run.db.get_update_record("", "b").await.unwrap().unwrap();
+        assert_eq!(b.status, UpdateStatus::Proposed);
+    }
+
+    /// A failing member (after another was committed) or a failing
+    /// verification drops the group's commits and edits, keeps the user's
+    /// work, and records the failing attr's own error and `group <root>
+    /// failed: <attr> (<phase>)` for the others.
+    #[tokio::test]
+    async fn branch_group_failure_undoes_and_attributes() {
+        use crate::database::UpdateStatus;
+
+        // (steps, attr that failed, its error_log)
+        let cases = [
+            (
+                FakeSteps {
+                    order: vec!["b", "a"],
+                    failing_member: Some("a"),
+                    ..FakeSteps::default()
+                },
+                "a",
+                "a does not build",
+            ),
+            (
+                FakeSteps {
+                    order: vec!["a", "b"],
+                    failing_build: Some("b"),
+                    ..FakeSteps::default()
+                },
+                "b",
+                "b does not build with the group",
+            ),
+        ];
+        for (steps, failed, own_log) in cases {
+            let run = run_branch_group(steps).await;
+
+            assert!(run.commits.is_empty(), "{failed}: {:?}", run.commits);
+            assert_eq!(run.status, "?? notes.txt", "{failed}");
+            assert_eq!(run.files, ["1", "1", "1"], "{failed}");
+            for (result, attr) in &run.outputs {
+                assert!(
+                    matches!(result, Ok(UpdateResult::Failed(_))),
+                    "{failed}: {attr}"
+                );
+                let record = run.db.get_update_record("", attr).await.unwrap().unwrap();
+                assert_eq!(record.status, UpdateStatus::Failed, "{failed}: {attr}");
+                assert_eq!(
+                    record.failed_version.as_deref(),
+                    Some("2"),
+                    "{failed}: {attr}"
+                );
+                assert!(record.in_backoff(chrono::Utc::now()), "{failed}: {attr}");
+
+                let (error_type, log) = failure_log(&run.db, attr).await;
+                if attr == failed {
+                    assert_eq!((error_type.as_str(), log.as_str()), ("BuildError", own_log));
+                } else {
+                    assert_eq!(error_type, "InfrastructureError", "{failed}: {attr}");
+                    let prefix = format!("group b failed: {failed} (build): ");
+                    assert!(log.starts_with(&prefix), "{failed}: {attr}: {log}");
+                    assert!(log.ends_with(own_log), "{failed}: {attr}: {log}");
+                }
+            }
+        }
     }
 }

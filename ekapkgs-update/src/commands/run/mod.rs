@@ -9,6 +9,8 @@ mod types;
 pub(crate) mod updater;
 
 pub(crate) use claude_fix::warn_if_claude_unavailable;
+#[cfg(test)]
+pub(crate) use config::JobExecutor;
 pub use config::{
     RunConfig, UpdaterServiceConfig, UpdaterStats, shutdown_signal,
     warn_if_branch_concurrency_ignored,
