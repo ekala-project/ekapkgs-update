@@ -311,13 +311,9 @@ async fn refresh_repos(
                 .map_err(|e| warn!("[{}] Failed to read index state: {:#}", repo.label(), e))
                 .ok()
                 .flatten();
-            if let Some(remaining) = index_reuse_remaining(
-                state.as_ref(),
-                &config,
-                head.as_deref(),
-                Utc::now(),
-                reuse,
-            ) {
+            if let Some(remaining) =
+                index_reuse_remaining(state.as_ref(), &config, head.as_deref(), Utc::now(), reuse)
+            {
                 info!(
                     "[{}] Reusing the upstream index from {} ago (re-index in {})",
                     repo.label(),
