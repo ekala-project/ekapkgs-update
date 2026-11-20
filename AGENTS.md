@@ -46,7 +46,7 @@ ekapkgs-update/                     # Main CLI crate
     cli.rs                          # Clap definitions, Commands enum, thin dispatch
     init.rs                         # Process bootstrap (increase_fd_limit)
     paths.rs                        # Centralized XDG cache/data paths
-    config.rs                       # TOML config file (LLM, autofix, nix, watch settings); values become CLI defaults
+    config.rs                       # TOML config file (LLM, autofix, nix, watch, github settings); values become CLI defaults
     database/                       # SQLite via sqlx (shared with the web dashboard)
       mod.rs                        #   Database pool, rebuild stats, upstream_index
       types.rs                      #   UpdateStatus, UpdateRecord, PackageInfo, FailedUpdate, UpdateLog
@@ -124,6 +124,7 @@ ekapkgs-update/                     # Main CLI crate
     github/auth.rs                  # Credential choice: App installation tokens else $GITHUB_TOKEN; git env (bot identity + token helper)
     github/webhook.rs               # Pure: X-Hub-Signature-256 verification, push/pull_request payloads → WebhookEvent
     github/, gitlab/, sourcehut/, pypi/  # Platform-specific API clients (GitLab: custom instances, nested groups, fetchFromGitLab `api/v4/projects/<encoded>` URLs; SourceHut: GraphQL `user { repository(name:) }`, needs SOURCEHUT_TOKEN)
+    github/existing_prs.rs          # Pre-PR scan of the repo's open PRs by the PR author (`--pr-author`) for the same package
     pypi/sdist.rs                   # Pure sdist/wheel filename matching (PEP 503 names, wheel tags) used after PyPI version bumps
     rewrite/                        # Nix file rewriting (regex + rnix AST validation)
     hash_discovery.rs               # Extract correct hash from nix-build stderr
@@ -396,7 +397,7 @@ Packages with `passthru.ekapkgs-update.platform-hashes` (a list of system string
 
 ### Config File Values as CLI Defaults (`main.rs`, `cli.rs`)
 
-`main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments). `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
+`main.rs` parses arguments, loads the config file, then re-parses with `cli::apply_config_defaults`, which rewrites clap defaults so the precedence is CLI flag > config file > built-in default for `database`, `file`, `select` and `eval_file` (every subcommand that has those arguments), and `[github] pr_author` (`--pr-author` on `run`/`update`/`watch`). `[nix] builders`/`max_jobs` are applied by `apply_nix_build_args`. Without this, the NixOS module's generated `database`/`file` were silently ignored.
 
 ### GitHub App and Webhooks (`github/app.rs`, `github/auth.rs`, `commands/watch/webhook.rs`)
 
@@ -423,6 +424,8 @@ When `src.url` can't be parsed (mirror:// schemes, custom domains), packages can
 - `up_to_date`
 - `outdated`: newer compatible release, not proposed
 - `proposed`: built and proposed (with PRs requested: only once the PR exists — a push/PR failure is recorded via `record_failed_update` with phase `pr_creation`); becomes `up_to_date` when `current_version` catches up
+
+Before pushing, `create_pr_for_update` scans the repository's open PRs by the PR author (`github::existing_prs::scan`: search API with `author:`, then an exact title match `<attr>: <old> -> <new>`), so PRs from other branches, forks or deployments are found and contributors' PRs never count. The author is `--pr-author` / `[github] pr_author`, else the configured GitHub App's bot (`<slug>[bot]`), else the login of the token's user (`GET /user`, looked up once). An open PR proposing the same or a newer version is reused (no push, no new PR); older ones are listed as `Supersedes #N` in the new PR's body. A failed scan or an unknown author is logged and the PR is opened as before. The standalone `update --create-pr` runs the same scan. Group PRs are not scanned.
 - `failed`
 - `upstream_error`
 

@@ -122,6 +122,12 @@ pub enum Commands {
         /// Remote repository to push branches. E.g. my-fork
         #[arg(long, default_value = "origin")]
         fork: String,
+        /// GitHub login whose open PRs count as ours: before opening a PR,
+        /// the repository's open PRs by this author are scanned for one
+        /// already updating the package. Defaults to `[github] pr_author`,
+        /// then the GitHub App's `<slug>[bot]`, then the token's user.
+        #[arg(long, value_name = "LOGIN")]
+        pr_author: Option<String>,
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
@@ -226,6 +232,12 @@ pub enum Commands {
         /// Only used with --create-pr.
         #[arg(long, default_value = "origin")]
         fork: String,
+        /// GitHub login whose open PRs count as ours: before opening a PR,
+        /// the repository's open PRs by this author are scanned for one
+        /// already updating the package. Defaults to `[github] pr_author`,
+        /// then the GitHub App's `<slug>[bot]`, then the token's user.
+        #[arg(long, value_name = "LOGIN")]
+        pr_author: Option<String>,
         /// Run passthru.tests if available before considering update successful
         #[arg(long)]
         run_passthru_tests: bool,
@@ -612,6 +624,12 @@ pub enum Commands {
         /// Remote repository to push branches
         #[arg(long, default_value = "origin")]
         fork: String,
+        /// GitHub login whose open PRs count as ours: before opening a PR,
+        /// the repository's open PRs by this author are scanned for one
+        /// already updating the package. Defaults to `[github] pr_author`,
+        /// then the GitHub App's `<slug>[bot]`, then the token's user.
+        #[arg(long, value_name = "LOGIN")]
+        pr_author: Option<String>,
         /// Run passthru.tests if available
         #[arg(long)]
         run_passthru_tests: bool,
@@ -768,13 +786,15 @@ fn apply_nix_build_args(builders: Option<String>, max_jobs: Option<usize>, confi
 /// - `database`: config `database` replaces the built-in
 ///   `~/.cache/ekapkgs-update/updates.db`;
 /// - `file`: config `file` replaces the built-in `default.nix`;
-/// - `select` / `eval_file`: config `select` / `eval_file`.
+/// - `select` / `eval_file`: config `select` / `eval_file`;
+/// - `pr_author` (`run` / `update` / `watch`): `[github] pr_author`.
 ///
 /// Without this, settings such as `database` in a NixOS-generated config file
 /// were silently ignored.
 pub fn apply_config_defaults(cmd: clap::Command, config: &ConfigFile) -> clap::Command {
-    let defaults: [(&str, Option<&String>); 4] = [
+    let defaults: [(&str, Option<&String>); 5] = [
         ("database", config.database.as_ref()),
+        ("pr_author", config.github.pr_author.as_ref()),
         ("file", config.file.as_ref()),
         ("select", config.select.as_ref()),
         ("eval_file", config.eval_file.as_ref()),
@@ -857,6 +877,7 @@ impl Commands {
                 database,
                 upstream,
                 fork,
+                pr_author,
                 run_passthru_tests,
                 dry_run,
                 concurrent_updates,
@@ -880,6 +901,7 @@ impl Commands {
                 claude_fix_timeout,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
+                crate::github::existing_prs::set_pr_author(pr_author);
                 commands::run::RunConfig::from_args(
                     file,
                     select,
@@ -920,6 +942,7 @@ impl Commands {
                 create_pr,
                 upstream,
                 fork,
+                pr_author,
                 run_passthru_tests,
                 variant,
                 all_variants,
@@ -935,6 +958,7 @@ impl Commands {
                 max_jobs,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
+                crate::github::existing_prs::set_pr_author(pr_author);
                 commands::update::UpdateParams::from_args(
                     file,
                     attr_path,
@@ -1220,6 +1244,7 @@ impl Commands {
                 webhook_listen,
                 upstream,
                 fork,
+                pr_author,
                 run_passthru_tests,
                 dry_run,
                 concurrent_updates,
@@ -1233,6 +1258,7 @@ impl Commands {
                 skip_cve,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
+                crate::github::existing_prs::set_pr_author(pr_author);
                 let mut watch_config = commands::watch::WatchConfig::from_args(
                     file,
                     select,

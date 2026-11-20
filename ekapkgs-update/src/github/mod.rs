@@ -14,6 +14,8 @@ use serde::Deserialize;
 use crate::vcs_sources::HttpStatusError;
 use tracing::debug;
 
+pub mod existing_prs;
+
 /// User-Agent value sent with every GitHub API request.
 const GITHUB_USER_AGENT: &str = "ekapkgs-update";
 /// Value of the `Accept` header recommended by the GitHub REST API docs.

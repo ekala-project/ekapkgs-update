@@ -54,18 +54,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Re-parse with config-file values as argument defaults, so the precedence
     // is CLI flag > config file > built-in default (e.g. `database`, `file`).
-    let args = if config_file.database.is_some()
-        || config_file.file.is_some()
-        || config_file.select.is_some()
-        || config_file.eval_file.is_some()
-    {
-        parse_args(cli::apply_config_defaults(
-            cli::Args::command().color(choice),
-            &config_file,
-        ))
-    } else {
-        args
-    };
+    let args = parse_args(cli::apply_config_defaults(
+        cli::Args::command().color(choice),
+        &config_file,
+    ));
 
     github::auth::configure(&config_file.github_app)?;
 

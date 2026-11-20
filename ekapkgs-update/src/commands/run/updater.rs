@@ -1315,6 +1315,25 @@ async fn create_pr_for_update(
 ) -> anyhow::Result<(String, i64)> {
     let github_token = crate::github::auth::token_for(&config.owner, &config.repo).await?;
 
+    // Our open PRs for this package from any branch: one proposing this
+    // version or a newer one is reused; older ones are superseded.
+    let existing = crate::github::existing_prs::scan(
+        &config.owner,
+        &config.repo,
+        attr_path,
+        new_version,
+        &github_token,
+    )
+    .await;
+    if let crate::github::existing_prs::ExistingPrs::Covered(pr) = &existing {
+        info!(
+            "{}: open PR #{} ({}) already covers {}, not opening another",
+            attr_path, pr.number, pr.title, new_version
+        );
+        return Ok((pr.html_url.clone(), pr.number));
+    }
+    let superseded = existing.superseded_numbers();
+
     // Create and push branch
     let branch_name = crate::git::create_and_push_branch(
         worktree_path,
@@ -1452,6 +1471,9 @@ async fn create_pr_for_update(
     let (tests, draft) = test_section(test_result);
     body.push_str(&tests);
 
+    body.push_str(&crate::github::existing_prs::supersedes_section(
+        &superseded,
+    ));
     body.push_str("\n\n🤖 Generated with ekapkgs-update");
 
     // A branch pushed to a fork must be addressed as `<fork-owner>:<branch>`.
