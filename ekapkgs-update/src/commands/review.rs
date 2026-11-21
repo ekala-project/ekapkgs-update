@@ -1,6 +1,7 @@
 //! PR review command: checkout, merge base, build changed packages, optionally
 //! run tests and a best-practices agent, then merge if everything passes.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -428,6 +429,8 @@ async fn execute_in_worktree(
     }
 
     // 6. Run passthru.tests for successfully built packages (if --tests)
+    // Packages whose passthru.tests were built (passed or failed).
+    let mut tested: Vec<String> = Vec::new();
     if config.run_tests {
         for attr in &successful_builds {
             let has_tests = has_passthru_tests(&worktree_entry_str, attr)
@@ -440,6 +443,7 @@ async fn execute_in_worktree(
             }
 
             info!("  Testing {}.passthru.tests", attr);
+            tested.push(attr.clone());
             match build_nix_expr(&worktree_entry_str, attr, Some("passthru.tests")).await {
                 Ok((true, _stdout, _stderr)) => {
                     info!("  ✓ {}: tests passed", attr);
@@ -529,8 +533,8 @@ async fn execute_in_worktree(
 
     // Test results
     if config.run_tests {
-        if test_failures.is_empty() && !successful_builds.is_empty() {
-            println!("  ✓ All passthru.tests passed");
+        if let Some(line) = tests_summary(&tested, test_failures.len()) {
+            println!("  {line}");
         }
         for (attr, _) in &test_failures {
             println!("  ✗ {attr}: passthru.tests failed");
@@ -615,8 +619,15 @@ async fn execute_in_worktree(
     if !test_failures.is_empty() {
         let review_body = format_failure_review(&test_failures);
 
-        // Prompt user: post as-is, edit, or skip
-        let final_body = prompt_failure_review(&review_body)?;
+        // Prompt user: post as-is, edit, or skip. Without a terminal (batch
+        // runs, services) there is nobody to ask: post it, like build
+        // failures, instead of reading an empty answer as "skip".
+        let final_body = if std::io::stdin().is_terminal() {
+            prompt_failure_review(&review_body)?
+        } else {
+            info!("stdin is not a terminal; posting the test failure review without prompting");
+            Some(review_body)
+        };
 
         if let Some(body) = final_body {
             info!("Posting REQUEST_CHANGES review on PR #{}", pr.number);
@@ -646,9 +657,13 @@ async fn execute_in_worktree(
         successful_builds.len(),
         successful_builds.join(", "),
         if config.run_tests {
-            "- passthru.tests: passed\n"
+            if tested.is_empty() {
+                "- passthru.tests: none\n".to_owned()
+            } else {
+                format!("- passthru.tests passed: {}\n", tested.join(", "))
+            }
         } else {
-            ""
+            String::new()
         },
         if config.best_practices {
             "- best-practices review: passed\n"
@@ -686,6 +701,16 @@ async fn execute_in_worktree(
     }
 
     Ok(())
+}
+
+/// The tests line of the results and of the approval: `None` when no
+/// package had `passthru.tests`, so a review never claims tests passed that
+/// did not exist.
+fn tests_summary(tested: &[String], failures: usize) -> Option<String> {
+    if tested.is_empty() {
+        return Some("- no passthru.tests to run".to_owned());
+    }
+    (failures == 0).then(|| format!("✓ passthru.tests passed: {}", tested.join(", ")))
 }
 
 /// Build a review body for build failures (last 20 lines per package).
@@ -1188,6 +1213,22 @@ async fn run_git_checked(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tests_summary() {
+        let foo = ["foo".to_owned()];
+        for (tested, failures, expected) in [
+            (&[][..], 0, Some("- no passthru.tests to run")),
+            (&foo[..], 0, Some("✓ passthru.tests passed: foo")),
+            (&foo[..], 1, None),
+        ] {
+            assert_eq!(
+                tests_summary(tested, failures).as_deref(),
+                expected,
+                "{tested:?} {failures}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_repo_arg_owner_repo() {

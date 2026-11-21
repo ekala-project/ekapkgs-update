@@ -463,7 +463,7 @@ ekapkgs-update review <PR_NUMBER> --repo owner/repo [--tests] [--best-practices]
 4. Determine affected attr paths from changed `.nix` files (heuristic: `pkgs/by-name/<shard>/<pname>/` or parent dir name, with dynamic scope discovery for scoped packages — e.g. `postgresql/pkgs/<name>/` auto-resolves to `postgresqlPackages.<name>` via `nix-instantiate` eval)
 5. Validate each candidate attr path exists in the entry point
 6. Build each package with `nix-build`
-7. *(if `--tests`)* Build `passthru.tests` for each successfully built package
+7. *(if `--tests`)* Build `passthru.tests` for each successfully built package. Results and the approval only say tests passed when some ran (`tests_summary`). Test failures prompt post/edit/skip on a terminal; without one (batch runs) the REQUEST_CHANGES review is posted
 8. *(if `--best-practices`)* Invoke an agent CLI (default: `claude`) with a structured prompt checking for common Nix packaging issues (build input placement, metadata, deprecated patterns, hash format, etc.)
 9. If all checks pass: post APPROVE review and merge the PR
 10. If any checks fail: post REQUEST_CHANGES review with failure details and exit non-zero
