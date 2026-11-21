@@ -46,11 +46,16 @@ pub async fn build_nix_expr_with(
 
     debug!("Building {}", full_attr);
 
+    // `--no-out-link`: no caller reads the out-link, and a `result` symlink
+    // in the process's cwd is shared (and overwritten) by concurrent builds.
+    // `kill_on_drop`: a cancelled or timed-out build stops nix-build.
     let mut cmd = Command::new("nix-build");
     cmd.arg(eval_entry_point)
         .arg("-A")
         .arg(&full_attr)
-        .args(args);
+        .arg("--no-out-link")
+        .args(args)
+        .kill_on_drop(true);
     for arg in get_extra_nix_build_args() {
         cmd.arg(arg);
     }

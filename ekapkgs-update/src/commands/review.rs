@@ -35,6 +35,9 @@ pub struct ReviewConfig {
     pub merge_method: String,
     pub no_merge: bool,
     pub interactive: bool,
+    /// Limit for each `nix-build` (package or its `passthru.tests`); `None`
+    /// waits indefinitely.
+    pub build_timeout: Option<std::time::Duration>,
 }
 
 /// Parse a `--repo` value into owner/repo.
@@ -401,10 +404,17 @@ async fn execute_in_worktree(
     let mut test_failures: Vec<(String, String)> = Vec::new();
     let mut successful_builds: Vec<String> = Vec::new();
     let mut built_store_paths: Vec<String> = Vec::new();
+    // Builds that hit --build-timeout: not the PR's fault (usually a hung
+    // remote builder), so they are never reported as a failed review.
+    let mut timed_out: Vec<String> = Vec::new();
 
     for attr in &attr_paths {
         info!("Building {}", attr);
-        match build_nix_expr(&worktree_entry_str, attr, None).await {
+        match build_with_timeout(&worktree_entry_str, attr, None, config.build_timeout).await {
+            Err(BuildError::TimedOut(limit)) => {
+                warn!("  ✗ {} build timed out after {}", attr, format_limit(limit));
+                timed_out.push(attr.clone());
+            },
             Ok((true, stdout, _stderr)) => {
                 info!("  ✓ {} built successfully", attr);
                 successful_builds.push(attr.clone());
@@ -420,7 +430,7 @@ async fn execute_in_worktree(
                 warn!("  ✗ {} build failed", attr);
                 build_failures.push((attr.clone(), stderr));
             },
-            Err(e) => {
+            Err(BuildError::Failed(e)) => {
                 warn!("  ✗ {} build error: {}", attr, e);
                 build_failures.push((attr.clone(), format!("{e:#}")));
             },
@@ -440,7 +450,22 @@ async fn execute_in_worktree(
             }
 
             info!("  Testing {}.passthru.tests", attr);
-            match build_nix_expr(&worktree_entry_str, attr, Some("passthru.tests")).await {
+            match build_with_timeout(
+                &worktree_entry_str,
+                attr,
+                Some("passthru.tests"),
+                config.build_timeout,
+            )
+            .await
+            {
+                Err(BuildError::TimedOut(limit)) => {
+                    warn!(
+                        "  ✗ {}: tests timed out after {}",
+                        attr,
+                        format_limit(limit)
+                    );
+                    timed_out.push(format!("{attr}.passthru.tests"));
+                },
                 Ok((true, _stdout, _stderr)) => {
                     info!("  ✓ {}: tests passed", attr);
                 },
@@ -448,7 +473,7 @@ async fn execute_in_worktree(
                     warn!("  ✗ {}: tests failed", attr);
                     test_failures.push((attr.clone(), stderr));
                 },
-                Err(e) => {
+                Err(BuildError::Failed(e)) => {
                     warn!("  ✗ {}: test error: {}", attr, e);
                     test_failures.push((attr.clone(), format!("{e:#}")));
                 },
@@ -564,6 +589,19 @@ async fn execute_in_worktree(
             pr.number,
         )
         .await?;
+    }
+
+    if !timed_out.is_empty() {
+        for attr in &timed_out {
+            println!("  ✗ {attr}: timed out");
+        }
+        anyhow::bail!(
+            "Review incomplete: {} build(s) hit --build-timeout ({}): {}. No review was posted; \
+             check the builders and re-run",
+            timed_out.len(),
+            config.build_timeout.map_or_else(String::new, format_limit),
+            timed_out.join(", ")
+        );
     }
 
     // 9. Post review and merge (or request changes)
@@ -686,6 +724,42 @@ async fn execute_in_worktree(
     }
 
     Ok(())
+}
+
+/// Why a review build produced no result.
+enum BuildError {
+    /// The build hit the configured limit (nix-build is killed).
+    TimedOut(std::time::Duration),
+    /// nix-build could not be run.
+    Failed(anyhow::Error),
+}
+
+/// [`build_nix_expr`] limited to `limit`.
+async fn build_with_timeout(
+    entry_point: &str,
+    attr: &str,
+    suffix: Option<&str>,
+    limit: Option<std::time::Duration>,
+) -> Result<(bool, String, String), BuildError> {
+    let build = build_nix_expr(entry_point, attr, suffix);
+    let result = match limit {
+        Some(limit) => tokio::time::timeout(limit, build)
+            .await
+            .map_err(|_| BuildError::TimedOut(limit))?,
+        None => build.await,
+    };
+    result.map_err(BuildError::Failed)
+}
+
+/// `90` minutes → `"90m"`.
+fn format_limit(limit: std::time::Duration) -> String {
+    format!("{}m", limit.as_secs() / 60)
+}
+
+/// The `--build-timeout` value (minutes, `0` = no limit) as a duration.
+#[must_use]
+pub fn build_timeout_from_minutes(minutes: u64) -> Option<std::time::Duration> {
+    (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
 }
 
 /// Build a review body for build failures (last 20 lines per package).
@@ -1188,6 +1262,29 @@ async fn run_git_checked(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_timeout_from_minutes() {
+        assert_eq!(build_timeout_from_minutes(0), None);
+        assert_eq!(
+            build_timeout_from_minutes(90),
+            Some(std::time::Duration::from_secs(5400))
+        );
+        assert_eq!(format_limit(std::time::Duration::from_secs(5400)), "90m");
+    }
+
+    #[tokio::test]
+    async fn test_build_with_timeout_times_out() {
+        // A zero limit expires before nix-build can finish.
+        let result = build_with_timeout(
+            "/nonexistent.nix",
+            "x",
+            None,
+            Some(std::time::Duration::ZERO),
+        )
+        .await;
+        assert!(matches!(result, Err(BuildError::TimedOut(_))));
+    }
 
     #[test]
     fn test_parse_repo_arg_owner_repo() {
