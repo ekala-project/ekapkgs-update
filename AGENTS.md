@@ -479,7 +479,7 @@ ekapkgs-update review <PR_NUMBER> --repo owner/repo [--tests] [--best-practices]
 3. Checkout the PR branch, merge latest base branch (must succeed — merge conflicts fail the review)
 4. Determine affected attr paths from changed `.nix` files (heuristic: `pkgs/by-name/<shard>/<pname>/` or parent dir name, with dynamic scope discovery for scoped packages — e.g. `postgresql/pkgs/<name>/` auto-resolves to `postgresqlPackages.<name>` via `nix-instantiate` eval)
 5. Validate each candidate attr path exists in the entry point
-6. Build each package with `nix-build`
+6. Build each package with `nix-build` (`--no-out-link`, like every `build_nix_expr` build). Each build, and each `passthru.tests` build, is limited by `--build-timeout` (minutes, default 360, `0` = none; nix-build is killed). A timeout is not the PR's fault, so no review is posted and the command fails
 7. *(if `--tests`)* Build `passthru.tests` for each successfully built package
 8. *(if `--best-practices`)* Invoke an agent CLI (default: `claude`) with a structured prompt checking for common Nix packaging issues (build input placement, metadata, deprecated patterns, hash format, etc.)
 9. If all checks pass: post APPROVE review and merge the PR

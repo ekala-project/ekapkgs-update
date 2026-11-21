@@ -585,6 +585,11 @@ pub enum Commands {
         /// Maximum number of local nix build jobs (passed as --max-jobs to nix-build)
         #[arg(long)]
         max_jobs: Option<usize>,
+        /// Give up on a package's (or its passthru.tests') build after this
+        /// many minutes and post no review (0 = no limit). Guards against
+        /// hung remote builders.
+        #[arg(long, default_value = "360")]
+        build_timeout: u64,
     },
     /// Lint a Nix package expression for whitespace formatting compliance.
     ///
@@ -1301,6 +1306,7 @@ impl Commands {
                 interactive,
                 builders,
                 max_jobs,
+                build_timeout,
             } => {
                 apply_nix_build_args(builders, max_jobs, &config_file);
 
@@ -1317,6 +1323,7 @@ impl Commands {
                     merge_method,
                     no_merge,
                     interactive,
+                    build_timeout: commands::review::build_timeout_from_minutes(build_timeout),
                 })
                 .await
             },
