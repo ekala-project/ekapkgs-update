@@ -246,13 +246,73 @@ pub async fn execute(config: ReviewConfig) -> anyhow::Result<()> {
         worktree_path: worktree_path.clone(),
     };
 
-    let result = execute_in_worktree(&config, &token, &pr, &changed_files, &worktree_path).await;
+    // A signal must not skip the cleanup below and leave the worktree,
+    // branch and refs behind. In --interactive mode Ctrl-C belongs to the
+    // review shell, so only SIGTERM stops the review there.
+    let result = tokio::select! {
+        result = execute_in_worktree(&config, &token, &pr, &changed_files, &worktree_path) => result,
+        signal = shutdown_signal(!config.interactive) => {
+            warn!("Received {signal}, cleaning up and stopping the review");
+            Err(anyhow::anyhow!("review of PR #{} interrupted by {signal}", config.pr_number))
+        },
+    };
 
     // Clean up worktree regardless of outcome
     drop(cleanup_guard);
     cleanup_worktree(&repo_dir, &worktree_path).await.ok();
+    delete_review_refs(&repo_dir, config.pr_number).await;
 
     result
+}
+
+/// The local branch a review checks the PR out on. Never the PR's own branch
+/// name: that may be a branch of the user's (even the one checked out).
+fn review_branch(pr_number: u64) -> String {
+    format!("review/pr-{pr_number}")
+}
+
+/// Private refs the PR head and base are fetched into. Concurrent reviews
+/// would race on a shared ref like `refs/remotes/origin/master` ("cannot lock
+/// ref"), and `FETCH_HEAD` is overwritten by every fetch.
+fn review_refs(pr_number: u64) -> (String, String) {
+    let prefix = format!("refs/ekapkgs-review/pr-{pr_number}");
+    (format!("{prefix}/head"), format!("{prefix}/base"))
+}
+
+/// Delete the review's branch and private refs (best effort; the worktree
+/// must be removed first, or the branch is still checked out).
+async fn delete_review_refs(repo_dir: &Path, pr_number: u64) {
+    let (head_ref, base_ref) = review_refs(pr_number);
+    let branch = format!("refs/heads/{}", review_branch(pr_number));
+    for git_ref in [head_ref, base_ref, branch] {
+        if let Err(e) = run_git_checked(repo_dir, &["update-ref", "-d", &git_ref]).await {
+            debug!("Could not delete {git_ref}: {e:#}");
+        }
+    }
+}
+
+/// Resolves on SIGTERM, or SIGINT when `sigint` is set, with the signal's
+/// name.
+async fn shutdown_signal(sigint: bool) -> &'static str {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(term) => term,
+        Err(e) => {
+            warn!("Cannot listen for SIGTERM: {e}");
+            return std::future::pending().await;
+        },
+    };
+    let interrupt = async {
+        if sigint && tokio::signal::ctrl_c().await.is_ok() {
+            return;
+        }
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        () = interrupt => "SIGINT",
+    }
 }
 
 /// RAII guard that attempts worktree cleanup on drop (best-effort).
@@ -288,37 +348,42 @@ async fn execute_in_worktree(
 ) -> anyhow::Result<()> {
     let RepoCoords { owner, repo } = &config.repo;
 
-    // Fetch the PR via GitHub's pull ref (works for forks too)
+    // Fetch the PR via GitHub's pull ref (works for forks too) and the base
+    // branch in one go, into refs private to this review.
     let pr_ref = format!("refs/pull/{}/head", config.pr_number);
+    let (head_ref, base_ref) = review_refs(config.pr_number);
     info!(
-        "Fetching PR #{} via {} (branch: '{}')",
-        config.pr_number, pr_ref, pr.head.ref_name
+        "Fetching PR #{} via {} (branch: '{}') and base '{}'",
+        config.pr_number, pr_ref, pr.head.ref_name, pr.base.ref_name
     );
-    run_git_checked(worktree_path, &["fetch", "origin", &pr_ref]).await?;
-
-    // Delete stale local branch if it exists from a previous run
-    let _ = run_git_checked(worktree_path, &["branch", "-D", &pr.head.ref_name]).await;
-
-    // Checkout into a local branch named after the PR branch
     run_git_checked(
         worktree_path,
-        &["checkout", "-b", &pr.head.ref_name, "FETCH_HEAD"],
+        &[
+            "fetch",
+            "--no-write-fetch-head",
+            "origin",
+            &format!("+{pr_ref}:{head_ref}"),
+            &format!("+refs/heads/{}:{base_ref}", pr.base.ref_name),
+        ],
     )
     .await?;
+
+    // Check out on a review branch; the PR's branch name may be a local
+    // branch of the user's, which must not be touched.
+    let branch = review_branch(config.pr_number);
+    run_git_checked(worktree_path, &["checkout", "-B", &branch, &head_ref]).await?;
 
     // Merge the latest base branch (must succeed)
     info!(
         "Merging latest base branch '{}' into PR branch",
         pr.base.ref_name
     );
-    run_git_checked(worktree_path, &["fetch", "origin", &pr.base.ref_name]).await?;
-
     let merge_output = Command::new("git")
         .args([
             "-C",
             &worktree_path.to_string_lossy(),
             "merge",
-            &format!("origin/{}", pr.base.ref_name),
+            &base_ref,
             "--no-edit",
         ])
         .output()
@@ -326,6 +391,8 @@ async fn execute_in_worktree(
         .context("run git merge")?;
 
     if !merge_output.status.success() {
+        // Conflicts are reported on stdout, other errors on stderr.
+        let stdout = String::from_utf8_lossy(&merge_output.stdout);
         let stderr = String::from_utf8_lossy(&merge_output.stderr);
         // Abort the failed merge so the worktree is clean for cleanup
         let _ = Command::new("git")
@@ -334,8 +401,10 @@ async fn execute_in_worktree(
             .await;
         anyhow::bail!(
             "Failed to merge base branch '{}' into PR branch — merge conflicts must be \
-             resolved before review.\n{stderr}",
-            pr.base.ref_name
+             resolved before review.\n{}{}",
+            pr.base.ref_name,
+            stdout.trim_end(),
+            stderr.trim_end()
         );
     }
     info!("Base branch merged successfully");
@@ -1188,6 +1257,18 @@ async fn run_git_checked(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_review_branch_and_refs_are_private() {
+        assert_eq!(review_branch(295), "review/pr-295");
+        assert_eq!(
+            review_refs(295),
+            (
+                "refs/ekapkgs-review/pr-295/head".to_owned(),
+                "refs/ekapkgs-review/pr-295/base".to_owned()
+            )
+        );
+    }
 
     #[test]
     fn test_parse_repo_arg_owner_repo() {
