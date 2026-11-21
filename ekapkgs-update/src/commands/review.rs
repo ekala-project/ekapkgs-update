@@ -225,6 +225,18 @@ pub async fn execute(config: ReviewConfig) -> anyhow::Result<()> {
         anyhow::bail!("PR #{} is not open (state: {})", config.pr_number, pr.state);
     }
 
+    let own_pr = match pr.user.as_ref() {
+        Some(user) => github::existing_prs::is_token_identity(&user.login, &token).await,
+        None => false,
+    };
+    if own_pr {
+        info!(
+            "PR #{} was opened by the reviewing identity; GitHub does not allow approving or \
+             requesting changes on your own PR, so the review is posted as a comment",
+            config.pr_number
+        );
+    }
+
     info!(
         "PR #{}: \"{}\" ({} → {})",
         pr.number, pr.title, pr.head.ref_name, pr.base.ref_name
@@ -246,7 +258,8 @@ pub async fn execute(config: ReviewConfig) -> anyhow::Result<()> {
         worktree_path: worktree_path.clone(),
     };
 
-    let result = execute_in_worktree(&config, &token, &pr, &changed_files, &worktree_path).await;
+    let result =
+        execute_in_worktree(&config, &token, &pr, own_pr, &changed_files, &worktree_path).await;
 
     // Clean up worktree regardless of outcome
     drop(cleanup_guard);
@@ -283,6 +296,7 @@ async fn execute_in_worktree(
     config: &ReviewConfig,
     token: &str,
     pr: &github::GithubPullRequestDetail,
+    own_pr: bool,
     changed_files: &[github::GithubPrFile],
     worktree_path: &Path,
 ) -> anyhow::Result<()> {
@@ -571,13 +585,17 @@ async fn execute_in_worktree(
         // Build failures are posted immediately as REQUEST_CHANGES — no prompt
         let review_body = format_build_failure_review(&build_failures);
 
-        info!("Posting REQUEST_CHANGES review on PR #{}", pr.number);
+        info!(
+            "Posting {} review on PR #{}",
+            review_event("REQUEST_CHANGES", own_pr),
+            pr.number
+        );
         github::create_pull_request_review(
             owner,
             repo,
             config.pr_number,
             &review_body,
-            "REQUEST_CHANGES",
+            review_event("REQUEST_CHANGES", own_pr),
             token,
         )
         .await?;
@@ -600,7 +618,7 @@ async fn execute_in_worktree(
             repo,
             config.pr_number,
             &review_body,
-            "REQUEST_CHANGES",
+            review_event("REQUEST_CHANGES", own_pr),
             &inline_comments,
             token,
         )
@@ -619,13 +637,17 @@ async fn execute_in_worktree(
         let final_body = prompt_failure_review(&review_body)?;
 
         if let Some(body) = final_body {
-            info!("Posting REQUEST_CHANGES review on PR #{}", pr.number);
+            info!(
+                "Posting {} review on PR #{}",
+                review_event("REQUEST_CHANGES", own_pr),
+                pr.number
+            );
             github::create_pull_request_review(
                 owner,
                 repo,
                 config.pr_number,
                 &body,
-                "REQUEST_CHANGES",
+                review_event("REQUEST_CHANGES", own_pr),
                 token,
             )
             .await?;
@@ -657,13 +679,17 @@ async fn execute_in_worktree(
         },
     );
 
-    info!("Posting APPROVE review on PR #{}", pr.number);
+    info!(
+        "Posting {} review on PR #{}",
+        review_event("APPROVE", own_pr),
+        pr.number
+    );
     github::create_pull_request_review(
         owner,
         repo,
         config.pr_number,
         &approve_body,
-        "APPROVE",
+        review_event("APPROVE", own_pr),
         token,
     )
     .await?;
@@ -686,6 +712,13 @@ async fn execute_in_worktree(
     }
 
     Ok(())
+}
+
+/// The review event to post. GitHub rejects `APPROVE` and `REQUEST_CHANGES`
+/// on your own PR (422), so those become `COMMENT` there; the outcome (merge
+/// or failure) is unchanged.
+fn review_event(event: &'static str, own_pr: bool) -> &'static str {
+    if own_pr { "COMMENT" } else { event }
 }
 
 /// Build a review body for build failures (last 20 lines per package).
@@ -1188,6 +1221,22 @@ async fn run_git_checked(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_review_event_own_pr_is_comment() {
+        for (event, own_pr, expected) in [
+            ("APPROVE", false, "APPROVE"),
+            ("REQUEST_CHANGES", false, "REQUEST_CHANGES"),
+            ("APPROVE", true, "COMMENT"),
+            ("REQUEST_CHANGES", true, "COMMENT"),
+        ] {
+            assert_eq!(
+                review_event(event, own_pr),
+                expected,
+                "{event} own={own_pr}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_repo_arg_owner_repo() {

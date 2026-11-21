@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::Context;
 use reqwest::Client;
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::github_request_builder;
 use crate::vcs_sources::compare_version_components;
@@ -67,6 +67,25 @@ pub async fn pr_author(token: &str) -> Option<String> {
         *guard = Some(login.clone());
     }
     login
+}
+
+/// Whether `login` (a PR's author) is the identity `token` acts as: the
+/// GitHub App's bot when an app is configured (its installation tokens are
+/// what [`super::auth::token_for`] returns), else the token's user. `false`
+/// when the identity cannot be determined.
+pub async fn is_token_identity(login: &str, token: &str) -> bool {
+    let identity = if let Some(app) = super::auth::app() {
+        app.bot_identity().await.map(|identity| identity.name)
+    } else {
+        token_login(token).await
+    };
+    match identity {
+        Ok(identity) => is_author(login, &identity),
+        Err(e) => {
+            debug!("Could not determine the GitHub identity of the token: {e:#}");
+            false
+        },
+    }
 }
 
 #[derive(Debug, Deserialize)]
