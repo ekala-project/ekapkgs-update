@@ -95,6 +95,15 @@ pub struct GithubPullRequestDetail {
     pub head: GithubPrRef,
     pub base: GithubPrRef,
     pub mergeable: Option<bool>,
+    /// The PR's author (`None` for a deleted account).
+    #[serde(default)]
+    pub user: Option<GithubPrUser>,
+}
+
+/// The account that opened a PR.
+#[derive(Debug, Deserialize)]
+pub struct GithubPrUser {
+    pub login: String,
 }
 
 /// A git ref (head or base) on a PR.

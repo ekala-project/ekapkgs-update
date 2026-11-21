@@ -468,6 +468,8 @@ ekapkgs-update review <PR_NUMBER> --repo owner/repo [--tests] [--best-practices]
 9. If all checks pass: post APPROVE review and merge the PR
 10. If any checks fail: post REQUEST_CHANGES review with failure details and exit non-zero
 
+GitHub rejects APPROVE and REQUEST_CHANGES on your own PR (422). When the PR's author is the reviewing identity (`existing_prs::is_token_identity`: the GitHub App's bot, else the `GITHUB_TOKEN` user), both are posted as COMMENT (`review_event`), and the merge or failure goes ahead as usual.
+
 **Agent review:** The `--best-practices` flag spawns a Claude Code (or other agent specified via `--best-practices-agent`) process with `--print --dangerously-skip-permissions`. The agent must end its output with `VERDICT: PASS` or `VERDICT: FAIL` followed by bullet-pointed issues.
 
 **`--repo` format:** Accepts `owner/repo` (assumes GitHub) or full URL `github.com/owner/repo`. Requires `GITHUB_TOKEN` environment variable.
